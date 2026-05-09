@@ -1,0 +1,25 @@
+[package]
+name = "eventuary-memory"
+description = "In-memory event backend for eventuary"
+keywords = ["events", "in-memory", "testing"]
+categories = ["asynchronous"]
+readme = "README.md"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eventuary = { workspace = true }
+futures.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true

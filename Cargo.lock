@@ -123,6 +123,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eventuary-memory"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "eventuary",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
