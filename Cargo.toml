@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/eventuary",
     "crates/eventuary-memory",
+    "crates/eventuary-sqlite",
 ]
 
 [workspace.package]

@@ -1,0 +1,33 @@
+[package]
+name = "eventuary-sqlite"
+description = "SQLite event backend for eventuary"
+keywords = ["events", "sqlite", "event-sourcing"]
+categories = ["asynchronous", "database"]
+readme = "README.md"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eventuary = { workspace = true }
+chrono.workspace = true
+either.workspace = true
+futures.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
