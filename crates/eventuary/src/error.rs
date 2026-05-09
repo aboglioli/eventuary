@@ -1,0 +1,54 @@
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("invalid topic: {0}")]
+    InvalidTopic(String),
+
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(String),
+
+    #[error("invalid organization: {0}")]
+    InvalidOrganization(String),
+
+    #[error("invalid metadata key: {0}")]
+    InvalidMetadataKey(String),
+
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
+
+    #[error("invalid event key: {0}")]
+    InvalidEventKey(String),
+
+    #[error("invalid consumer group id: {0}")]
+    InvalidConsumerGroupId(String),
+
+    #[error("invalid start position: {0}")]
+    InvalidStartFrom(String),
+
+    #[error("serialization error: {0}")]
+    Serialization(String),
+
+    #[error("store error: {0}")]
+    Store(String),
+
+    #[error("timeout: {0}")]
+    Timeout(String),
+
+    #[error("config error: {0}")]
+    Config(String),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_variant_is_constructible() {
+        let err = Error::Config("missing url".to_owned());
+        assert!(matches!(err, Error::Config(_)));
+        assert_eq!(err.to_string(), "config error: missing url");
+    }
+}

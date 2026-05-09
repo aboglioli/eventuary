@@ -1,0 +1,33 @@
+[package]
+name = "eventuary"
+description = "Event toolkit for logs, queues, streams, routing, replay, and acknowledgements"
+keywords = ["events", "event-sourcing", "streaming", "queue", "async"]
+categories = ["asynchronous", "database", "development-tools"]
+readme = "README.md"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+either.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
