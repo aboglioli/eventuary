@@ -26,6 +26,7 @@ tracing.workspace = true
 testcontainers = { workspace = true, optional = true }
 
 [dev-dependencies]
+eventuary-conformance = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 testcontainers = { workspace = true }
 
