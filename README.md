@@ -139,8 +139,9 @@ cargo test -p eventuary-sqs -- --test-threads=1
 cargo test -p eventuary-kafka -- --test-threads=1
 ```
 
-The Kafka backend requires `cmake`, `libssl-dev`, and `pkg-config` to build
-`librdkafka` (via the `cmake-build` rdkafka feature).
+The Kafka backend requires `cmake`, `libssl-dev`, `libcurl4-openssl-dev`,
+`libsasl2-dev`, `zlib1g-dev`, and `pkg-config` to build `librdkafka`
+(via the `cmake-build` rdkafka feature).
 
 ## Development
 
@@ -152,12 +153,43 @@ cargo test -p eventuary-memory     # memory tests
 cargo test -p eventuary-sqlite     # sqlite tests, no containers
 ```
 
-## Publishing
+## Releasing
 
-A `release: published` GitHub Actions workflow at
-`.github/workflows/publish.yml` publishes all six crates in order. It is not
-triggered automatically — a maintainer creates a release manually after
-verifying all backends still pass on the release branch.
+Publishing to crates.io is gated on a release event — pushes to `main` never
+publish. The workflow at `.github/workflows/publish.yml` runs only when:
+
+1. A GitHub Release is published (`release: published`), or
+2. A `vX.Y.Z` (or `vX.Y.Z-prerelease`) tag is pushed, or
+3. A maintainer triggers `workflow_dispatch` (with optional dry-run input).
+
+The workflow verifies the tag matches `workspace.package.version`, runs fmt /
+clippy / unit tests, executes `cargo publish --dry-run` for every crate, then
+publishes the six crates in dependency order with a 60-second pause after the
+core crate to let the index settle.
+
+### Release procedure
+
+```bash
+# 1. Bump version in root Cargo.toml under [workspace.package]
+#    (all six crates inherit via workspace.package.version)
+
+# 2. Commit and push
+git commit -am "chore: release v0.1.0-alpha.1"
+git push origin main
+
+# 3. Tag and push the tag (or create a Release in the GitHub UI,
+#    which creates the tag for you)
+git tag v0.1.0-alpha.1
+git push origin v0.1.0-alpha.1
+
+# 4. The Publish workflow runs automatically.
+```
+
+A `CARGO_REGISTRY_TOKEN` repository secret must be configured. Consider
+migrating to crates.io [trusted publishing] once stabilized for the registry,
+which removes the long-lived token.
+
+[trusted publishing]: https://crates.io/docs/trusted-publishing
 
 ## License
 

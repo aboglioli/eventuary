@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   RDKAFKA_DEPS: cmake libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev pkg-config
 
