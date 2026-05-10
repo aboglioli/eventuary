@@ -1,3 +1,12 @@
+//! PostgreSQL event log backend for [eventuary](https://crates.io/crates/eventuary).
+//!
+//! `BIGSERIAL` sequence on an append-only events table, `(organization, sequence)`,
+//! `(organization, topic, sequence)` and `(organization, namespace, sequence)`
+//! indexes. Consumer offsets keyed by `(organization, consumer_group_id, stream)`.
+//!
+//! Polling reader (no LISTEN/NOTIFY in this version). ack advances the
+//! checkpoint with a backwards-move guard, nack leaves it unchanged.
+
 mod database;
 mod reader;
 mod writer;
