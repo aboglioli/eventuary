@@ -5,7 +5,7 @@ use futures::StreamExt;
 use tempfile::NamedTempFile;
 use tokio::time::timeout;
 
-use eventuary::io::{Reader, Writer};
+use eventuary::io::Writer;
 use eventuary::{ConsumerGroupId, Event, Namespace, OrganizationId, Payload, StartFrom, Topic};
 
 use eventuary_sqlite::{SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig};

@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use eventuary::io::acker::NoopAcker;
 use eventuary::io::{Message, Reader};
-use eventuary::{Event, Result};
+use eventuary::{Event, EventSubscription, Result};
 
 pub struct InmemReader {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
@@ -23,25 +23,45 @@ impl InmemReader {
 
 pub struct InmemStream {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
+    subscription: EventSubscription,
+    delivered: usize,
 }
 
 impl Stream for InmemStream {
     type Item = Result<Message<NoopAcker>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut rx = self.rx.try_lock().expect("inmem stream lock");
-        rx.poll_recv(cx)
-            .map(|opt| opt.map(|event| Ok(Message::new(event, NoopAcker))))
+        let this = self.get_mut();
+        if let Some(limit) = this.subscription.limit
+            && this.delivered >= limit
+        {
+            return Poll::Ready(None);
+        }
+        let mut rx = this.rx.try_lock().expect("inmem stream lock");
+        loop {
+            match rx.poll_recv(cx) {
+                Poll::Ready(Some(event)) if this.subscription.matches(&event) => {
+                    this.delivered += 1;
+                    return Poll::Ready(Some(Ok(Message::new(event, NoopAcker))));
+                }
+                Poll::Ready(Some(_)) => continue,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }
 
 impl Reader for InmemReader {
+    type Subscription = EventSubscription;
     type Acker = NoopAcker;
     type Stream = InmemStream;
 
-    async fn read(&self) -> Result<Self::Stream> {
+    async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         Ok(InmemStream {
             rx: Arc::clone(&self.rx),
+            subscription,
+            delivered: 0,
         })
     }
 }
@@ -49,9 +69,13 @@ impl Reader for InmemReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary::Payload;
     use eventuary::io::{BoxReader, ReaderExt};
+    use eventuary::{OrganizationId, Payload};
     use futures::StreamExt;
+
+    fn subscription() -> EventSubscription {
+        EventSubscription::new(OrganizationId::new("org").unwrap())
+    }
 
     fn ev() -> Event {
         Event::create(
@@ -69,7 +93,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let reader = InmemReader::new(rx);
 
-        let mut stream = reader.read().await.unwrap();
+        let mut stream = reader.read(subscription()).await.unwrap();
         tx.send(ev()).await.unwrap();
 
         let msg = stream.next().await.unwrap().unwrap();
@@ -82,7 +106,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(2);
         let reader = InmemReader::new(rx);
 
-        let mut stream = reader.read().await.unwrap();
+        let mut stream = reader.read(subscription()).await.unwrap();
 
         tokio::spawn(async move {
             tx.send(ev()).await.unwrap();
@@ -103,7 +127,7 @@ mod tests {
 
         tx.send(ev()).await.unwrap();
 
-        let mut stream = reader.read().await.unwrap();
+        let mut stream = reader.read(subscription()).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         assert_eq!(msg.event().topic().as_str(), "thing.happened");
         msg.ack().await.unwrap();

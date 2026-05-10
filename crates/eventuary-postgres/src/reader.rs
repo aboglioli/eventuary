@@ -12,7 +12,8 @@ use tokio::sync::mpsc;
 use eventuary::io::acker::{NoopAcker, OnceAcker};
 use eventuary::io::{Acker, Message, Reader};
 use eventuary::{
-    ConsumerGroupId, Error, Namespace, OrganizationId, Result, SerializedEvent, StartFrom, Topic,
+    ConsumerGroupId, Error, EventSubscription, Namespace, OrganizationId, Result, SerializedEvent,
+    StartFrom, Topic,
 };
 
 const DEFAULT_STREAM: &str = "default";
@@ -112,15 +113,47 @@ impl PgReader {
     pub fn new(pool: PgPool, config: PgReaderConfig) -> Self {
         Self { pool, config }
     }
+
+    pub async fn read(&self) -> Result<PgStream> {
+        eventuary::io::Reader::read(self, subscription_from_config(&self.config)).await
+    }
+}
+
+fn subscription_from_config(config: &PgReaderConfig) -> EventSubscription {
+    let mut subscription = EventSubscription::new(config.organization.clone());
+    subscription.name = Some(config.stream.clone());
+    subscription.consumer_group_id = config.consumer_group_id.clone();
+    if !config.topics.is_empty() {
+        subscription.topics = Some(config.topics.clone());
+    }
+    subscription.namespace_prefix = config.namespace.clone();
+    subscription.start_from = config.start_from;
+    subscription
+}
+
+fn apply_subscription(config: &mut PgReaderConfig, subscription: &EventSubscription) {
+    config.organization = subscription.organization.clone();
+    config.namespace = subscription.namespace_prefix.clone();
+    config.topics = subscription.topics.clone().unwrap_or_default();
+    config.consumer_group_id = subscription
+        .consumer_group_id
+        .clone()
+        .or_else(|| config.consumer_group_id.clone());
+    if let Some(name) = subscription.name.as_ref() {
+        config.stream = name.clone();
+    }
+    config.start_from = subscription.start_from;
 }
 
 impl Reader for PgReader {
+    type Subscription = EventSubscription;
     type Acker = PgAckerVariant;
     type Stream = PgStream;
 
-    async fn read(&self) -> Result<Self::Stream> {
+    async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let pool = self.pool.clone();
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        apply_subscription(&mut config, &subscription);
         let (tx, rx) = mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
@@ -133,6 +166,7 @@ impl Reader for PgReader {
                     }
                 };
 
+            let mut delivered = 0usize;
             loop {
                 let take = config.batch_size.clamp(1, 1000);
                 let batch = match fetch_batch(&pool, &config, after_seq, take, lower_bound_ts).await
@@ -163,6 +197,15 @@ impl Reader for PgReader {
                             return;
                         }
                     };
+                    after_seq = sequence;
+                    if !subscription.matches(&event) {
+                        continue;
+                    }
+                    if let Some(limit) = subscription.limit
+                        && delivered >= limit
+                    {
+                        return;
+                    }
                     let acker: PgAckerVariant = match config.consumer_group_id.as_ref() {
                         Some(group) => Either::Right(OnceAcker::new(PgAcker {
                             pool: pool.clone(),
@@ -176,7 +219,7 @@ impl Reader for PgReader {
                     if tx.send(Ok(Message::new(event, acker))).await.is_err() {
                         return;
                     }
-                    after_seq = sequence;
+                    delivered += 1;
                 }
             }
         });

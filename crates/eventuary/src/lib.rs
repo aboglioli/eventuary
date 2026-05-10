@@ -38,10 +38,10 @@ mod namespace;
 mod organization;
 mod partition;
 mod payload;
-mod selector;
 mod serialization;
 mod snapshot;
 mod start_from;
+mod subscription;
 mod topic;
 
 pub use collector::EventCollector;
@@ -52,7 +52,7 @@ pub use event::{Event, EventId, RestoreEvent};
 pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
-    BoxAcker, BoxFilter, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
+    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
     DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
     FilterExt, FilteredHandler, Handler, HandlerExt, Message, Reader, ReaderExt, RetryAction,
     RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt, backoff_delay,
@@ -62,8 +62,8 @@ pub use namespace::Namespace;
 pub use organization::OrganizationId;
 pub use partition::PartitionKey;
 pub use payload::{ContentType, Payload};
-pub use selector::EventSelector;
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};
 pub use start_from::StartFrom;
+pub use subscription::EventSubscription;
 pub use topic::Topic;
