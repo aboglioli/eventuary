@@ -6,6 +6,7 @@ members = [
     "crates/eventuary-sqlite",
     "crates/eventuary-postgres",
     "crates/eventuary-sqs",
+    "crates/eventuary-kafka",
 ]
 
 [workspace.package]
