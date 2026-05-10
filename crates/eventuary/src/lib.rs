@@ -1,3 +1,31 @@
+//! Eventuary core: event model and async IO traits.
+//!
+//! This crate provides the typed event model ([`Event`], [`Payload`], [`Topic`],
+//! [`Namespace`], [`OrganizationId`]), serialization helpers ([`SerializedEvent`]),
+//! and async IO traits for backends ([`Reader`], [`Writer`], [`Handler`], [`Acker`]).
+//!
+//! Backends (memory, SQLite, Postgres, SQS, Kafka) live in sibling crates and
+//! depend on this one.
+//!
+//! # Example
+//!
+//! ```
+//! use eventuary::{Event, Payload};
+//!
+//! let event = Event::create(
+//!     "acme",
+//!     "/billing",
+//!     "invoice.created",
+//!     "invoice-123",
+//!     Payload::from_json(&serde_json::json!({"amount": 100})).unwrap(),
+//! ).unwrap();
+//! assert_eq!(event.topic().as_str(), "invoice.created");
+//! ```
+//!
+//! See the [project README](https://github.com/aboglioli/eventuary) for the full
+//! tour and backend usage examples.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 mod collector;
 mod consumer_group_id;
 mod cursor;
