@@ -1049,6 +1049,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "eventuary-conformance"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "chrono",
+ "eventuary",
+ "futures",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "eventuary-kafka"
 version = "0.1.0-alpha.0"
 dependencies = [
@@ -1069,6 +1081,7 @@ name = "eventuary-memory"
 version = "0.1.0-alpha.0"
 dependencies = [
  "eventuary",
+ "eventuary-conformance",
  "futures",
  "tokio",
 ]
@@ -1080,6 +1093,7 @@ dependencies = [
  "chrono",
  "either",
  "eventuary",
+ "eventuary-conformance",
  "futures",
  "serde_json",
  "sqlx",
@@ -1096,6 +1110,7 @@ dependencies = [
  "chrono",
  "either",
  "eventuary",
+ "eventuary-conformance",
  "futures",
  "rusqlite",
  "serde_json",
