@@ -112,6 +112,12 @@ impl SerializedEvent {
     pub fn from_json_str(s: &str) -> Result<Self> {
         serde_json::from_str(s).map_err(|e| Error::Serialization(e.to_string()))
     }
+
+    pub fn from_json_slice(bytes: &[u8]) -> Result<Self> {
+        let value =
+            serde_json::from_slice(bytes).map_err(|e| Error::Serialization(e.to_string()))?;
+        Self::from_json_value(value)
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +196,20 @@ mod tests {
         assert_eq!(parsed.id, serialized.id);
         assert_eq!(parsed.namespace, serialized.namespace);
         assert_eq!(parsed.organization, serialized.organization);
+    }
+
+    #[test]
+    fn from_json_slice_roundtrip() {
+        let payload = Payload::from_json(&serde_json::json!({"key": "value"})).unwrap();
+        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
+
+        let serialized = SerializedEvent::from_event(&event).unwrap();
+        let bytes = serialized.to_json_string().unwrap().into_bytes();
+        let parsed = SerializedEvent::from_json_slice(&bytes).unwrap();
+
+        assert_eq!(parsed.id, serialized.id);
+        assert_eq!(parsed.topic, serialized.topic);
+        assert_eq!(parsed.payload, serialized.payload);
     }
 
     #[test]
