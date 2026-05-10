@@ -16,12 +16,12 @@ license = "MIT"
 repository = "https://github.com/aboglioli/eventuary"
 
 [workspace.dependencies]
-eventuary = { path = "crates/eventuary" }
-eventuary-memory = { path = "crates/eventuary-memory" }
-eventuary-sqlite = { path = "crates/eventuary-sqlite" }
-eventuary-postgres = { path = "crates/eventuary-postgres" }
-eventuary-sqs = { path = "crates/eventuary-sqs" }
-eventuary-kafka = { path = "crates/eventuary-kafka" }
+eventuary = { path = "crates/eventuary", version = "0.1.0-alpha.0" }
+eventuary-memory = { path = "crates/eventuary-memory", version = "0.1.0-alpha.0" }
+eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.1.0-alpha.0" }
+eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.1.0-alpha.0" }
+eventuary-sqs = { path = "crates/eventuary-sqs", version = "0.1.0-alpha.0" }
+eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.1.0-alpha.0" }
 
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1.89"
