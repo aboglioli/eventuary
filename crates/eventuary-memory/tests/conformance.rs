@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eventuary::io::WriterExt;
-use eventuary::{BoxWriter, EventSelector, StartFrom};
+use eventuary::{BoxWriter, EventSubscription, StartFrom};
 use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
@@ -54,13 +54,13 @@ fn noop_ack() -> AckFn {
     Box::new(|| -> AckFuture { Box::pin(async { Ok(()) }) })
 }
 
-fn build_selector(request: &ReaderRequest) -> EventSelector {
-    let mut selector = EventSelector::new(request.organization.clone());
+fn build_subscription(request: &ReaderRequest) -> EventSubscription {
+    let mut subscription = EventSubscription::new(request.organization.clone());
     if !request.topics.is_empty() {
-        selector.topics = Some(request.topics.clone());
+        subscription.topics = Some(request.topics.clone());
     }
-    selector.namespace_prefix = request.namespace.clone();
-    selector
+    subscription.namespace_prefix = request.namespace.clone();
+    subscription
 }
 
 impl Backend for MemoryBackend {
@@ -89,10 +89,12 @@ impl Backend for MemoryBackend {
     ) -> Pin<Box<dyn Future<Output = Option<ConsumerEvent>> + Send + 'a>> {
         Box::pin(async move {
             let reader_handle = self.current_reader().await;
-            let selector = build_selector(&request);
+            let subscription = build_subscription(&request);
             let mut guard = reader_handle.lock().await;
             let reader = guard.as_mut()?;
-            let mut stream = eventuary::io::Reader::read(reader).await.ok()?;
+            let mut stream = eventuary::io::Reader::read(reader, subscription.clone())
+                .await
+                .ok()?;
 
             if matches!(request.start_from, StartFrom::Latest) {
                 drain_pending(&mut stream).await;
@@ -109,7 +111,7 @@ impl Backend for MemoryBackend {
                     _ => return None,
                 };
                 let event = next.into_event();
-                if selector.matches(&event) {
+                if subscription.matches(&event) {
                     return Some(ConsumerEvent {
                         event,
                         ack: noop_ack(),
@@ -128,12 +130,12 @@ impl Backend for MemoryBackend {
     ) -> Pin<Box<dyn Future<Output = Vec<ConsumerEvent>> + Send + 'a>> {
         Box::pin(async move {
             let reader_handle = self.current_reader().await;
-            let selector = build_selector(&request);
+            let subscription = build_subscription(&request);
             let mut guard = reader_handle.lock().await;
             let Some(reader) = guard.as_mut() else {
                 return Vec::new();
             };
-            let mut stream = match eventuary::io::Reader::read(reader).await {
+            let mut stream = match eventuary::io::Reader::read(reader, subscription.clone()).await {
                 Ok(s) => s,
                 Err(_) => return Vec::new(),
             };
@@ -154,7 +156,7 @@ impl Backend for MemoryBackend {
                     _ => break,
                 };
                 let event = next.into_event();
-                if selector.matches(&event) {
+                if subscription.matches(&event) {
                     received.push(ConsumerEvent {
                         event,
                         ack: noop_ack(),

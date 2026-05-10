@@ -10,6 +10,7 @@ use crate::io::{Filter, Handler, Reader};
 
 pub struct BackgroundConsumer<R: Reader, H: Handler> {
     reader: R,
+    subscription: R::Subscription,
     handler: Arc<H>,
     filter: Option<Arc<dyn Filter>>,
     concurrency: usize,
@@ -22,10 +23,11 @@ where
     R::Stream: 'static,
     H: Handler + 'static,
 {
-    pub fn new(reader: R, handler: H, concurrency: usize) -> Self {
+    pub fn new(reader: R, subscription: R::Subscription, handler: H, concurrency: usize) -> Self {
         let concurrency = concurrency.max(1);
         Self {
             reader,
+            subscription,
             handler: Arc::new(handler),
             filter: None,
             concurrency,
@@ -53,7 +55,7 @@ where
     }
 
     async fn run(self, cancel: CancellationToken, tracker: TaskTracker) -> Result<()> {
-        let stream = self.reader.read().await?;
+        let stream = self.reader.read(self.subscription).await?;
         let handler = Arc::clone(&self.handler);
         let filter = self.filter.as_ref().map(Arc::clone);
         let timeout = self.handler_timeout;
@@ -149,6 +151,7 @@ mod tests {
     use crate::io::Message;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
+    use crate::{EventSubscription, OrganizationId};
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -163,10 +166,11 @@ mod tests {
     }
 
     impl Reader for VecReader {
+        type Subscription = EventSubscription;
         type Acker = NoopAcker;
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker>>> + Send>>;
 
-        async fn read(&self) -> Result<Self::Stream> {
+        async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
             let events = self
                 .events
                 .lock()
@@ -227,6 +231,10 @@ mod tests {
         }
     }
 
+    fn subscription() -> EventSubscription {
+        EventSubscription::new(OrganizationId::new("org").unwrap())
+    }
+
     struct AllowNothing;
     impl Filter for AllowNothing {
         fn matches(&self, _: &Event) -> bool {
@@ -240,6 +248,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let consumer = BackgroundConsumer::new(
             VecReader::new(events),
+            subscription(),
             CountingHandler {
                 id: "h".into(),
                 count: Arc::clone(&count),
@@ -257,6 +266,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let consumer = BackgroundConsumer::new(
             VecReader::new(events),
+            subscription(),
             CountingHandler {
                 id: "h".into(),
                 count: Arc::clone(&count),
@@ -275,6 +285,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let consumer = BackgroundConsumer::new(
             VecReader::new(events),
+            subscription(),
             FailingHandler {
                 id: "h".into(),
                 count: Arc::clone(&count),
@@ -300,8 +311,9 @@ mod tests {
             }
         }
         let events: Vec<Event> = (0..1).map(make_event).collect();
-        let consumer = BackgroundConsumer::new(VecReader::new(events), SlowHandler, 1)
-            .with_handler_timeout(Duration::from_millis(20));
+        let consumer =
+            BackgroundConsumer::new(VecReader::new(events), subscription(), SlowHandler, 1)
+                .with_handler_timeout(Duration::from_millis(20));
         let handle = consumer.spawn();
         handle.shutdown().await.unwrap();
     }

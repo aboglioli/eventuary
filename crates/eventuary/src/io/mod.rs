@@ -1,5 +1,7 @@
 #![allow(clippy::needless_maybe_sized)]
 
+pub use futures::future::BoxFuture;
+
 pub mod acker;
 pub mod consumers;
 pub mod filters;
@@ -20,3 +22,14 @@ pub use handler::{
 pub use message::Message;
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_future_alias_accepts_send_boxed_future() {
+        let future: BoxFuture<'static, crate::Result<()>> = Box::pin(async { Ok(()) });
+        drop(future);
+    }
+}

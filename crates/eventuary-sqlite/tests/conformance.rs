@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eventuary::BoxWriter;
-use eventuary::io::{Reader, WriterExt};
+use eventuary::io::WriterExt;
 use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
