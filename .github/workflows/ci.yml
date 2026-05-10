@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install librdkafka build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev pkg-config
+      - name: Unit tests (no containers)
+        run: cargo test --workspace --lib
+      - name: Memory integration tests
+        run: cargo test -p eventuary-memory
+      - name: SQLite integration tests
+        run: cargo test -p eventuary-sqlite
+
+  integration-postgres:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Postgres integration tests
+        run: cargo test -p eventuary-postgres -- --test-threads=1
+
+  integration-sqs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: SQS integration tests (LocalStack via testcontainers)
+        run: cargo test -p eventuary-sqs -- --test-threads=1
+
+  integration-kafka:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install librdkafka build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev pkg-config
+      - name: Kafka integration tests (testcontainers)
+        run: cargo test -p eventuary-kafka -- --test-threads=1
