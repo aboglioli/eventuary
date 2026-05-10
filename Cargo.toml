@@ -4,6 +4,7 @@ members = [
     "crates/eventuary",
     "crates/eventuary-memory",
     "crates/eventuary-sqlite",
+    "crates/eventuary-postgres",
 ]
 
 [workspace.package]
@@ -29,7 +30,7 @@ rdkafka = { version = "0.38", features = ["cmake-build", "tokio"] }
 rusqlite = { version = "0.37", features = ["bundled-full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres"] }
 testcontainers = "0.25"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
