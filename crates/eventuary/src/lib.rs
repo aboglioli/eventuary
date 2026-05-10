@@ -1,5 +1,6 @@
 mod collector;
 mod consumer_group_id;
+mod cursor;
 mod error;
 mod event;
 mod event_key;
@@ -16,6 +17,7 @@ mod topic;
 
 pub use collector::EventCollector;
 pub use consumer_group_id::ConsumerGroupId;
+pub use cursor::{EventCursor, EventSequence};
 pub use error::{Error, Result};
 pub use event::{Event, EventId, RestoreEvent};
 pub use event_key::EventKey;
