@@ -25,7 +25,7 @@ pub use io::{
     DynHandler, DynReader, DynWriter, Filter, FilterExt, FilteredHandler, Handler, HandlerExt,
     Message, Reader, ReaderExt, Writer, WriterExt,
 };
-pub use metadata::Metadata;
+pub use metadata::{CAUSATION_ID, CORRELATION_ID, Metadata};
 pub use namespace::Namespace;
 pub use organization::OrganizationId;
 pub use partition::PartitionKey;

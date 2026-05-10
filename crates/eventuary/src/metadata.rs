@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+pub const CORRELATION_ID: &str = "correlation_id";
+pub const CAUSATION_ID: &str = "causation_id";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Metadata(HashMap<String, String>);
 

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::event_key::EventKey;
-use crate::metadata::Metadata;
+use crate::metadata::{CAUSATION_ID, CORRELATION_ID, Metadata};
 use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
 use crate::payload::Payload;
@@ -87,6 +87,27 @@ impl Event {
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
+    }
+
+    pub fn with_correlation_id(mut self, id: impl Into<String>) -> Result<Self> {
+        self.metadata = self.metadata.with(CORRELATION_ID, id.into())?;
+        Ok(self)
+    }
+
+    pub fn with_causation_id(mut self, id: impl Into<String>) -> Result<Self> {
+        self.metadata = self.metadata.with(CAUSATION_ID, id.into())?;
+        Ok(self)
+    }
+
+    pub fn correlation_id(&self) -> Option<&str> {
+        self.metadata
+            .as_map()
+            .get(CORRELATION_ID)
+            .map(String::as_str)
+    }
+
+    pub fn causation_id(&self) -> Option<&str> {
+        self.metadata.as_map().get(CAUSATION_ID).map(String::as_str)
     }
 
     pub fn restore(r: RestoreEvent) -> Self {
@@ -172,5 +193,20 @@ mod tests {
             .with_metadata(metadata);
         assert_eq!(event.metadata().get("agent_id"), Some("abc-123"));
         assert_eq!(event.metadata().get("project"), Some("acme"));
+    }
+
+    #[test]
+    fn correlation_and_causation_ids_roundtrip_through_metadata() {
+        let payload = Payload::from_string("test");
+        let event = Event::create("acme", "/x", "thing.happened", "k", payload)
+            .unwrap()
+            .with_correlation_id("corr-1")
+            .unwrap()
+            .with_causation_id("cause-1")
+            .unwrap();
+        assert_eq!(event.correlation_id(), Some("corr-1"));
+        assert_eq!(event.causation_id(), Some("cause-1"));
+        assert_eq!(event.metadata().get(CORRELATION_ID), Some("corr-1"));
+        assert_eq!(event.metadata().get(CAUSATION_ID), Some("cause-1"));
     }
 }
