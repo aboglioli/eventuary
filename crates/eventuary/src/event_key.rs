@@ -1,8 +1,13 @@
 use std::fmt;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::partition::PartitionKey;
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -43,6 +48,19 @@ impl From<EventKey> for String {
     }
 }
 
+impl PartitionKey for EventKey {
+    fn partition(&self, total_partitions: NonZeroU32) -> u32 {
+        let hash = self
+            .0
+            .as_bytes()
+            .iter()
+            .fold(FNV_OFFSET_BASIS, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+            });
+        (hash % u64::from(total_partitions.get())) as u32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +81,38 @@ mod tests {
     fn too_long_key_fails() {
         let s = "a".repeat(1025);
         assert!(EventKey::new(s).is_err());
+    }
+
+    #[test]
+    fn partition_is_deterministic() {
+        let key = EventKey::new("user-42").unwrap();
+        let partitions = NonZeroU32::new(16).unwrap();
+        let first = key.partition(partitions);
+        let second = key.partition(partitions);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn partition_stays_in_range() {
+        let partitions = NonZeroU32::new(8).unwrap();
+        for i in 0..1024 {
+            let key = EventKey::new(format!("key-{i}")).unwrap();
+            assert!(key.partition(partitions) < 8);
+        }
+    }
+
+    #[test]
+    fn same_key_same_partition() {
+        let partitions = NonZeroU32::new(32).unwrap();
+        let a = EventKey::new("order-7").unwrap();
+        let b = EventKey::new("order-7").unwrap();
+        assert_eq!(a.partition(partitions), b.partition(partitions));
+    }
+
+    #[test]
+    fn fnv_known_vector_remains_stable() {
+        let key = EventKey::new("user-42").unwrap();
+        let partitions = NonZeroU32::new(16).unwrap();
+        assert_eq!(key.partition(partitions), 11);
     }
 }
