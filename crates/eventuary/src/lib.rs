@@ -10,6 +10,7 @@ mod organization;
 mod partition;
 mod payload;
 mod serialization;
+mod snapshot;
 mod start_from;
 mod topic;
 
@@ -30,5 +31,6 @@ pub use organization::OrganizationId;
 pub use partition::PartitionKey;
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
+pub use snapshot::{Snapshot, SnapshotEventId};
 pub use start_from::StartFrom;
 pub use topic::Topic;
