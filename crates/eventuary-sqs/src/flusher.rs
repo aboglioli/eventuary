@@ -6,6 +6,9 @@ use aws_sdk_sqs::types::{
 use eventuary::io::acker::BatchFlusher;
 use eventuary::{Error, Result};
 
+/// ack issues `DeleteMessageBatch`. nack issues `ChangeMessageVisibilityBatch`
+/// with `visibility_timeout = 0` so SQS redelivers immediately. Both inspect
+/// `failed` entries and surface partial-batch failures.
 pub struct SqsFlusher {
     client: Client,
     queue_url: String,

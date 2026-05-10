@@ -14,6 +14,10 @@ pub struct KafkaOffsetToken {
     pub offset: i64,
 }
 
+/// ack commits the highest offset per partition via `consumer.commit`. nack is
+/// a no-op: offsets are simply left uncommitted. Unacked records are
+/// redelivered after rebalance, restart, or session expiry — there is no
+/// immediate redelivery.
 pub struct KafkaFlusher {
     consumer: Arc<StreamConsumer>,
 }
