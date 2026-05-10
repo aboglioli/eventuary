@@ -5,5 +5,5 @@ mod writer;
 
 pub use flusher::{KafkaFlusher, KafkaOffsetToken};
 pub use reader::{KafkaReader, KafkaStream};
-pub use reader_config::{KafkaReaderConfig, PartitionAssignment};
+pub use reader_config::KafkaReaderConfig;
 pub use writer::KafkaWriter;
