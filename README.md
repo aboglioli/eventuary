@@ -102,25 +102,43 @@ writer.write(&event).await?;
 ## Consumer Loop
 
 ```rust
-use eventuary::{BackgroundConsumer, Handler};
-use std::sync::Arc;
+use eventuary::{Event, Handler};
 
 struct LogHandler;
 
 impl Handler for LogHandler {
-    fn handle<'a>(&'a self, msg: eventuary::Message<eventuary::io::acker::NoopAcker>)
-        -> impl std::future::Future<Output = eventuary::Result<()>> + Send + 'a
+    fn id(&self) -> &str { "log-handler" }
+
+    fn handle(&self, event: Event)
+        -> impl std::future::Future<Output = eventuary::Result<()>> + Send
     {
         async move {
-            tracing::info!(topic = %msg.event().topic(), "received");
+            tracing::info!(topic = %event.topic(), "received");
             Ok(())
         }
     }
 }
 ```
 
-`BackgroundConsumer` polls a `Reader`, applies an optional filter, runs a
-`Handler` per event, and acks/nacks based on the handler result. Timeouts nack.
+`Handler::handle` receives an owned `Event` — the ack/nack envelope is owned
+by the `Reader`'s `Message<A>` and managed by the consumer driver, not by the
+handler.
+
+`BackgroundConsumer` polls a `Reader`, applies an optional `Filter`, drives a
+`Handler` per event, and acks on `Ok(())` / nacks on `Err(_)` or timeout.
+
+For retries and dead-letter routing, wrap the handler in `RetryHandler`:
+
+```rust
+use eventuary::{DeadLetterWriter, RetryConfig, RetryHandler, DefaultRetryPolicy};
+
+let handler = RetryHandler::new(
+    LogHandler,
+    DefaultRetryPolicy,
+    DeadLetterWriter::new(dead_letter_writer),
+    RetryConfig::default(),
+);
+```
 
 ## Backend Test Commands
 
