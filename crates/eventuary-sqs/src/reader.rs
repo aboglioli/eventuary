@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use eventuary::io::acker::{AckBuffer, Acker, BatchedAcker};
 use eventuary::io::{Message, Reader};
-use eventuary::{EventSubscription, Result, SerializedEvent};
+use eventuary::{Error, EventSubscription, Result, SerializedEvent, StartFrom};
 
 use crate::flusher::SqsFlusher;
 use crate::reader_config::SqsReaderConfig;
@@ -26,22 +26,30 @@ impl SqsReader {
         Ok(Self { client, config })
     }
 
-    pub async fn read(&self) -> Result<SqsStream> {
-        eventuary::io::Reader::read(self, subscription_from_config(&self.config)).await
+    /// Build an [`EventSubscription`] seeded from this reader's config: the
+    /// configured tenant, optional consumer group, topic filter, namespace
+    /// prefix, and SQS-compatible `start_from` (always `Latest`). Use it as
+    /// a starting point and tweak before passing to [`Reader::read`].
+    pub fn default_subscription(&self) -> EventSubscription {
+        let mut subscription = EventSubscription::new(self.config.organization.clone());
+        subscription.consumer_group_id = self.config.consumer_group_id.clone();
+        if !self.config.topics.is_empty() {
+            subscription.topics = Some(self.config.topics.clone());
+        }
+        subscription.namespace_prefix = self.config.namespace.clone();
+        subscription.start_from = self.config.start_from;
+        subscription.end_at = self.config.end_at;
+        subscription.limit = self.config.limit;
+        subscription
     }
-}
 
-fn subscription_from_config(config: &SqsReaderConfig) -> EventSubscription {
-    let mut subscription = EventSubscription::new(config.organization.clone());
-    subscription.consumer_group_id = config.consumer_group_id.clone();
-    if !config.topics.is_empty() {
-        subscription.topics = Some(config.topics.clone());
+    /// Convenience entry point that reads with [`default_subscription`].
+    /// Equivalent to `Reader::read(self, self.default_subscription())`.
+    ///
+    /// [`default_subscription`]: SqsReader::default_subscription
+    pub async fn read(&self) -> Result<SqsStream> {
+        eventuary::io::Reader::read(self, self.default_subscription()).await
     }
-    subscription.namespace_prefix = config.namespace.clone();
-    subscription.start_from = config.start_from;
-    subscription.end_at = config.end_at;
-    subscription.limit = config.limit;
-    subscription
 }
 
 pub struct SqsStream {
@@ -77,19 +85,36 @@ impl Reader for SqsReader {
     type Stream = SqsStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        if subscription.organization != self.config.organization {
+            return Err(Error::Config(format!(
+                "subscription organization `{}` does not match reader tenant `{}`",
+                subscription.organization, self.config.organization
+            )));
+        }
+        if !matches!(subscription.start_from, StartFrom::Latest) {
+            return Err(Error::Config(
+                "SQS reader only supports StartFrom::Latest; queue semantics deliver pending messages and cannot seek".to_owned(),
+            ));
+        }
+        if let Some(group) = subscription.consumer_group_id.as_ref()
+            && self.config.consumer_group_id.as_ref() != Some(group)
+        {
+            return Err(Error::Config(
+                "subscription consumer_group_id does not match reader; SQS uses the queue URL as consumer identity".to_owned(),
+            ));
+        }
+
         let client = self.client.clone();
-        let mut config = self.config.clone();
-        config.organization = subscription.organization.clone();
-        config.namespace = subscription.namespace_prefix.clone();
-        config.topics = subscription.topics.clone().unwrap_or_default();
-        config.start_from = subscription.start_from;
-        config.end_at = subscription.end_at;
-        config.limit = subscription.limit;
-        let flusher = SqsFlusher::new(client.clone(), config.queue_url.clone());
-        let ack_buffer = AckBuffer::spawn(flusher, config.ack_buffer.clone());
+        let queue_url = self.config.queue_url.clone();
+        let max_messages = self.config.max_messages;
+        let wait_time = self.config.wait_time;
+        let visibility_timeout = self.config.visibility_timeout;
+
+        let flusher = SqsFlusher::new(client.clone(), queue_url.clone());
+        let ack_buffer = AckBuffer::spawn(flusher, self.config.ack_buffer.clone());
         let tx_ack = ack_buffer.sender();
 
-        let (tx, rx) = mpsc::channel((config.max_messages as usize) * 2);
+        let (tx, rx) = mpsc::channel((max_messages as usize) * 2);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
 
@@ -101,10 +126,10 @@ impl Reader for SqsReader {
                 }
                 let resp = client
                     .receive_message()
-                    .queue_url(&config.queue_url)
-                    .max_number_of_messages(config.max_messages)
-                    .wait_time_seconds(config.wait_time.as_secs() as i32)
-                    .visibility_timeout(config.visibility_timeout.as_secs() as i32)
+                    .queue_url(&queue_url)
+                    .max_number_of_messages(max_messages)
+                    .wait_time_seconds(wait_time.as_secs() as i32)
+                    .visibility_timeout(visibility_timeout.as_secs() as i32)
                     .send()
                     .await;
                 let messages = match resp {
@@ -118,41 +143,41 @@ impl Reader for SqsReader {
                     }
                 };
                 for m in messages {
-                    let body = match m.body.as_deref() {
-                        Some(b) => b,
-                        None => continue,
-                    };
                     let receipt = match m.receipt_handle.clone() {
                         Some(r) => r,
-                        None => continue,
+                        None => {
+                            tracing::warn!(
+                                "sqs message missing receipt handle; cannot ack or delete, dropping"
+                            );
+                            continue;
+                        }
+                    };
+                    let body = match m.body.as_deref() {
+                        Some(b) => b,
+                        None => {
+                            tracing::warn!("sqs message missing body; skip-acking");
+                            let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
+                            continue;
+                        }
                     };
                     let serialized = match SerializedEvent::from_json_str(body) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::warn!("malformed sqs body: {e}");
+                            tracing::warn!(error = %e, "malformed sqs body; skip-acking poison message");
+                            let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                             continue;
                         }
                     };
-                    if serialized.organization != config.organization.as_str() {
-                        tracing::warn!(
-                            "sqs org mismatch: got `{}` expected `{}`; acking and skipping",
-                            serialized.organization,
-                            config.organization
-                        );
-                        let skip_acker = BatchedAcker::new(receipt, tx_ack.clone());
-                        let _ = skip_acker.ack().await;
-                        continue;
-                    }
                     let event = match serialized.to_event() {
                         Ok(e) => e,
                         Err(e) => {
-                            tracing::warn!("sqs to_event failed: {e}");
+                            tracing::warn!(error = %e, "sqs to_event failed; skip-acking poison message");
+                            let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                             continue;
                         }
                     };
                     if !subscription.matches(&event) {
-                        let skip_acker = BatchedAcker::new(receipt, tx_ack.clone());
-                        let _ = skip_acker.ack().await;
+                        let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                         continue;
                     }
                     let acker = BatchedAcker::new(receipt, tx_ack.clone());
