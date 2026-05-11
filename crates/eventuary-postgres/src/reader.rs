@@ -44,6 +44,9 @@ impl PgReaderConfig {
     }
 }
 
+/// ack advances the consumer group's checkpoint to this event's sequence;
+/// nack leaves the checkpoint unchanged. Backwards moves are guarded by
+/// `WHERE EXCLUDED.sequence > consumer_offsets.sequence`.
 #[derive(Clone)]
 pub struct PgAcker {
     pool: PgPool,

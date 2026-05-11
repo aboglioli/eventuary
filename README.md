@@ -102,25 +102,43 @@ writer.write(&event).await?;
 ## Consumer Loop
 
 ```rust
-use eventuary::{BackgroundConsumer, Handler};
-use std::sync::Arc;
+use eventuary::{Event, Handler};
 
 struct LogHandler;
 
 impl Handler for LogHandler {
-    fn handle<'a>(&'a self, msg: eventuary::Message<eventuary::io::acker::NoopAcker>)
-        -> impl std::future::Future<Output = eventuary::Result<()>> + Send + 'a
+    fn id(&self) -> &str { "log-handler" }
+
+    fn handle(&self, event: Event)
+        -> impl std::future::Future<Output = eventuary::Result<()>> + Send
     {
         async move {
-            tracing::info!(topic = %msg.event().topic(), "received");
+            tracing::info!(topic = %event.topic(), "received");
             Ok(())
         }
     }
 }
 ```
 
-`BackgroundConsumer` polls a `Reader`, applies an optional filter, runs a
-`Handler` per event, and acks/nacks based on the handler result. Timeouts nack.
+`Handler::handle` receives an owned `Event` — the ack/nack envelope is owned
+by the `Reader`'s `Message<A>` and managed by the consumer driver, not by the
+handler.
+
+`BackgroundConsumer` polls a `Reader`, applies an optional `Filter`, drives a
+`Handler` per event, and acks on `Ok(())` / nacks on `Err(_)` or timeout.
+
+For retries and dead-letter routing, wrap the handler in `RetryHandler`:
+
+```rust
+use eventuary::{DeadLetterWriter, RetryConfig, RetryHandler, DefaultRetryPolicy};
+
+let handler = RetryHandler::new(
+    LogHandler,
+    DefaultRetryPolicy,
+    DeadLetterWriter::new(dead_letter_writer),
+    RetryConfig::default(),
+);
+```
 
 ## Backend Test Commands
 
@@ -139,8 +157,9 @@ cargo test -p eventuary-sqs -- --test-threads=1
 cargo test -p eventuary-kafka -- --test-threads=1
 ```
 
-The Kafka backend requires `cmake`, `libssl-dev`, and `pkg-config` to build
-`librdkafka` (via the `cmake-build` rdkafka feature).
+The Kafka backend requires `cmake`, `libssl-dev`, `libcurl4-openssl-dev`,
+`libsasl2-dev`, `zlib1g-dev`, and `pkg-config` to build `librdkafka`
+(via the `cmake-build` rdkafka feature).
 
 ## Development
 
@@ -152,12 +171,43 @@ cargo test -p eventuary-memory     # memory tests
 cargo test -p eventuary-sqlite     # sqlite tests, no containers
 ```
 
-## Publishing
+## Releasing
 
-A `release: published` GitHub Actions workflow at
-`.github/workflows/publish.yml` publishes all six crates in order. It is not
-triggered automatically — a maintainer creates a release manually after
-verifying all backends still pass on the release branch.
+Publishing to crates.io is gated on a release event — pushes to `main` never
+publish. The workflow at `.github/workflows/publish.yml` runs only when:
+
+1. A GitHub Release is published (`release: published`), or
+2. A `vX.Y.Z` (or `vX.Y.Z-prerelease`) tag is pushed, or
+3. A maintainer triggers `workflow_dispatch` (with optional dry-run input).
+
+The workflow verifies the tag matches `workspace.package.version`, runs fmt /
+clippy / unit tests, executes `cargo publish --dry-run` for every crate, then
+publishes the six crates in dependency order with a 60-second pause after the
+core crate to let the index settle.
+
+### Release procedure
+
+```bash
+# 1. Bump version in root Cargo.toml under [workspace.package]
+#    (all six crates inherit via workspace.package.version)
+
+# 2. Commit and push
+git commit -am "chore: release v0.1.0-alpha.1"
+git push origin main
+
+# 3. Tag and push the tag (or create a Release in the GitHub UI,
+#    which creates the tag for you)
+git tag v0.1.0-alpha.1
+git push origin v0.1.0-alpha.1
+
+# 4. The Publish workflow runs automatically.
+```
+
+A `CARGO_REGISTRY_TOKEN` repository secret must be configured. Consider
+migrating to crates.io [trusted publishing] once stabilized for the registry,
+which removes the long-lived token.
+
+[trusted publishing]: https://crates.io/docs/trusted-publishing
 
 ## License
 

@@ -21,8 +21,9 @@ pub struct SqsReader {
 }
 
 impl SqsReader {
-    pub fn new(client: Client, config: SqsReaderConfig) -> Self {
-        Self { client, config }
+    pub fn new(client: Client, config: SqsReaderConfig) -> Result<Self> {
+        config.validate()?;
+        Ok(Self { client, config })
     }
 }
 
@@ -64,7 +65,7 @@ impl Reader for SqsReader {
         let ack_buffer = AckBuffer::spawn(flusher, config.ack_buffer.clone());
         let tx_ack = ack_buffer.sender();
 
-        let (tx, rx) = mpsc::channel(config.max_messages * 2);
+        let (tx, rx) = mpsc::channel((config.max_messages as usize) * 2);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
 
@@ -76,7 +77,7 @@ impl Reader for SqsReader {
                 let resp = client
                     .receive_message()
                     .queue_url(&config.queue_url)
-                    .max_number_of_messages(config.max_messages as i32)
+                    .max_number_of_messages(config.max_messages)
                     .wait_time_seconds(config.wait_time.as_secs() as i32)
                     .visibility_timeout(config.visibility_timeout.as_secs() as i32)
                     .send()

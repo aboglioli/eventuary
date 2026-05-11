@@ -1,0 +1,19 @@
+[package]
+name = "eventuary-conformance"
+description = "Backend conformance test suite for eventuary"
+publish = false
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eventuary = { workspace = true }
+chrono.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

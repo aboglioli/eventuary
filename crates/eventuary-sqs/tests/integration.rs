@@ -13,7 +13,7 @@ use eventuary::io::acker::AckBufferConfig;
 use eventuary::io::{Reader, Writer};
 use eventuary::{Error, Event, OrganizationId, Payload, StartFrom};
 
-use eventuary_sqs::{SqsReader, SqsReaderConfig, SqsReaderParams, SqsWriter};
+use eventuary_sqs::{SqsReader, SqsReaderConfig, SqsWriter};
 
 const LOCALSTACK_IMAGE: &str = "localstack/localstack";
 const LOCALSTACK_TAG: &str = "3.8.1";
@@ -67,26 +67,6 @@ fn make_event(org: &str, key: &str) -> Event {
     Event::create(org, "/x", "thing.happened", key, Payload::from_string("v")).unwrap()
 }
 
-fn defaults_params(queue_url: String, org: OrganizationId) -> SqsReaderParams {
-    SqsReaderParams {
-        queue_url,
-        organization: org,
-        namespace: None,
-        topics: Vec::new(),
-        max_messages: 10,
-        visibility_timeout: Duration::from_secs(30),
-        wait_time: Duration::from_secs(20),
-        ack_buffer: AckBufferConfig {
-            max_pending: 10,
-            flush_interval: Duration::from_millis(200),
-        },
-        start_from: StartFrom::Latest,
-        end_at: None,
-        limit: None,
-        consumer_group_id: None,
-    }
-}
-
 #[tokio::test]
 async fn writer_sends_serialized_event() {
     let (_c, client) = start_localstack().await;
@@ -121,9 +101,8 @@ async fn reader_receives_event() {
     let event = make_event("orgsqs", "k-recv");
     writer.write(&event).await.unwrap();
 
-    let config =
-        SqsReaderConfig::defaults_for(&queue_url, OrganizationId::new("orgsqs").unwrap()).unwrap();
-    let reader = SqsReader::new(client.clone(), config);
+    let config = SqsReaderConfig::defaults_for(&queue_url, OrganizationId::new("orgsqs").unwrap());
+    let reader = SqsReader::new(client.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(30), stream.next())
         .await
@@ -141,15 +120,13 @@ async fn ack_deletes_message() {
     let writer = SqsWriter::new(client.clone(), &queue_url);
     writer.write(&make_event("orgsqs", "k-ack")).await.unwrap();
 
-    let params = SqsReaderParams {
-        ack_buffer: AckBufferConfig {
-            max_pending: 1,
-            flush_interval: Duration::from_millis(50),
-        },
-        ..defaults_params(queue_url.clone(), OrganizationId::new("orgsqs").unwrap())
+    let mut config =
+        SqsReaderConfig::defaults_for(&queue_url, OrganizationId::new("orgsqs").unwrap());
+    config.ack_buffer = AckBufferConfig {
+        max_pending: 1,
+        flush_interval: Duration::from_millis(50),
     };
-    let config = SqsReaderConfig::new(params).unwrap();
-    let reader = SqsReader::new(client.clone(), config);
+    let reader = SqsReader::new(client.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(30), stream.next())
         .await
@@ -184,9 +161,8 @@ async fn org_mismatch_is_acked_and_skipped() {
         .unwrap();
     writer.write(&make_event("orgsqs", "right")).await.unwrap();
 
-    let config =
-        SqsReaderConfig::defaults_for(&queue_url, OrganizationId::new("orgsqs").unwrap()).unwrap();
-    let reader = SqsReader::new(client.clone(), config);
+    let config = SqsReaderConfig::defaults_for(&queue_url, OrganizationId::new("orgsqs").unwrap());
+    let reader = SqsReader::new(client.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(30), stream.next())
         .await
@@ -201,31 +177,31 @@ async fn invalid_start_from_is_rejected() {
     let org = OrganizationId::new("o").unwrap();
     let queue_url = "https://example.com/queue".to_owned();
 
-    let mut params = defaults_params(queue_url.clone(), org.clone());
-    params.start_from = StartFrom::Earliest;
-    let err = SqsReaderConfig::new(params).unwrap_err();
+    let mut config = SqsReaderConfig::defaults_for(&queue_url, org.clone());
+    config.start_from = StartFrom::Earliest;
+    let err = config.validate().unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 
-    let mut params = defaults_params(queue_url.clone(), org.clone());
-    params.start_from = StartFrom::Timestamp(Utc::now());
-    let err = SqsReaderConfig::new(params).unwrap_err();
+    let mut config = SqsReaderConfig::defaults_for(&queue_url, org);
+    config.start_from = StartFrom::Timestamp(Utc::now());
+    let err = config.validate().unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 }
 
 #[tokio::test]
 async fn invalid_wait_time_is_rejected() {
     let org = OrganizationId::new("o").unwrap();
-    let mut params = defaults_params("https://q".to_owned(), org);
-    params.wait_time = Duration::from_secs(21);
-    let err = SqsReaderConfig::new(params).unwrap_err();
+    let mut config = SqsReaderConfig::defaults_for("https://q", org);
+    config.wait_time = Duration::from_secs(21);
+    let err = config.validate().unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 }
 
 #[tokio::test]
 async fn invalid_visibility_timeout_is_rejected() {
     let org = OrganizationId::new("o").unwrap();
-    let mut params = defaults_params("https://q".to_owned(), org);
-    params.visibility_timeout = Duration::from_secs(43_201);
-    let err = SqsReaderConfig::new(params).unwrap_err();
+    let mut config = SqsReaderConfig::defaults_for("https://q", org);
+    config.visibility_timeout = Duration::from_secs(43_201);
+    let err = config.validate().unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 }

@@ -17,7 +17,7 @@ use eventuary::io::{Filter, Message, Reader};
 use eventuary::{Error, Event, Result, SerializedEvent, StartFrom};
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
-use crate::reader_config::{KafkaReaderConfig, PartitionAssignment};
+use crate::reader_config::KafkaReaderConfig;
 
 pub struct KafkaReader {
     consumer: Arc<StreamConsumer>,
@@ -44,32 +44,10 @@ impl KafkaReader {
             );
         let consumer: StreamConsumer = cfg.create().map_err(|e| Error::Store(e.to_string()))?;
 
-        match &config.partition_assignment {
-            PartitionAssignment::All => {
-                let topic_refs: Vec<&str> =
-                    config.kafka_topics.iter().map(|t| t.as_str()).collect();
-                consumer
-                    .subscribe(&topic_refs)
-                    .map_err(|e| Error::Store(e.to_string()))?;
-            }
-            PartitionAssignment::Specific(parts) => {
-                let offset = match config.start_from {
-                    StartFrom::Earliest => rdkafka::Offset::Beginning,
-                    StartFrom::Latest => rdkafka::Offset::End,
-                    StartFrom::Timestamp(_) => rdkafka::Offset::Stored,
-                };
-                let mut tpl = TopicPartitionList::new();
-                for topic in &config.kafka_topics {
-                    for p in parts {
-                        tpl.add_partition_offset(topic, *p, offset)
-                            .map_err(|e| Error::Store(e.to_string()))?;
-                    }
-                }
-                consumer
-                    .assign(&tpl)
-                    .map_err(|e| Error::Store(e.to_string()))?;
-            }
-        }
+        let topic_refs: Vec<&str> = config.kafka_topics.iter().map(|t| t.as_str()).collect();
+        consumer
+            .subscribe(&topic_refs)
+            .map_err(|e| Error::Store(e.to_string()))?;
 
         if let StartFrom::Timestamp(ts) = config.start_from {
             apply_timestamp_seek(&consumer, &config, ts)?;

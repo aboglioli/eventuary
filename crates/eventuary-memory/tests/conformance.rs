@@ -1,0 +1,185 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use eventuary::io::WriterExt;
+use eventuary::{BoxWriter, EventSelector, StartFrom};
+use eventuary_conformance::{
+    AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
+};
+use eventuary_memory::{InmemReader, InmemWriter};
+use futures::StreamExt;
+use tokio::sync::{Mutex, mpsc};
+
+const CHANNEL_CAPACITY: usize = 256;
+
+struct MemoryBackend {
+    state: Mutex<Option<ChannelPair>>,
+}
+
+struct ChannelPair {
+    reader: Arc<Mutex<Option<InmemReader>>>,
+}
+
+impl MemoryBackend {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(None),
+        }
+    }
+
+    async fn reset(&self) -> mpsc::Sender<eventuary::Event> {
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let reader = InmemReader::new(rx);
+        let mut guard = self.state.lock().await;
+        *guard = Some(ChannelPair {
+            reader: Arc::new(Mutex::new(Some(reader))),
+        });
+        tx
+    }
+
+    async fn current_reader(&self) -> Arc<Mutex<Option<InmemReader>>> {
+        let guard = self.state.lock().await;
+        Arc::clone(
+            &guard
+                .as_ref()
+                .expect("memory backend must be initialized via writer() before reading")
+                .reader,
+        )
+    }
+}
+
+fn noop_ack() -> AckFn {
+    Box::new(|| -> AckFuture { Box::pin(async { Ok(()) }) })
+}
+
+fn build_selector(request: &ReaderRequest) -> EventSelector {
+    let mut selector = EventSelector::new(request.organization.clone());
+    if !request.topics.is_empty() {
+        selector.topics = Some(request.topics.clone());
+    }
+    selector.namespace_prefix = request.namespace.clone();
+    selector
+}
+
+impl Backend for MemoryBackend {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            supports_replay: false,
+            supports_timestamp_start: false,
+            supports_nack_redelivery: false,
+            preserves_total_order: true,
+            supports_consumer_groups: false,
+            supports_independent_streams: false,
+        }
+    }
+
+    fn writer<'a>(&'a self) -> Pin<Box<dyn Future<Output = BoxWriter> + Send + 'a>> {
+        Box::pin(async move {
+            let tx = self.reset().await;
+            InmemWriter::new(tx).into_boxed()
+        })
+    }
+
+    fn read_one<'a>(
+        &'a self,
+        request: ReaderRequest,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Option<ConsumerEvent>> + Send + 'a>> {
+        Box::pin(async move {
+            let reader_handle = self.current_reader().await;
+            let selector = build_selector(&request);
+            let mut guard = reader_handle.lock().await;
+            let reader = guard.as_mut()?;
+            let mut stream = eventuary::io::Reader::read(reader).await.ok()?;
+
+            if matches!(request.start_from, StartFrom::Latest) {
+                drain_pending(&mut stream).await;
+            }
+
+            let deadline = Instant::now() + timeout;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return None;
+                }
+                let next = match tokio::time::timeout(remaining, stream.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    _ => return None,
+                };
+                let event = next.into_event();
+                if selector.matches(&event) {
+                    return Some(ConsumerEvent {
+                        event,
+                        ack: noop_ack(),
+                        nack: noop_ack(),
+                    });
+                }
+            }
+        })
+    }
+
+    fn read_many<'a>(
+        &'a self,
+        request: ReaderRequest,
+        count: usize,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = Vec<ConsumerEvent>> + Send + 'a>> {
+        Box::pin(async move {
+            let reader_handle = self.current_reader().await;
+            let selector = build_selector(&request);
+            let mut guard = reader_handle.lock().await;
+            let Some(reader) = guard.as_mut() else {
+                return Vec::new();
+            };
+            let mut stream = match eventuary::io::Reader::read(reader).await {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+
+            if matches!(request.start_from, StartFrom::Latest) {
+                drain_pending(&mut stream).await;
+            }
+
+            let mut received = Vec::with_capacity(count);
+            let deadline = Instant::now() + timeout;
+            while received.len() < count {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let next = match tokio::time::timeout(remaining, stream.next()).await {
+                    Ok(Some(Ok(msg))) => msg,
+                    _ => break,
+                };
+                let event = next.into_event();
+                if selector.matches(&event) {
+                    received.push(ConsumerEvent {
+                        event,
+                        ack: noop_ack(),
+                        nack: noop_ack(),
+                    });
+                }
+            }
+            received
+        })
+    }
+}
+
+async fn drain_pending<S>(stream: &mut S)
+where
+    S: futures::Stream<
+            Item = eventuary::Result<eventuary::io::Message<eventuary::io::acker::NoopAcker>>,
+        > + Unpin,
+{
+    while let Ok(Some(Ok(_))) = tokio::time::timeout(Duration::from_millis(10), stream.next()).await
+    {
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_backend_conformance() {
+    let backend = MemoryBackend::new();
+    run_all(&backend).await;
+}

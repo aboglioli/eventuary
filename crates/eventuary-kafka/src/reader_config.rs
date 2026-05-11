@@ -6,12 +6,6 @@ use eventuary::io::acker::AckBufferConfig;
 use eventuary::{ConsumerGroupId, Error, Namespace, OrganizationId, Result, StartFrom, Topic};
 
 #[derive(Debug, Clone)]
-pub enum PartitionAssignment {
-    All,
-    Specific(Vec<i32>),
-}
-
-#[derive(Debug, Clone)]
 pub struct KafkaReaderConfig {
     pub brokers: Vec<String>,
     pub kafka_topics: Vec<String>,
@@ -22,7 +16,6 @@ pub struct KafkaReaderConfig {
     pub namespace: Option<Namespace>,
     pub session_timeout: Duration,
     pub max_poll_records: usize,
-    pub partition_assignment: PartitionAssignment,
     pub end_at: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub ack_buffer: AckBufferConfig,
@@ -59,7 +52,6 @@ impl KafkaReaderConfig {
             namespace: None,
             session_timeout: Duration::from_secs(30),
             max_poll_records: 100,
-            partition_assignment: PartitionAssignment::All,
             end_at: None,
             limit: None,
             ack_buffer: AckBufferConfig::default(),
@@ -89,13 +81,6 @@ impl KafkaReaderConfig {
                 "ack_buffer.max_pending must be > 0".to_owned(),
             ));
         }
-        if let PartitionAssignment::Specific(ref parts) = self.partition_assignment
-            && parts.is_empty()
-        {
-            return Err(Error::Config(
-                "partition_assignment Specific list must not be empty".to_owned(),
-            ));
-        }
         Ok(())
     }
 
@@ -122,7 +107,6 @@ mod tests {
     fn streaming_defaults() {
         let c = cfg();
         assert_eq!(c.kafka_topics.len(), 1);
-        assert!(matches!(c.partition_assignment, PartitionAssignment::All));
         assert!(matches!(c.start_from, StartFrom::Latest));
         assert!(c.event_topics.is_none());
         assert!(c.namespace.is_none());
@@ -180,14 +164,6 @@ mod tests {
             max_pending: 0,
             flush_interval: Duration::from_secs(1),
         };
-        let err = c.validate().unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn rejects_empty_specific_partition_list() {
-        let mut c = cfg();
-        c.partition_assignment = PartitionAssignment::Specific(Vec::new());
         let err = c.validate().unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }

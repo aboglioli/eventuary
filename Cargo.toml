@@ -7,6 +7,7 @@ members = [
     "crates/eventuary-postgres",
     "crates/eventuary-sqs",
     "crates/eventuary-kafka",
+    "crates/eventuary-conformance",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.1.0-alpha.0"
 eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.1.0-alpha.0" }
 eventuary-sqs = { path = "crates/eventuary-sqs", version = "0.1.0-alpha.0" }
 eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.1.0-alpha.0" }
+eventuary-conformance = { path = "crates/eventuary-conformance" }
 
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1.89"

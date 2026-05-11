@@ -45,6 +45,10 @@ impl SqliteReaderConfig {
     }
 }
 
+/// ack advances the consumer group's checkpoint to this event's sequence;
+/// nack leaves the checkpoint unchanged so the event is redelivered on next
+/// reader start. Backwards moves are guarded by
+/// `WHERE excluded.sequence > consumer_offsets.sequence`.
 #[derive(Clone)]
 pub struct SqliteAcker {
     conn: SqliteConn,

@@ -14,6 +14,13 @@ pub use batched::{AckBuffer, AckBufferConfig, AckCmd, BatchFlusher, BatchedAcker
 pub use noop::NoopAcker;
 pub use once::OnceAcker;
 
+/// Acknowledges or rejects a delivered event message.
+///
+/// Backends define exact durability semantics. In general, [`Acker::ack`]
+/// marks the message as successfully processed. [`Acker::nack`] requests
+/// redelivery when the backend supports it, or leaves the checkpoint
+/// unchanged otherwise. See each backend crate for backend-specific
+/// behavior.
 pub trait Acker: Send + Sync {
     fn ack(&self) -> impl Future<Output = Result<()>> + Send;
     fn nack(&self) -> impl Future<Output = Result<()>> + Send;
