@@ -11,27 +11,44 @@ reuse the same event-sourcing primitives and reader/writer abstractions.
 
 ## What Eventuary Provides
 
-Three layers, in a single workspace:
+Three layers, organized as a multi-crate workspace with a **single umbrella
+crate** that re-exports everything user-facing:
 
 1. A **core event model** (`Event`, `Payload`, `Topic`, `Namespace`,
    `OrganizationId`, `EventKey`, `Metadata`) with validation and a wire
-   format (`SerializedEvent`).
+   format (`SerializedEvent`). Lives in `eventuary-core`.
 2. **Async IO traits** (`Writer`, `Reader`, `Handler`, `Acker`, `Filter`,
-   `Message<A>`) using native AFIT (`impl Future` in trait methods) plus a
-   dyn bridge (`BoxWriter`, `BoxReader`, `BoxHandler`, …) for runtime
-   composition.
-3. **Backend crates** that implement those traits over real systems
-   (memory, sqlite, postgres, sqs, kafka), plus a **conformance crate**
-   with reusable test cases that every backend must pass.
+   `Message<A>`) using native AFIT plus a dyn bridge (`BoxWriter`,
+   `BoxReader`, `BoxHandler`, …) for runtime composition. Also in
+   `eventuary-core`.
+3. **Backend crates** that implement those traits over real systems —
+   `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
+   `eventuary-sqs`, `eventuary-kafka` — plus an `eventuary-conformance`
+   crate with reusable test cases.
+
+The top-level `eventuary` crate is an **umbrella facade**: it re-exports
+`eventuary-core` at its root and exposes each backend behind a Cargo
+feature flag. Typical consumers add a single line to their `Cargo.toml`:
+
+```toml
+eventuary = { version = "0.1.0-alpha.0", features = ["postgres"] }
+```
+
+…and import `eventuary::Event`, `eventuary::postgres::PgReader`, etc.
+without ever depending on the sub-crates directly.
 
 There is **no opinionated server, no broker, no transport**. Eventuary is
-a library you embed: pick the core crate plus the backend(s) you need.
+a library you embed.
 
 ## Workspace Layout
 
 ```
 crates/
-├── eventuary/              # core: model, traits, serialization, retry/DLQ, consumer driver
+├── eventuary/              # umbrella facade — the published consumer-facing crate
+│   ├── Cargo.toml          # features: memory, sqlite, postgres, sqs, kafka
+│   └── src/lib.rs          # pub use eventuary_core::*; feature-gated `pub use <backend>` re-exports
+│
+├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
 │   └── src/
 │       ├── event.rs        # Event aggregate, EventId, RestoreEvent
 │       ├── event_key.rs    # EventKey + PartitionKey impl (FNV-1a)
@@ -52,7 +69,7 @@ crates/
 │       └── io/
 │           ├── writer.rs   # Writer trait + DynWriter / BoxWriter / ArcWriter
 │           ├── reader.rs   # Reader trait (assoc Subscription/Acker/Stream)
-│           ├── handler.rs  # Handler + Filter, plus dyn bridges
+│           ├── handler.rs  # Handler + Filter + dyn bridges
 │           ├── message.rs  # Message<A> (event + acker)
 │           ├── filters.rs  # AllFilter, TopicFilter, NamespacePrefixFilter
 │           ├── acker/
@@ -78,13 +95,27 @@ crates/
 
 | Layer | Can Import | Cannot Import |
 |-------|-----------|---------------|
-| eventuary (core) | stdlib, serde, uuid, chrono, futures, tokio | any backend crate |
-| eventuary-conformance | core + stdlib + test utilities | any backend crate (backends depend on it, not the other way around) |
-| eventuary-<backend> | core + its native driver (rusqlite / sqlx / aws-sdk-sqs / rdkafka) | any other backend crate, conformance crate in non-dev deps |
+| `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, either, base64 | any other eventuary crate |
+| `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate (backends depend on it, not vice versa) |
+| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / rdkafka) | any other backend crate; `eventuary-conformance` only in `[dev-dependencies]` |
+| `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
 
-The core crate has **no backend feature flags**. Backends live in their own
-crates and are published independently — this avoids dependency cycles and
-lets each backend release on its own cadence.
+Key invariants:
+
+- **The umbrella has zero original code.** Its `lib.rs` is `pub use
+  eventuary_core::*;` plus feature-gated `pub use eventuary_<backend> as
+  <backend>;`. Any new type must land in `eventuary-core` or a backend
+  crate, never in the umbrella.
+- **Backends depend only on `eventuary-core`**, not on the umbrella.
+  Otherwise a backend would pull in every sibling backend through the
+  umbrella's optional deps.
+- **The umbrella's features map 1:1 to backend crates.** Adding a backend
+  means adding both a `eventuary-<x>` crate and a matching feature in the
+  umbrella's `Cargo.toml`.
+
+The conformance suite is exposed only as a **direct sub-crate**
+(`eventuary-conformance`), not re-exported through the umbrella. Backend
+authors add it as a `[dev-dependencies]` entry, alongside `eventuary-core`.
 
 ## Key Patterns
 
@@ -321,13 +352,21 @@ When adding a backend, **first** plug it into the conformance suite,
 ## Development
 
 All commands run via `cargo` directly (no `just` recipe yet in this repo).
+Iterate per sub-crate during development; rely on the umbrella for
+consumer-facing verification.
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --lib       # unit tests, no containers
 cargo test -p eventuary-memory     # memory tests
 cargo test -p eventuary-sqlite     # sqlite tests, no containers
+
+# Verify the umbrella for each feature combination consumers might use:
+cargo check -p eventuary --no-default-features
+cargo check -p eventuary --no-default-features --features "memory"
+cargo check -p eventuary --no-default-features --features "postgres,kafka"
+cargo test  -p eventuary --doc --all-features
 
 # Container-based integration tests (rootless podman example):
 export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
@@ -338,9 +377,19 @@ cargo test -p eventuary-sqs      -- --test-threads=1
 cargo test -p eventuary-kafka    -- --test-threads=1
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt + clippy + workspace unit tests +
-memory + sqlite jobs on every push and PR. Postgres / SQS / Kafka jobs run
-in their own runners with the appropriate system deps.
+CI (`.github/workflows/ci.yml`):
+
+- `lint` — fmt + `clippy --workspace --all-targets --all-features`.
+- `umbrella-feature-matrix` — `cargo check -p eventuary` against each
+  feature combination consumers might pick (`""`, `memory`, `sqlite`,
+  `postgres`, `sqs`, `kafka`).
+- `test` — workspace unit tests + memory/sqlite integration + umbrella
+  doctest with `--all-features`.
+- `integration-postgres`, `integration-sqs`, `integration-kafka` — per-backend
+  testcontainers runs.
+
+When adding a new backend, update both the umbrella feature matrix and
+add a per-backend integration job.
 
 ### Workspace Lints
 
@@ -429,9 +478,23 @@ Worth knowing when changing the codebase:
   crate. Failed events become a new event on topic `<original>.dead_letter`,
   carrying the original payload + failure metadata.
 - **UUID v7 everywhere** for time-ordered identifiers.
-- **Core has zero backend feature flags.** Backends are separate crates
-  with their own version cadence; no Cargo feature toggles fan out into
-  core.
+- **Core has zero backend feature flags.** `eventuary-core` deliberately
+  knows nothing about backends. Feature flags live on the `eventuary`
+  umbrella crate, where they map 1:1 to optional sub-crate dependencies.
+  This keeps the core dep graph minimal for crates that only need the
+  model (custom backends, in-process testing helpers, etc.).
+- **Umbrella facade over flat single crate.** Eventuary uses the
+  bevy/wgpu pattern: a thin top-level `eventuary` crate re-exports
+  `eventuary-core` and feature-gated `eventuary-<backend>` crates.
+  Trade-offs: more crate names visible on crates.io (one main + several
+  sub-crates), but real multi-crate workspace for dev (per-crate test
+  boundaries, smaller incremental builds, isolated dep graphs) plus a
+  single import path for typical users.
+- **Conformance suite is a sibling sub-crate, not under the umbrella.**
+  `eventuary-conformance` depends only on `eventuary-core` and is
+  intended as a `[dev-dependencies]` entry for backend authors. Keeping
+  it out of the umbrella avoids dragging test-suite types into every
+  consumer's dep graph.
 
 ## Releasing
 
@@ -443,10 +506,19 @@ Publishing is gated on a GitHub release / version tag. The
 3. A maintainer triggers `workflow_dispatch`.
 
 The workflow verifies the tag matches `workspace.package.version`, runs
-fmt + clippy + unit tests, executes `cargo publish --dry-run` for every
-crate, then publishes in dependency order (core first, then backends),
-with a 60-second pause after the core crate so the crates.io index
-settles.
+fmt + clippy + unit tests, then publishes in three tiers:
+
+1. `eventuary-core` (waits 60s for crates.io index to settle).
+2. `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
+   `eventuary-sqs`, `eventuary-kafka`, `eventuary-conformance` — all
+   depend on `eventuary-core` only.
+3. `eventuary` umbrella — depends on `eventuary-core` plus every backend
+   crate via optional features.
+
+Only the `eventuary-core` step gets a `cargo publish --dry-run` check;
+the downstream crates can't dry-run from a clean machine because their
+`eventuary-core = "..."` dep doesn't exist on crates.io yet. The real
+publish steps run `cargo publish` which verifies the package each time.
 
 A `CARGO_REGISTRY_TOKEN` repository secret must be configured. Migration
 to [trusted publishing] is a future improvement.

@@ -3,33 +3,49 @@
 Eventuary is a Rust event toolkit for logs, queues, streams, routing, replay,
 and acknowledgements across multiple backends.
 
-It provides a small core event model and async IO traits, plus backend
-implementations for memory, SQLite, Postgres, SQS, and Kafka.
+A small core event model and async IO traits, plus optional backend
+implementations for in-memory, SQLite, PostgreSQL, AWS SQS, and Apache Kafka.
+Everything ships behind a single umbrella crate `eventuary` with backends
+gated by Cargo features.
 
 > **Status:** Alpha (`0.1.0-alpha.0`). API may change before `0.1.0`.
 
-## Crates
+## Install
 
-| Crate | Description |
-|-------|-------------|
-| [`eventuary`](crates/eventuary) | Core event model and async IO traits |
-| [`eventuary-memory`](crates/eventuary-memory) | In-memory backend (dev/test) |
-| [`eventuary-sqlite`](crates/eventuary-sqlite) | SQLite event log backend |
-| [`eventuary-postgres`](crates/eventuary-postgres) | PostgreSQL event log backend |
-| [`eventuary-sqs`](crates/eventuary-sqs) | AWS SQS backend |
-| [`eventuary-kafka`](crates/eventuary-kafka) | Apache Kafka backend |
-
-Backend crates are independently published. Pick the ones you need:
+Most consumers should depend on the `eventuary` umbrella crate and pick
+backends via Cargo features. No backend is enabled by default:
 
 ```toml
 [dependencies]
-eventuary = "0.1.0-alpha.0"
-eventuary-postgres = "0.1.0-alpha.0"
+eventuary = { version = "0.1.0-alpha.0", features = ["postgres"] }
 ```
 
-The core `eventuary` crate has no backend feature flags — backends live in
-their own crates. This avoids dependency cycles and lets each backend release
-on its own cadence.
+| Feature | Module | Backend crate |
+|---------|--------|---------------|
+| `memory` | `eventuary::memory` | [`eventuary-memory`](crates/eventuary-memory) |
+| `sqlite` | `eventuary::sqlite` | [`eventuary-sqlite`](crates/eventuary-sqlite) |
+| `postgres` | `eventuary::postgres` | [`eventuary-postgres`](crates/eventuary-postgres) |
+| `sqs` | `eventuary::sqs` | [`eventuary-sqs`](crates/eventuary-sqs) |
+| `kafka` | `eventuary::kafka` | [`eventuary-kafka`](crates/eventuary-kafka) |
+
+The umbrella re-exports `eventuary-core` at its root (so
+`eventuary::Event`, `eventuary::Writer`, etc. work directly) and re-exports
+each backend crate as a feature-gated module (`eventuary::memory::InmemReader`,
+`eventuary::sqlite::SqliteReader`, …).
+
+### Direct sub-crate use
+
+The workspace also publishes the individual crates separately for advanced
+use cases — for example, writing a custom backend without pulling the
+umbrella, or testing your backend against the shared conformance suite:
+
+| Crate | When to depend directly |
+|-------|------------------------|
+| [`eventuary-core`](crates/eventuary-core) | Building a new backend; want only the event model + IO traits |
+| [`eventuary-conformance`](crates/eventuary-conformance) | Dev-dep for backend authors who want to run the shared conformance suite |
+| [`eventuary-memory`](crates/eventuary-memory) etc. | Pinning a backend's version independently of the umbrella |
+
+Typical applications should stick to the umbrella `eventuary` crate.
 
 ## Core Model
 
@@ -51,9 +67,13 @@ let event = Event::create(
 - `Topic` — dot-separated, lowercase/digit/`_`/`-`.
 - `Namespace` — slash-rooted hierarchy: `/`, `/billing`, `/billing/invoices`.
 - `OrganizationId` — tenant scope; `_platform` sentinel for cross-tenant.
-- `Metadata` — validated key/value pairs.
+- `EventKey` — record key (≤1024 chars). Implements `PartitionKey` via
+  FNV-1a for deterministic partition routing.
+- `Metadata` — validated key/value pairs. `CORRELATION_ID` / `CAUSATION_ID`
+  constants for the conventional tracing headers.
 - `SerializedEvent` — wire format with `to_json_value` / `from_json_value` /
-  `to_json_string` / `from_json_str` helpers used by every backend.
+  `to_json_string` / `from_json_str` / `from_json_slice` helpers used by
+  every backend.
 
 ## Async IO
 
@@ -65,7 +85,7 @@ async fn emit<W: Writer>(writer: &W, event: &Event) -> eventuary::Result<()> {
 }
 ```
 
-Native async traits with `impl Future` return types. No `async-trait`. A dyn
+Native async traits with `impl Future` return types — no `async-trait`. A dyn
 bridge (`DynWriter`, `BoxWriter`, `ArcWriter` and same for `Reader`,
 `Handler`, `Acker`) is provided for runtime composition and DI.
 
@@ -79,14 +99,19 @@ async fn emit_boxed(writer: &BoxWriter, event: &Event) -> eventuary::Result<()> 
 
 ## In-Memory Backend Example
 
+```toml
+[dependencies]
+eventuary = { version = "0.1.0-alpha.0", features = ["memory"] }
+```
+
 ```rust
-use eventuary::{Event, Payload, Reader, Writer};
-use eventuary_memory::{InmemReader, InmemWriter};
+use eventuary::memory::{InmemReader, InmemWriter};
+use eventuary::{Event, EventSubscription, OrganizationId, Payload, Reader, Writer};
 use tokio::sync::mpsc;
 
 let (tx, rx) = mpsc::channel(100);
 let writer = InmemWriter::new(tx);
-let mut reader = InmemReader::new(rx);
+let reader = InmemReader::new(rx);
 
 let event = Event::create(
     "acme",
@@ -97,6 +122,9 @@ let event = Event::create(
 )?;
 
 writer.write(&event).await?;
+
+let subscription = EventSubscription::new(OrganizationId::new("acme")?);
+let mut stream = reader.read(subscription).await?;
 ```
 
 ## Consumer Loop
@@ -165,10 +193,11 @@ The Kafka backend requires `cmake`, `libssl-dev`, `libcurl4-openssl-dev`,
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --lib       # unit tests, no containers
 cargo test -p eventuary-memory     # memory tests
 cargo test -p eventuary-sqlite     # sqlite tests, no containers
+cargo check -p eventuary --no-default-features --features "postgres,kafka"
 ```
 
 ## Releasing
@@ -181,15 +210,20 @@ publish. The workflow at `.github/workflows/publish.yml` runs only when:
 3. A maintainer triggers `workflow_dispatch` (with optional dry-run input).
 
 The workflow verifies the tag matches `workspace.package.version`, runs fmt /
-clippy / unit tests, executes `cargo publish --dry-run` for every crate, then
-publishes the six crates in dependency order with a 60-second pause after the
-core crate to let the index settle.
+clippy / unit tests, executes `cargo publish --dry-run` for `eventuary-core`,
+then publishes the eight crates in three tiers:
+
+1. `eventuary-core` (waits 60s for the crates.io index to settle)
+2. `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
+   `eventuary-sqs`, `eventuary-kafka`, `eventuary-conformance` — all depend
+   on `eventuary-core` only
+3. `eventuary` (the umbrella, re-exports everything above)
 
 ### Release procedure
 
 ```bash
 # 1. Bump version in root Cargo.toml under [workspace.package]
-#    (all six crates inherit via workspace.package.version)
+#    (all crates inherit via workspace.package.version)
 
 # 2. Commit and push
 git commit -am "chore: release v0.1.0-alpha.1"
