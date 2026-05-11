@@ -58,20 +58,28 @@ impl KafkaReader {
         })
     }
 
-    pub async fn read(&self) -> Result<KafkaStream> {
-        eventuary::io::Reader::read(self, subscription_from_config(&self.config)).await
+    /// Build an [`EventSubscription`] seeded from this reader's config: the
+    /// configured tenant, consumer group, event-topic filter, namespace
+    /// prefix, `start_from`, `end_at`, and `limit`. Use it as a starting
+    /// point and tweak before passing to [`Reader::read`].
+    pub fn default_subscription(&self) -> EventSubscription {
+        let mut subscription = EventSubscription::new(self.config.organization.clone());
+        subscription.consumer_group_id = Some(self.config.consumer_group_id.clone());
+        subscription.topics = self.config.event_topics.clone();
+        subscription.namespace_prefix = self.config.namespace.clone();
+        subscription.start_from = self.config.start_from;
+        subscription.end_at = self.config.end_at;
+        subscription.limit = self.config.limit;
+        subscription
     }
-}
 
-fn subscription_from_config(config: &KafkaReaderConfig) -> EventSubscription {
-    let mut subscription = EventSubscription::new(config.organization.clone());
-    subscription.consumer_group_id = Some(config.consumer_group_id.clone());
-    subscription.topics = config.event_topics.clone();
-    subscription.namespace_prefix = config.namespace.clone();
-    subscription.start_from = config.start_from;
-    subscription.end_at = config.end_at;
-    subscription.limit = config.limit;
-    subscription
+    /// Convenience entry point that reads with [`default_subscription`].
+    /// Equivalent to `Reader::read(self, self.default_subscription())`.
+    ///
+    /// [`default_subscription`]: KafkaReader::default_subscription
+    pub async fn read(&self) -> Result<KafkaStream> {
+        eventuary::io::Reader::read(self, self.default_subscription()).await
+    }
 }
 
 fn apply_timestamp_seek(
@@ -140,19 +148,33 @@ impl Reader for KafkaReader {
     type Stream = KafkaStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        if subscription.organization != self.config.organization {
+            return Err(Error::Config(format!(
+                "subscription organization `{}` does not match reader tenant `{}`",
+                subscription.organization, self.config.organization
+            )));
+        }
+        if let Some(group) = subscription.consumer_group_id.as_ref()
+            && group != &self.config.consumer_group_id
+        {
+            return Err(Error::Config(format!(
+                "subscription consumer_group_id `{}` does not match reader group `{}` (Kafka group is bound at construction)",
+                group.as_str(),
+                self.config.consumer_group_id.as_str()
+            )));
+        }
+        if subscription.start_from != self.config.start_from {
+            return Err(Error::Config(
+                "subscription start_from cannot override reader; Kafka group offset is bound at construction".to_owned(),
+            ));
+        }
+
         let consumer = Arc::clone(&self.consumer);
-        let mut config = self.config.clone();
-        config.organization = subscription.organization.clone();
-        config.start_from = subscription.start_from;
-        config.event_topics = subscription.topics.clone();
-        config.namespace = subscription.namespace_prefix.clone();
-        config.end_at = subscription.end_at;
-        config.limit = subscription.limit;
         let flusher = KafkaFlusher::new(Arc::clone(&consumer));
-        let ack_buffer = AckBuffer::spawn(flusher, config.ack_buffer.clone());
+        let ack_buffer = AckBuffer::spawn(flusher, self.config.ack_buffer.clone());
         let tx_ack = ack_buffer.sender();
 
-        let (tx, rx) = mpsc::channel(config.max_poll_records);
+        let (tx, rx) = mpsc::channel(self.config.max_poll_records);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
 
@@ -176,42 +198,54 @@ impl Reader for KafkaReader {
                     }
                     Some(Ok(m)) => m,
                 };
-                let body = match msg.payload() {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let serialized: SerializedEvent = match serde_json::from_slice(body) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("kafka body parse error: {e}");
-                        continue;
-                    }
-                };
-                if serialized.organization != config.organization.as_str() {
-                    let token = KafkaOffsetToken {
-                        topic: msg.topic().to_owned(),
-                        partition: msg.partition(),
-                        offset: msg.offset(),
-                    };
-                    let skip_acker = BatchedAcker::new(token, tx_ack.clone());
-                    let _ = skip_acker.ack().await;
-                    continue;
-                }
-                let event: Event = match serialized.to_event() {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!("kafka to_event error: {e}");
-                        continue;
-                    }
-                };
                 let token = KafkaOffsetToken {
                     topic: msg.topic().to_owned(),
                     partition: msg.partition(),
                     offset: msg.offset(),
                 };
+                let body = match msg.payload() {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!(
+                            topic = %token.topic,
+                            partition = token.partition,
+                            offset = token.offset,
+                            "kafka record missing payload; skip-acking"
+                        );
+                        let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                        continue;
+                    }
+                };
+                let serialized: SerializedEvent = match serde_json::from_slice(body) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            topic = %token.topic,
+                            partition = token.partition,
+                            offset = token.offset,
+                            error = %e,
+                            "kafka body parse error; skip-acking poison record"
+                        );
+                        let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                        continue;
+                    }
+                };
+                let event: Event = match serialized.to_event() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            topic = %token.topic,
+                            partition = token.partition,
+                            offset = token.offset,
+                            error = %e,
+                            "kafka to_event error; skip-acking poison record"
+                        );
+                        let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                        continue;
+                    }
+                };
                 if !subscription.matches(&event) {
-                    let skip_acker = BatchedAcker::new(token, tx_ack.clone());
-                    let _ = skip_acker.ack().await;
+                    let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                     continue;
                 }
                 let acker = BatchedAcker::new(token, tx_ack.clone());
@@ -219,7 +253,7 @@ impl Reader for KafkaReader {
                     return;
                 }
                 delivered += 1;
-                if let Some(l) = config.limit
+                if let Some(l) = subscription.limit
                     && delivered >= l
                 {
                     return;
