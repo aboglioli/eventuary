@@ -9,8 +9,8 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
+use eventuary::io::Writer;
 use eventuary::io::acker::AckBufferConfig;
-use eventuary::io::{Reader, Writer};
 use eventuary::{ConsumerGroupId, Error, Event, OrganizationId, Payload, StartFrom, Topic};
 
 use eventuary_kafka::{KafkaReader, KafkaReaderConfig, KafkaWriter};

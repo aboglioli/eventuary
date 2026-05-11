@@ -4,8 +4,9 @@ mod noop;
 mod once;
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
+
+use futures::future::BoxFuture;
 
 use crate::error::Result;
 
@@ -45,15 +46,15 @@ impl<T: Acker + ?Sized> Acker for Box<T> {
 }
 
 pub trait DynAcker: Send + Sync {
-    fn ack_dyn<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-    fn nack_dyn<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn ack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
+    fn nack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
 }
 
 impl<T: Acker + ?Sized> DynAcker for T {
-    fn ack_dyn<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    fn ack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         Box::pin(<Self as Acker>::ack(self))
     }
-    fn nack_dyn<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    fn nack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         Box::pin(<Self as Acker>::nack(self))
     }
 }

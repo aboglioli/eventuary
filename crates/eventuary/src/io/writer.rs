@@ -1,6 +1,7 @@
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
+
+use futures::future::BoxFuture;
 
 use crate::error::Result;
 use crate::event::Event;
@@ -48,27 +49,15 @@ impl<T: Writer + ?Sized> Writer for Box<T> {
 }
 
 pub trait DynWriter: Send + Sync {
-    fn write_dyn<'a>(
-        &'a self,
-        event: &'a Event,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-    fn write_all_dyn<'a>(
-        &'a self,
-        events: &'a [Event],
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn write_dyn<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, Result<()>>;
+    fn write_all_dyn<'a>(&'a self, events: &'a [Event]) -> BoxFuture<'a, Result<()>>;
 }
 
 impl<T: Writer + ?Sized> DynWriter for T {
-    fn write_dyn<'a>(
-        &'a self,
-        event: &'a Event,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    fn write_dyn<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, Result<()>> {
         Box::pin(<Self as Writer>::write(self, event))
     }
-    fn write_all_dyn<'a>(
-        &'a self,
-        events: &'a [Event],
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    fn write_all_dyn<'a>(&'a self, events: &'a [Event]) -> BoxFuture<'a, Result<()>> {
         Box::pin(<Self as Writer>::write_all(self, events))
     }
 }

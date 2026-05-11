@@ -12,9 +12,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary::io::filters::{NamespacePrefixFilter, TopicFilter};
-use eventuary::io::{Filter, Message, Reader};
-use eventuary::{Error, Event, Result, SerializedEvent, StartFrom};
+use eventuary::io::{Message, Reader};
+use eventuary::{Error, Event, EventSubscription, Result, SerializedEvent, StartFrom};
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
 use crate::reader_config::KafkaReaderConfig;
@@ -58,6 +57,21 @@ impl KafkaReader {
             config,
         })
     }
+
+    pub async fn read(&self) -> Result<KafkaStream> {
+        eventuary::io::Reader::read(self, subscription_from_config(&self.config)).await
+    }
+}
+
+fn subscription_from_config(config: &KafkaReaderConfig) -> EventSubscription {
+    let mut subscription = EventSubscription::new(config.organization.clone());
+    subscription.consumer_group_id = Some(config.consumer_group_id.clone());
+    subscription.topics = config.event_topics.clone();
+    subscription.namespace_prefix = config.namespace.clone();
+    subscription.start_from = config.start_from;
+    subscription.end_at = config.end_at;
+    subscription.limit = config.limit;
+    subscription
 }
 
 fn apply_timestamp_seek(
@@ -121,12 +135,19 @@ impl Stream for KafkaStream {
 }
 
 impl Reader for KafkaReader {
+    type Subscription = EventSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
     type Stream = KafkaStream;
 
-    async fn read(&self) -> Result<Self::Stream> {
+    async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let consumer = Arc::clone(&self.consumer);
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.organization = subscription.organization.clone();
+        config.start_from = subscription.start_from;
+        config.event_topics = subscription.topics.clone();
+        config.namespace = subscription.namespace_prefix.clone();
+        config.end_at = subscription.end_at;
+        config.limit = subscription.limit;
         let flusher = KafkaFlusher::new(Arc::clone(&consumer));
         let ack_buffer = AckBuffer::spawn(flusher, config.ack_buffer.clone());
         let tx_ack = ack_buffer.sender();
@@ -136,14 +157,6 @@ impl Reader for KafkaReader {
         let cancel_for_task = cancel.clone();
 
         let handle = tokio::spawn(async move {
-            let topic_filter = config.event_topics.clone().map(TopicFilter::new);
-            let ns_filter = config.namespace.clone().and_then(|ns| {
-                if ns.is_root() {
-                    None
-                } else {
-                    Some(NamespacePrefixFilter::new(ns))
-                }
-            });
             let mut delivered = 0usize;
             let mut stream = consumer.stream();
 
@@ -184,11 +197,6 @@ impl Reader for KafkaReader {
                     let _ = skip_acker.ack().await;
                     continue;
                 }
-                if let Some(end) = config.end_at
-                    && serialized.timestamp > end
-                {
-                    return;
-                }
                 let event: Event = match serialized.to_event() {
                     Ok(e) => e,
                     Err(e) => {
@@ -201,16 +209,7 @@ impl Reader for KafkaReader {
                     partition: msg.partition(),
                     offset: msg.offset(),
                 };
-                if let Some(f) = topic_filter.as_ref()
-                    && !f.matches(&event)
-                {
-                    let skip_acker = BatchedAcker::new(token, tx_ack.clone());
-                    let _ = skip_acker.ack().await;
-                    continue;
-                }
-                if let Some(f) = ns_filter.as_ref()
-                    && !f.matches(&event)
-                {
+                if !subscription.matches(&event) {
                     let skip_acker = BatchedAcker::new(token, tx_ack.clone());
                     let _ = skip_acker.ack().await;
                     continue;

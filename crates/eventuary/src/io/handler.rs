@@ -1,6 +1,7 @@
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
+
+use futures::future::BoxFuture;
 
 use crate::error::Result;
 use crate::event::Event;
@@ -30,20 +31,14 @@ impl<T: Handler + ?Sized> Handler for Box<T> {
 
 pub trait DynHandler: Send + Sync {
     fn id_dyn(&self) -> &str;
-    fn handle_dyn<'a>(
-        &'a self,
-        event: Event,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    fn handle_dyn<'a>(&'a self, event: Event) -> BoxFuture<'a, Result<()>>;
 }
 
 impl<T: Handler + ?Sized> DynHandler for T {
     fn id_dyn(&self) -> &str {
         <Self as Handler>::id(self)
     }
-    fn handle_dyn<'a>(
-        &'a self,
-        event: Event,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    fn handle_dyn<'a>(&'a self, event: Event) -> BoxFuture<'a, Result<()>> {
         Box::pin(<Self as Handler>::handle(self, event))
     }
 }
