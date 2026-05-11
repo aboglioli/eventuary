@@ -50,7 +50,7 @@ mod tests {
     use crate::payload::Payload;
 
     fn ev(topic: &str, namespace: &str) -> Event {
-        Event::create("org", namespace, topic, "k", Payload::from_string("p")).unwrap()
+        Event::create("org", namespace, topic, Payload::from_string("p")).unwrap()
     }
 
     #[test]

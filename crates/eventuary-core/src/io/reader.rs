@@ -142,14 +142,8 @@ mod tests {
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker>>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
-            let event = Event::create(
-                "org",
-                "/x",
-                "thing.happened",
-                "k",
-                Payload::from_string("p"),
-            )
-            .unwrap();
+            let event =
+                Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap();
             let msg = Message::new(event, NoopAcker);
             Ok(Box::pin(stream::once(async move { Ok(msg) })))
         }

@@ -78,14 +78,11 @@ mod tests {
     }
 
     fn ev() -> Event {
-        Event::create(
-            "org",
-            "/x",
-            "thing.happened",
-            "k",
-            Payload::from_string("p"),
-        )
-        .unwrap()
+        Event::builder("org", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("k")
+            .unwrap()
+            .build()
     }
 
     #[tokio::test]

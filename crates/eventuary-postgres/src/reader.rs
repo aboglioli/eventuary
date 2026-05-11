@@ -287,7 +287,8 @@ async fn fetch_batch(
     let mut sql = String::from(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
-         timestamp::text AS timestamp_text, version \
+         timestamp::text AS timestamp_text, version, parent_id::text AS parent_id_text, \
+         correlation_id, causation_id \
          FROM events WHERE sequence > $1 AND organization = $2",
     );
     let mut bind_index = 3usize;
@@ -363,6 +364,9 @@ async fn fetch_batch(
                 metadata,
                 timestamp,
                 version: row.get::<i64, _>("version") as u64,
+                parent_id: row.get("parent_id_text"),
+                correlation_id: row.get("correlation_id"),
+                causation_id: row.get("causation_id"),
             };
             Ok((serialized, sequence))
         })

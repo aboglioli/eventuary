@@ -56,8 +56,8 @@ fn insert_event(conn: &rusqlite::Connection, event: &Event) -> Result<()> {
     let metadata = serde_json::to_string(&serialized.metadata)
         .map_err(|e| Error::Store(format!("encode metadata: {e}")))?;
     conn.execute(
-        "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             serialized.id,
             serialized.organization,
@@ -69,6 +69,9 @@ fn insert_event(conn: &rusqlite::Connection, event: &Event) -> Result<()> {
             metadata,
             serialized.timestamp.to_rfc3339(),
             serialized.version as i64,
+            serialized.parent_id,
+            serialized.correlation_id,
+            serialized.causation_id,
         ],
     )
     .map_err(|e| Error::Store(e.to_string()))?;

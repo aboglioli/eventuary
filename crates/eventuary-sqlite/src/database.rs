@@ -14,12 +14,15 @@ CREATE TABLE IF NOT EXISTS events (
     organization TEXT NOT NULL,
     namespace TEXT NOT NULL,
     topic TEXT NOT NULL,
-    event_key TEXT NOT NULL,
+    event_key TEXT,
     payload TEXT NOT NULL,
     content_type TEXT NOT NULL,
     metadata TEXT NOT NULL,
     timestamp TEXT NOT NULL,
-    version INTEGER NOT NULL
+    version INTEGER NOT NULL,
+    parent_id TEXT,
+    correlation_id TEXT,
+    causation_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_org_seq ON events (organization, sequence);
@@ -84,6 +87,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+        let lineage_columns: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name IN ('parent_id', 'correlation_id', 'causation_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage_columns, 3);
     }
 
     #[test]

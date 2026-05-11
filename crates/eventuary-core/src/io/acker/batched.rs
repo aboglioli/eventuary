@@ -42,6 +42,30 @@ pub struct AckBuffer<F: BatchFlusher> {
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+async fn drain_acks<F: BatchFlusher>(acks: &mut Vec<F::Token>, flusher: &Arc<F>, capacity: usize) {
+    if acks.is_empty() {
+        return;
+    }
+    let drained = std::mem::replace(acks, Vec::with_capacity(capacity));
+    if let Err(e) = flusher.flush(drained).await {
+        tracing::error!("ack buffer flush error: {e}");
+    }
+}
+
+async fn drain_nacks<F: BatchFlusher>(
+    nacks: &mut Vec<F::Token>,
+    flusher: &Arc<F>,
+    capacity: usize,
+) {
+    if nacks.is_empty() {
+        return;
+    }
+    let drained = std::mem::replace(nacks, Vec::with_capacity(capacity));
+    if let Err(e) = flusher.flush_nack(drained).await {
+        tracing::error!("ack buffer flush_nack error: {e}");
+    }
+}
+
 impl<F: BatchFlusher + 'static> AckBuffer<F> {
     pub fn spawn(flusher: F, config: AckBufferConfig) -> Arc<Self> {
         let cap = (config.max_pending * 4).max(16);
@@ -58,68 +82,24 @@ impl<F: BatchFlusher + 'static> AckBuffer<F> {
                         Some(AckCmd::Ack(t)) => {
                             acks.push(t);
                             if acks.len() >= config.max_pending {
-                                let drained = std::mem::replace(
-                                    &mut acks,
-                                    Vec::with_capacity(config.max_pending),
-                                );
-                                if let Err(e) = flusher.flush(drained).await {
-                                    tracing::error!("ack buffer flush error: {e}");
-                                }
+                                drain_acks(&mut acks, &flusher, config.max_pending).await;
                             }
                         }
                         Some(AckCmd::Nack(t)) => {
                             nacks.push(t);
                             if nacks.len() >= config.max_pending {
-                                let drained = std::mem::replace(
-                                    &mut nacks,
-                                    Vec::with_capacity(config.max_pending),
-                                );
-                                if let Err(e) = flusher.flush_nack(drained).await {
-                                    tracing::error!("ack buffer flush_nack error: {e}");
-                                }
+                                drain_nacks(&mut nacks, &flusher, config.max_pending).await;
                             }
                         }
                         Some(AckCmd::Flush) | None => {
-                            if !acks.is_empty() {
-                                let drained = std::mem::replace(
-                                    &mut acks,
-                                    Vec::with_capacity(config.max_pending),
-                                );
-                                if let Err(e) = flusher.flush(drained).await {
-                                    tracing::error!("ack buffer flush error: {e}");
-                                }
-                            }
-                            if !nacks.is_empty() {
-                                let drained = std::mem::replace(
-                                    &mut nacks,
-                                    Vec::with_capacity(config.max_pending),
-                                );
-                                if let Err(e) = flusher.flush_nack(drained).await {
-                                    tracing::error!("ack buffer flush_nack error: {e}");
-                                }
-                            }
+                            drain_acks(&mut acks, &flusher, config.max_pending).await;
+                            drain_nacks(&mut nacks, &flusher, config.max_pending).await;
                             break;
                         }
                     },
                     _ = tick.tick() => {
-                        if !acks.is_empty() {
-                            let drained = std::mem::replace(
-                                &mut acks,
-                                Vec::with_capacity(config.max_pending),
-                            );
-                            if let Err(e) = flusher.flush(drained).await {
-                                tracing::error!("ack buffer flush error: {e}");
-                            }
-                        }
-                        if !nacks.is_empty() {
-                            let drained = std::mem::replace(
-                                &mut nacks,
-                                Vec::with_capacity(config.max_pending),
-                            );
-                            if let Err(e) = flusher.flush_nack(drained).await {
-                                tracing::error!("ack buffer flush_nack error: {e}");
-                            }
-                        }
+                        drain_acks(&mut acks, &flusher, config.max_pending).await;
+                        drain_nacks(&mut nacks, &flusher, config.max_pending).await;
                     }
                 }
             }
