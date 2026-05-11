@@ -10,7 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-eventuary = { workspace = true }
+eventuary-core = { workspace = true }
 futures.workspace = true
 tokio.workspace = true
 

@@ -1,8 +1,8 @@
 use aws_sdk_sqs::Client;
 use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
 
-use eventuary::io::Writer;
-use eventuary::{Error, Event, Result, SerializedEvent};
+use eventuary_core::io::Writer;
+use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 const SQS_BATCH_MAX: usize = 10;
 const SQS_PAYLOAD_MAX: usize = 256 * 1024;

@@ -5,9 +5,9 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use tokio::sync::{Mutex, mpsc};
 
-use eventuary::io::acker::NoopAcker;
-use eventuary::io::{Message, Reader};
-use eventuary::{Event, EventSubscription, Result};
+use eventuary_core::io::acker::NoopAcker;
+use eventuary_core::io::{Message, Reader};
+use eventuary_core::{Event, EventSubscription, Result};
 
 pub struct InmemReader {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
@@ -69,8 +69,8 @@ impl Reader for InmemReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary::io::{BoxReader, ReaderExt};
-    use eventuary::{OrganizationId, Payload};
+    use eventuary_core::io::{BoxReader, ReaderExt};
+    use eventuary_core::{OrganizationId, Payload};
     use futures::StreamExt;
 
     fn subscription() -> EventSubscription {

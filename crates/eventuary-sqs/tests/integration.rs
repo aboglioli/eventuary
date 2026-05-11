@@ -9,9 +9,9 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage};
 
-use eventuary::io::Writer;
-use eventuary::io::acker::AckBufferConfig;
-use eventuary::{Error, Event, OrganizationId, Payload, StartFrom};
+use eventuary_core::io::Writer;
+use eventuary_core::io::acker::AckBufferConfig;
+use eventuary_core::{Error, Event, OrganizationId, Payload, StartFrom};
 
 use eventuary_sqs::{SqsReader, SqsReaderConfig, SqsWriter};
 

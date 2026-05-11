@@ -3,8 +3,8 @@ use std::time::Duration;
 use rdkafka::ClientConfig;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 
-use eventuary::io::Writer;
-use eventuary::{Error, Event, Result, SerializedEvent};
+use eventuary_core::io::Writer;
+use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 

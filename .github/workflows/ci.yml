@@ -22,7 +22,29 @@ jobs:
       - name: Install librdkafka build deps
         run: sudo apt-get update && sudo apt-get install -y $RDKAFKA_DEPS
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  umbrella-feature-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "memory"
+          - "sqlite"
+          - "postgres"
+          - "sqs"
+          - "kafka"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install librdkafka build deps
+        if: contains(matrix.features, 'kafka')
+        run: sudo apt-get update && sudo apt-get install -y $RDKAFKA_DEPS
+      - name: cargo check -p eventuary --no-default-features --features '${{ matrix.features }}'
+        run: cargo check -p eventuary --no-default-features --features "${{ matrix.features }}"
 
   test:
     runs-on: ubuntu-latest
@@ -38,6 +60,8 @@ jobs:
         run: cargo test -p eventuary-memory
       - name: SQLite integration tests
         run: cargo test -p eventuary-sqlite
+      - name: Umbrella doctest (all features)
+        run: cargo test -p eventuary --doc --all-features
 
   integration-postgres:
     runs-on: ubuntu-latest

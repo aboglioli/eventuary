@@ -3,8 +3,8 @@ use aws_sdk_sqs::types::{
     ChangeMessageVisibilityBatchRequestEntry, DeleteMessageBatchRequestEntry,
 };
 
-use eventuary::io::acker::BatchFlusher;
-use eventuary::{Error, Result};
+use eventuary_core::io::acker::BatchFlusher;
+use eventuary_core::{Error, Result};
 
 /// ack issues `DeleteMessageBatch`. nack issues `ChangeMessageVisibilityBatch`
 /// with `visibility_timeout = 0` so SQS redelivers immediately. Both inspect

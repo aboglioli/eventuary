@@ -3,11 +3,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eventuary::BoxWriter;
-use eventuary::io::WriterExt;
 use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
+use eventuary_core::BoxWriter;
+use eventuary_core::io::WriterExt;
 use eventuary_postgres::{PgDatabase, PgEventWriter, PgReader, PgReaderConfig};
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -71,7 +71,7 @@ enum AckOp {
 fn make_ack(acker: Arc<eventuary_postgres::PgAckerVariant>, op: AckOp) -> AckFn {
     Box::new(move || -> AckFuture {
         Box::pin(async move {
-            use eventuary::io::Acker;
+            use eventuary_core::io::Acker;
             match op {
                 AckOp::Ack => acker.ack().await,
                 AckOp::Nack => acker.nack().await,

@@ -9,9 +9,9 @@ use futures::Stream;
 use sqlx::{PgPool, Row};
 use tokio::sync::mpsc;
 
-use eventuary::io::acker::{NoopAcker, OnceAcker};
-use eventuary::io::{Acker, Message, Reader};
-use eventuary::{
+use eventuary_core::io::acker::{NoopAcker, OnceAcker};
+use eventuary_core::io::{Acker, Message, Reader};
+use eventuary_core::{
     ConsumerGroupId, Error, EventSubscription, Namespace, OrganizationId, Result, SerializedEvent,
     StartFrom, Topic,
 };
@@ -115,7 +115,7 @@ impl PgReader {
     }
 
     pub async fn read(&self) -> Result<PgStream> {
-        eventuary::io::Reader::read(self, subscription_from_config(&self.config)).await
+        eventuary_core::io::Reader::read(self, subscription_from_config(&self.config)).await
     }
 }
 

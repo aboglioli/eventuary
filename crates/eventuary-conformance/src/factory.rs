@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use eventuary::{
+use eventuary_core::{
     BoxWriter, ConsumerGroupId, Event, Namespace, OrganizationId, Result, StartFrom, Topic,
 };
 

@@ -3,11 +3,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eventuary::BoxWriter;
-use eventuary::io::WriterExt;
 use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
+use eventuary_core::BoxWriter;
+use eventuary_core::io::WriterExt;
 use eventuary_sqlite::{SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig};
 use futures::StreamExt;
 use tempfile::TempDir;
@@ -45,7 +45,7 @@ impl SqliteBackend {
 fn make_ack(acker: Arc<eventuary_sqlite::SqliteAckerVariant>, op: AckOp) -> AckFn {
     Box::new(move || -> AckFuture {
         Box::pin(async move {
-            use eventuary::io::Acker;
+            use eventuary_core::io::Acker;
             match op {
                 AckOp::Ack => acker.ack().await,
                 AckOp::Nack => acker.nack().await,

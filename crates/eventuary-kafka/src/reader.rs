@@ -11,9 +11,9 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use eventuary::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary::io::{Message, Reader};
-use eventuary::{Error, Event, EventSubscription, Result, SerializedEvent, StartFrom};
+use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
+use eventuary_core::io::{Message, Reader};
+use eventuary_core::{Error, Event, EventSubscription, Result, SerializedEvent, StartFrom};
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
 use crate::reader_config::KafkaReaderConfig;
@@ -78,7 +78,7 @@ impl KafkaReader {
     ///
     /// [`default_subscription`]: KafkaReader::default_subscription
     pub async fn read(&self) -> Result<KafkaStream> {
-        eventuary::io::Reader::read(self, self.default_subscription()).await
+        eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
 }
 

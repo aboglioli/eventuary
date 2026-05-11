@@ -1,11 +1,27 @@
-//! Eventuary core: event model and async IO traits.
+//! Eventuary: typed event model, async IO traits, and feature-gated backends.
 //!
-//! This crate provides the typed event model ([`Event`], [`Payload`], [`Topic`],
-//! [`Namespace`], [`OrganizationId`]), serialization helpers ([`SerializedEvent`]),
-//! and async IO traits for backends ([`Reader`], [`Writer`], [`Handler`], [`Acker`]).
+//! `eventuary` is an umbrella crate that re-exports the
+//! [`eventuary-core`](https://crates.io/crates/eventuary-core) types and IO
+//! traits at its root, and exposes each backend behind a Cargo feature flag:
 //!
-//! Backends (memory, SQLite, Postgres, SQS, Kafka) live in sibling crates and
-//! depend on this one.
+//! | Feature | Module | Backend crate |
+//! |---------|--------|---------------|
+//! | `memory` | [`memory`] | [`eventuary-memory`](https://crates.io/crates/eventuary-memory) |
+//! | `sqlite` | [`sqlite`] | [`eventuary-sqlite`](https://crates.io/crates/eventuary-sqlite) |
+//! | `postgres` | [`postgres`] | [`eventuary-postgres`](https://crates.io/crates/eventuary-postgres) |
+//! | `sqs` | [`sqs`] | [`eventuary-sqs`](https://crates.io/crates/eventuary-sqs) |
+//! | `kafka` | [`kafka`] | [`eventuary-kafka`](https://crates.io/crates/eventuary-kafka) |
+//!
+//! No backend is enabled by default. Pick the ones you need:
+//!
+//! ```toml
+//! [dependencies]
+//! eventuary = { version = "0.1.0-alpha.0", features = ["postgres"] }
+//! ```
+//!
+//! Backend-authoring crates may prefer to depend directly on `eventuary-core`
+//! and use [`eventuary-conformance`](https://crates.io/crates/eventuary-conformance)
+//! as a dev-dependency for the shared backend conformance test suite.
 //!
 //! # Example
 //!
@@ -21,49 +37,26 @@
 //! ).unwrap();
 //! assert_eq!(event.topic().as_str(), "invoice.created");
 //! ```
-//!
-//! See the [project README](https://github.com/aboglioli/eventuary) for the full
-//! tour and backend usage examples.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod collector;
-mod consumer_group_id;
-mod cursor;
-mod error;
-mod event;
-mod event_key;
-pub mod io;
-mod metadata;
-mod namespace;
-mod organization;
-mod partition;
-mod payload;
-mod serialization;
-mod snapshot;
-mod start_from;
-mod subscription;
-mod topic;
+pub use eventuary_core::*;
 
-pub use collector::EventCollector;
-pub use consumer_group_id::ConsumerGroupId;
-pub use cursor::{EventCursor, EventSequence};
-pub use error::{Error, Result};
-pub use event::{Event, EventId, RestoreEvent};
-pub use event_key::EventKey;
-pub use io::{
-    Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
-    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
-    DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
-    FilterExt, FilteredHandler, Handler, HandlerExt, Message, Reader, ReaderExt, RetryAction,
-    RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt, backoff_delay,
-};
-pub use metadata::{CAUSATION_ID, CORRELATION_ID, Metadata};
-pub use namespace::Namespace;
-pub use organization::OrganizationId;
-pub use partition::PartitionKey;
-pub use payload::{ContentType, Payload};
-pub use serialization::SerializedEvent;
-pub use snapshot::{Snapshot, SnapshotEventId};
-pub use start_from::StartFrom;
-pub use subscription::EventSubscription;
-pub use topic::Topic;
+#[cfg(feature = "memory")]
+#[cfg_attr(docsrs, doc(cfg(feature = "memory")))]
+pub use eventuary_memory as memory;
+
+#[cfg(feature = "sqlite")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sqlite")))]
+pub use eventuary_sqlite as sqlite;
+
+#[cfg(feature = "postgres")]
+#[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
+pub use eventuary_postgres as postgres;
+
+#[cfg(feature = "sqs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sqs")))]
+pub use eventuary_sqs as sqs;
+
+#[cfg(feature = "kafka")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kafka")))]
+pub use eventuary_kafka as kafka;

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 
-use eventuary::io::acker::BatchFlusher;
-use eventuary::{Error, Result};
+use eventuary_core::io::acker::BatchFlusher;
+use eventuary_core::{Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct KafkaOffsetToken {
