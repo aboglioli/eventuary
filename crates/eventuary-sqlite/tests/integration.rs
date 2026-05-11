@@ -7,7 +7,7 @@ use tokio::time::timeout;
 
 use eventuary_core::io::Writer;
 use eventuary_core::{
-    ConsumerGroupId, Event, Namespace, OrganizationId, Payload, StartFrom, Topic,
+    ConsumerGroupId, Event, EventId, Namespace, OrganizationId, Payload, StartFrom, Topic,
 };
 
 use eventuary_sqlite::{SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig};
@@ -19,7 +19,12 @@ fn fresh_db() -> (NamedTempFile, SqliteDatabase) {
 }
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
-    Event::create(org, ns, topic, key, Payload::from_string("payload")).unwrap()
+    Event::builder(org, ns, topic, Payload::from_string("payload"))
+        .unwrap()
+        .key(key)
+        .unwrap()
+        .build()
+        .expect("valid event")
 }
 
 fn config(org: &str) -> SqliteReaderConfig {
@@ -55,6 +60,43 @@ async fn write_persists_event() {
 }
 
 #[tokio::test]
+async fn reader_roundtrips_lineage_fields() {
+    let (_file, db) = fresh_db();
+    let writer = SqliteEventWriter::new(db.conn());
+    let parent_id = EventId::new();
+    let event = Event::builder(
+        "acme",
+        "/x",
+        "thing.happened",
+        Payload::from_string("payload"),
+    )
+    .unwrap()
+    .key("k")
+    .unwrap()
+    .parent_id(parent_id)
+    .correlation_id("corr")
+    .unwrap()
+    .causation_id("cause")
+    .unwrap()
+    .build()
+    .unwrap();
+    writer.write(&event).await.unwrap();
+
+    let reader = SqliteReader::new(db.conn(), config("acme"));
+    let mut stream = reader.read().await.unwrap();
+    let msg = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event = msg.event();
+    assert_eq!(event.key().map(|key| key.as_str()), Some("k"));
+    assert_eq!(event.parent_id(), Some(parent_id));
+    assert_eq!(event.correlation_id().map(|id| id.as_str()), Some("corr"));
+    assert_eq!(event.causation_id().map(|id| id.as_str()), Some("cause"));
+}
+
+#[tokio::test]
 async fn reader_streams_existing_events_from_earliest() {
     let (_file, db) = fresh_db();
     let writer = SqliteEventWriter::new(db.conn());
@@ -73,7 +115,13 @@ async fn reader_streams_existing_events_from_earliest() {
             .unwrap()
             .unwrap()
             .unwrap();
-        keys.push(msg.event().key().as_str().to_owned());
+        keys.push(
+            msg.event()
+                .key()
+                .expect("event has key")
+                .as_str()
+                .to_owned(),
+        );
         msg.ack().await.unwrap();
     }
     assert_eq!(keys, vec!["k0", "k1", "k2"]);
@@ -106,7 +154,7 @@ async fn reader_starts_after_existing_events_from_latest() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "new");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "new");
 }
 
 #[tokio::test]
@@ -134,7 +182,7 @@ async fn reader_starts_from_timestamp() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "after");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "after");
 }
 
 #[tokio::test]
@@ -157,7 +205,10 @@ async fn consumer_group_resume_after_ack() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().key().as_str(), *expected);
+        assert_eq!(
+            msg.event().key().expect("event has key").as_str(),
+            *expected
+        );
         msg.ack().await.unwrap();
     }
     drop(stream);
@@ -171,7 +222,10 @@ async fn consumer_group_resume_after_ack() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().key().as_str(), *expected);
+        assert_eq!(
+            msg.event().key().expect("event has key").as_str(),
+            *expected
+        );
         msg.ack().await.unwrap();
     }
 }
@@ -195,7 +249,7 @@ async fn nack_does_not_advance_checkpoint() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "k0");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "k0");
     msg.nack().await.unwrap();
     drop(stream);
 
@@ -207,7 +261,7 @@ async fn nack_does_not_advance_checkpoint() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "k0");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "k0");
 }
 
 #[tokio::test]
@@ -231,7 +285,10 @@ async fn independent_consumer_groups_get_independent_offsets() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().key().as_str(), *expected);
+        assert_eq!(
+            msg.event().key().expect("event has key").as_str(),
+            *expected
+        );
         msg.ack().await.unwrap();
     }
     drop(stream_a);
@@ -245,7 +302,7 @@ async fn independent_consumer_groups_get_independent_offsets() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "k0");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "k0");
 }
 
 #[tokio::test]
@@ -275,13 +332,13 @@ async fn reader_filters_by_topic() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m1.event().key().as_str(), "t1");
+    assert_eq!(m1.event().key().expect("event has key").as_str(), "t1");
     let m2 = timeout(Duration::from_secs(2), stream.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m2.event().key().as_str(), "t3");
+    assert_eq!(m2.event().key().expect("event has key").as_str(), "t3");
 }
 
 #[tokio::test]
@@ -311,11 +368,11 @@ async fn reader_filters_by_namespace() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m1.event().key().as_str(), "b1");
+    assert_eq!(m1.event().key().expect("event has key").as_str(), "b1");
     let m2 = timeout(Duration::from_secs(2), stream.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m2.event().key().as_str(), "b2");
+    assert_eq!(m2.event().key().expect("event has key").as_str(), "b2");
 }

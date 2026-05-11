@@ -218,7 +218,6 @@ mod tests {
             "org",
             "/x",
             "thing.happened",
-            format!("k{i}"),
             Payload::from_string(format!("p{i}")),
         )
         .unwrap()

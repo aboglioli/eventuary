@@ -16,13 +16,16 @@ fn unique_organization() -> OrganizationId {
 }
 
 fn make_event(org: &OrganizationId, namespace: &str, topic: &str, key: &str) -> Event {
-    Event::create(
+    Event::builder(
         org.as_str(),
         namespace,
         topic,
-        key,
         Payload::from_string(format!("payload-{key}")),
     )
+    .expect("valid event")
+    .key(key)
+    .expect("valid key")
+    .build()
     .expect("valid event")
 }
 
@@ -49,8 +52,8 @@ pub async fn case_write_read_roundtrip(backend: &dyn Backend) {
         "roundtrip: topic should match"
     );
     assert_eq!(
-        received.event.key().as_str(),
-        event.key().as_str(),
+        received.event.key().expect("event has key").as_str(),
+        event.key().expect("event has key").as_str(),
         "roundtrip: key should match"
     );
     assert_eq!(
@@ -79,10 +82,13 @@ pub async fn case_write_all_preserves_all_events(backend: &dyn Backend) {
         events.len(),
         received.len()
     );
-    let expected: HashSet<String> = events.iter().map(|e| e.key().as_str().to_owned()).collect();
+    let expected: HashSet<String> = events
+        .iter()
+        .map(|e| e.key().expect("event has key").as_str().to_owned())
+        .collect();
     let actual: HashSet<String> = received
         .iter()
-        .map(|c| c.event.key().as_str().to_owned())
+        .map(|c| c.event.key().expect("event has key").as_str().to_owned())
         .collect();
     assert_eq!(actual, expected, "all events must be delivered");
 }
@@ -101,10 +107,13 @@ pub async fn case_ordering_preserved(backend: &dyn Backend) {
     request.start_from = StartFrom::Earliest;
     let received = backend.read_many(request, events.len(), READ_TIMEOUT).await;
     assert_eq!(received.len(), events.len(), "expected all events");
-    let expected_keys: Vec<String> = events.iter().map(|e| e.key().as_str().to_owned()).collect();
+    let expected_keys: Vec<String> = events
+        .iter()
+        .map(|e| e.key().expect("event has key").as_str().to_owned())
+        .collect();
     let actual_keys: Vec<String> = received
         .iter()
-        .map(|c| c.event.key().as_str().to_owned())
+        .map(|c| c.event.key().expect("event has key").as_str().to_owned())
         .collect();
     assert_eq!(
         actual_keys, expected_keys,
@@ -165,7 +174,7 @@ pub async fn case_start_from_latest(backend: &dyn Backend) {
 
     let received = received.expect("expected new event after latest");
     assert_eq!(
-        received.event.key().as_str(),
+        received.event.key().expect("event has key").as_str(),
         "new",
         "start_from_latest: should receive only the new event"
     );
@@ -193,7 +202,7 @@ pub async fn case_start_from_timestamp(backend: &dyn Backend) {
         .await
         .expect("expected event after timestamp");
     assert_eq!(
-        received.event.key().as_str(),
+        received.event.key().expect("event has key").as_str(),
         "after",
         "start_from_timestamp: should receive only post-cutoff event"
     );
@@ -229,7 +238,7 @@ pub async fn case_topic_filter(backend: &dyn Backend) {
     }
     let keys: HashSet<String> = received
         .iter()
-        .map(|c| c.event.key().as_str().to_owned())
+        .map(|c| c.event.key().expect("event has key").as_str().to_owned())
         .collect();
     assert_eq!(keys, HashSet::from(["t1".to_owned(), "t3".to_owned()]));
 }
@@ -261,7 +270,7 @@ pub async fn case_namespace_prefix_filter(backend: &dyn Backend) {
     );
     let keys: HashSet<String> = received
         .iter()
-        .map(|c| c.event.key().as_str().to_owned())
+        .map(|c| c.event.key().expect("event has key").as_str().to_owned())
         .collect();
     assert_eq!(keys, HashSet::from(["b1".to_owned(), "b2".to_owned()]));
 }
@@ -286,7 +295,7 @@ pub async fn case_ack_advances_checkpoint(backend: &dyn Backend) {
         .read_one(request, READ_TIMEOUT)
         .await
         .expect("expected first event");
-    assert_eq!(first.event.key().as_str(), "k0");
+    assert_eq!(first.event.key().expect("event has key").as_str(), "k0");
     (first.ack)().await.expect("ack");
 
     let mut resume_request = ReaderRequest::new(org);
@@ -299,7 +308,9 @@ pub async fn case_ack_advances_checkpoint(backend: &dyn Backend) {
         "ack_advances_checkpoint: expected 2 remaining events after restart"
     );
     assert!(
-        !remaining.iter().any(|c| c.event.key().as_str() == "k0"),
+        !remaining
+            .iter()
+            .any(|c| c.event.key().expect("event has key").as_str() == "k0"),
         "ack_advances_checkpoint: k0 must not be redelivered"
     );
 }
@@ -322,7 +333,7 @@ pub async fn case_nack_does_not_advance_checkpoint(backend: &dyn Backend) {
         .read_one(request, READ_TIMEOUT)
         .await
         .expect("expected first event");
-    assert_eq!(first.event.key().as_str(), "k0");
+    assert_eq!(first.event.key().expect("event has key").as_str(), "k0");
     (first.nack)().await.expect("nack");
 
     let mut resume_request = ReaderRequest::new(org);
@@ -333,7 +344,7 @@ pub async fn case_nack_does_not_advance_checkpoint(backend: &dyn Backend) {
         .await
         .expect("expected redelivery after nack");
     assert_eq!(
-        again.event.key().as_str(),
+        again.event.key().expect("event has key").as_str(),
         "k0",
         "nack_does_not_advance_checkpoint: must redeliver k0"
     );

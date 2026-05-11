@@ -57,13 +57,11 @@ crates/
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
 │       ├── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
-│       ├── metadata.rs     # Metadata + CORRELATION_ID / CAUSATION_ID
+│       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
-│       ├── cursor.rs       # EventSequence, EventCursor
 │       ├── partition.rs    # PartitionKey trait
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
 │       ├── start_from.rs   # StartFrom (Earliest / Latest / Timestamp)
-│       ├── subscription.rs # EventSubscription (read-time scope + identity)
 │       ├── serialization.rs # SerializedEvent wire format
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
@@ -72,6 +70,7 @@ crates/
 │           ├── handler.rs  # Handler + Filter + dyn bridges
 │           ├── message.rs  # Message<A> (event + acker)
 │           ├── filters.rs  # AllFilter, TopicFilter, NamespacePrefixFilter
+│           ├── subscription.rs # EventSubscription (read-time scope + Filter impl)
 │           ├── acker/
 │           │   ├── noop.rs      # NoopAcker
 │           │   ├── once.rs      # OnceAcker (single-shot wrapper)
@@ -131,7 +130,7 @@ Aggregate.mutate() -> EventCollector.collect(event)
 ```
 
 `Event` is immutable, validated at construction (`Event::create`), and
-reconstructed without revalidation via `Event::restore(RestoreEvent { ... })`.
+reconstructed via `Event::new(...)`.
 UUID v7 is used for `EventId` so events are time-ordered.
 
 ### Constructor Convention
@@ -140,9 +139,9 @@ UUID v7 is used for `EventId` so events are time-ordered.
 |---------|---------|------------|
 | `T::new(...)` | First-time construction (value objects, aggregates) | Yes |
 | `Event::create(...)` | Domain creation that may emit events | Yes |
-| `Event::restore(RestoreEvent { ... })` | Reconstruction from persisted state | No |
+| `Event::new(...)` | Restoration from persisted state | Yes (prepares for future validation) |
 
-`Restore*` structs use named public fields, not positional params. Never
+`Event::new(...)` uses positional params matching the struct field layout. Never
 direct-cast strings into value objects: use the constructor (`Topic::new`,
 `Namespace::new`, etc.) so validation runs.
 

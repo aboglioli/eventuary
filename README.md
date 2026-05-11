@@ -52,25 +52,28 @@ Typical applications should stick to the umbrella `eventuary` crate.
 ```rust
 use eventuary::{Event, Payload};
 
-let event = Event::create(
+let event = Event::builder(
     "acme",
     "/billing",
     "invoice.created",
-    "invoice-123",
     Payload::from_json(&serde_json::json!({ "amount": 100 }))?,
-)?;
+)?
+.key("invoice-123")?
+.correlation_id("billing-run-7")?
+.build();
 ```
 
 - `Event` — immutable record with `id` (UUID v7), `organization`, `namespace`,
-  `topic`, `key`, `payload`, `metadata`, `timestamp`, `version`.
+  `topic`, `payload`, `metadata`, `timestamp`, `version`, and optional `key`,
+  `parent_id`, `correlation_id`, `causation_id`.
 - `Payload` — JSON, plain text, or binary content.
 - `Topic` — dot-separated, lowercase/digit/`_`/`-`.
 - `Namespace` — slash-rooted hierarchy: `/`, `/billing`, `/billing/invoices`.
 - `OrganizationId` — tenant scope; `_platform` sentinel for cross-tenant.
-- `EventKey` — record key (≤1024 chars). Implements `PartitionKey` via
-  FNV-1a for deterministic partition routing.
-- `Metadata` — validated key/value pairs. `CORRELATION_ID` / `CAUSATION_ID`
-  constants for the conventional tracing headers.
+- `EventKey` — non-empty flexible identifier (≤1024 chars) used for optional
+  event keys, correlation IDs, and causation IDs. Implements `PartitionKey`
+  via FNV-1a for deterministic partition routing.
+- `Metadata` — validated key/value pairs.
 - `SerializedEvent` — wire format with `to_json_value` / `from_json_value` /
   `to_json_string` / `from_json_str` / `from_json_slice` helpers used by
   every backend.
@@ -113,13 +116,14 @@ let (tx, rx) = mpsc::channel(100);
 let writer = InmemWriter::new(tx);
 let reader = InmemReader::new(rx);
 
-let event = Event::create(
+let event = Event::builder(
     "acme",
     "/orders",
     "order.placed",
-    "order-1",
     Payload::from_json(&serde_json::json!({ "total": 42 }))?,
-)?;
+)?
+.key("order-1")?
+.build();
 
 writer.write(&event).await?;
 

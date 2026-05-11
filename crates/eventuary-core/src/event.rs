@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::error::Result;
 use crate::event_key::EventKey;
-use crate::metadata::{CAUSATION_ID, CORRELATION_ID, Metadata};
+use crate::metadata::Metadata;
 use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
 use crate::payload::Payload;
@@ -56,72 +56,150 @@ pub struct Event {
     organization: OrganizationId,
     namespace: Namespace,
     topic: Topic,
-    key: EventKey,
     payload: Payload,
     metadata: Metadata,
     timestamp: DateTime<Utc>,
     version: u64,
+
+    key: Option<EventKey>,
+    parent_id: Option<EventId>,
+    correlation_id: Option<EventKey>,
+    causation_id: Option<EventKey>,
+}
+
+pub struct EventBuilder {
+    organization: OrganizationId,
+    namespace: Namespace,
+    topic: Topic,
+    payload: Payload,
+    metadata: Metadata,
+    key: Option<EventKey>,
+    parent_id: Option<EventId>,
+    correlation_id: Option<EventKey>,
+    causation_id: Option<EventKey>,
+}
+
+impl EventBuilder {
+    fn new(
+        organization: OrganizationId,
+        namespace: Namespace,
+        topic: Topic,
+        payload: Payload,
+    ) -> Self {
+        Self {
+            organization,
+            namespace,
+            topic,
+            payload,
+            metadata: Metadata::new(),
+            key: None,
+            parent_id: None,
+            correlation_id: None,
+            causation_id: None,
+        }
+    }
+
+    pub fn key(mut self, key: impl Into<String>) -> Result<Self> {
+        self.key = Some(EventKey::new(key)?);
+        Ok(self)
+    }
+
+    pub fn parent_id(mut self, parent_id: EventId) -> Self {
+        self.parent_id = Some(parent_id);
+        self
+    }
+
+    pub fn correlation_id(mut self, correlation_id: impl Into<String>) -> Result<Self> {
+        self.correlation_id = Some(EventKey::new(correlation_id)?);
+        Ok(self)
+    }
+
+    pub fn causation_id(mut self, causation_id: impl Into<String>) -> Result<Self> {
+        self.causation_id = Some(EventKey::new(causation_id)?);
+        Ok(self)
+    }
+
+    pub fn metadata(mut self, metadata: Metadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn build(self) -> Result<Event> {
+        Event::new(
+            EventId::new(),
+            self.organization,
+            self.namespace,
+            self.topic,
+            self.payload,
+            self.metadata,
+            Utc::now(),
+            1,
+            self.key,
+            self.parent_id,
+            self.correlation_id,
+            self.causation_id,
+        )
+    }
 }
 
 impl Event {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: EventId,
+        organization: OrganizationId,
+        namespace: Namespace,
+        topic: Topic,
+        payload: Payload,
+        metadata: Metadata,
+        timestamp: DateTime<Utc>,
+        version: u64,
+        key: Option<EventKey>,
+        parent_id: Option<EventId>,
+        correlation_id: Option<EventKey>,
+        causation_id: Option<EventKey>,
+    ) -> Result<Self> {
+        Ok(Self {
+            id,
+            organization,
+            namespace,
+            topic,
+            payload,
+            metadata,
+            timestamp,
+            version,
+            key,
+            parent_id,
+            correlation_id,
+            causation_id,
+        })
+    }
+
+    pub fn builder(
+        organization: impl Into<String>,
+        namespace: impl Into<String>,
+        topic: impl Into<String>,
+        payload: Payload,
+    ) -> Result<EventBuilder> {
+        Ok(EventBuilder::new(
+            OrganizationId::new(organization)?,
+            Namespace::new(namespace)?,
+            Topic::new(topic)?,
+            payload,
+        ))
+    }
+
     pub fn create(
         organization: impl Into<String>,
         namespace: impl Into<String>,
         topic: impl Into<String>,
-        key: impl Into<String>,
         payload: Payload,
     ) -> Result<Self> {
-        Ok(Self {
-            id: EventId::new(),
-            organization: OrganizationId::new(organization)?,
-            namespace: Namespace::new(namespace)?,
-            topic: Topic::new(topic)?,
-            key: EventKey::new(key)?,
-            payload,
-            metadata: Metadata::new(),
-            timestamp: Utc::now(),
-            version: 1,
-        })
+        Self::builder(organization, namespace, topic, payload)?.build()
     }
 
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
-    }
-
-    pub fn with_correlation_id(mut self, id: impl Into<String>) -> Result<Self> {
-        self.metadata = self.metadata.with(CORRELATION_ID, id.into())?;
-        Ok(self)
-    }
-
-    pub fn with_causation_id(mut self, id: impl Into<String>) -> Result<Self> {
-        self.metadata = self.metadata.with(CAUSATION_ID, id.into())?;
-        Ok(self)
-    }
-
-    pub fn correlation_id(&self) -> Option<&str> {
-        self.metadata
-            .as_map()
-            .get(CORRELATION_ID)
-            .map(String::as_str)
-    }
-
-    pub fn causation_id(&self) -> Option<&str> {
-        self.metadata.as_map().get(CAUSATION_ID).map(String::as_str)
-    }
-
-    pub fn restore(r: RestoreEvent) -> Self {
-        Self {
-            id: r.id,
-            organization: r.organization,
-            namespace: r.namespace,
-            topic: r.topic,
-            key: r.key,
-            payload: r.payload,
-            metadata: r.metadata,
-            timestamp: r.timestamp,
-            version: r.version,
-        }
     }
 
     pub fn id(&self) -> EventId {
@@ -136,9 +214,6 @@ impl Event {
     pub fn topic(&self) -> &Topic {
         &self.topic
     }
-    pub fn key(&self) -> &EventKey {
-        &self.key
-    }
     pub fn payload(&self) -> &Payload {
         &self.payload
     }
@@ -151,18 +226,18 @@ impl Event {
     pub fn version(&self) -> u64 {
         self.version
     }
-}
-
-pub struct RestoreEvent {
-    pub id: EventId,
-    pub organization: OrganizationId,
-    pub namespace: Namespace,
-    pub topic: Topic,
-    pub key: EventKey,
-    pub payload: Payload,
-    pub metadata: Metadata,
-    pub timestamp: DateTime<Utc>,
-    pub version: u64,
+    pub fn key(&self) -> Option<&EventKey> {
+        self.key.as_ref()
+    }
+    pub fn parent_id(&self) -> Option<EventId> {
+        self.parent_id
+    }
+    pub fn correlation_id(&self) -> Option<&EventKey> {
+        self.correlation_id.as_ref()
+    }
+    pub fn causation_id(&self) -> Option<&EventKey> {
+        self.causation_id.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -170,14 +245,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_event() {
+    fn create_event_without_optional_key() {
         let payload = Payload::from_json(&serde_json::json!({"task_id": "123"})).unwrap();
-        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
+        let event = Event::create("acme", "/task", "task.created", payload).unwrap();
         assert_eq!(event.organization().as_str(), "acme");
         assert_eq!(event.namespace().as_str(), "/task");
         assert_eq!(event.topic().as_str(), "task.created");
-        assert_eq!(event.key().as_str(), "task-123");
+        assert_eq!(event.key(), None);
+        assert_eq!(event.parent_id(), None);
+        assert_eq!(event.correlation_id(), None);
+        assert_eq!(event.causation_id(), None);
         assert_eq!(event.version(), 1);
+    }
+
+    #[test]
+    fn builder_sets_optional_lineage_fields() {
+        let parent_id = EventId::new();
+        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("entity-1")
+            .unwrap()
+            .parent_id(parent_id)
+            .correlation_id("workflow-7")
+            .unwrap()
+            .causation_id("command-9")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(event.key().map(EventKey::as_str), Some("entity-1"));
+        assert_eq!(event.parent_id(), Some(parent_id));
+        assert_eq!(
+            event.correlation_id().map(EventKey::as_str),
+            Some("workflow-7")
+        );
+        assert_eq!(
+            event.causation_id().map(EventKey::as_str),
+            Some("command-9")
+        );
+    }
+
+    #[test]
+    fn builder_rejects_empty_optional_ids() {
+        let builder =
+            Event::builder("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+        assert!(builder.key("").is_err());
+
+        let builder =
+            Event::builder("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+        assert!(builder.correlation_id("").is_err());
+
+        let builder =
+            Event::builder("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+        assert!(builder.causation_id("").is_err());
     }
 
     #[test]
@@ -188,25 +308,27 @@ mod tests {
             .unwrap()
             .with("project", "acme")
             .unwrap();
-        let event = Event::create("acme", "/agent", "agent.registered", "agent-1", payload)
+        let event = Event::builder("acme", "/agent", "agent.registered", payload)
             .unwrap()
-            .with_metadata(metadata);
+            .metadata(metadata)
+            .build()
+            .unwrap();
         assert_eq!(event.metadata().get("agent_id"), Some("abc-123"));
         assert_eq!(event.metadata().get("project"), Some("acme"));
     }
 
     #[test]
-    fn correlation_and_causation_ids_roundtrip_through_metadata() {
-        let payload = Payload::from_string("test");
-        let event = Event::create("acme", "/x", "thing.happened", "k", payload)
+    fn correlation_and_causation_are_first_class_fields() {
+        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("test"))
             .unwrap()
-            .with_correlation_id("corr-1")
+            .correlation_id("corr-1")
             .unwrap()
-            .with_causation_id("cause-1")
+            .causation_id("cause-1")
+            .unwrap()
+            .build()
             .unwrap();
-        assert_eq!(event.correlation_id(), Some("corr-1"));
-        assert_eq!(event.causation_id(), Some("cause-1"));
-        assert_eq!(event.metadata().get(CORRELATION_ID), Some("corr-1"));
-        assert_eq!(event.metadata().get(CAUSATION_ID), Some("cause-1"));
+        assert_eq!(event.correlation_id().map(EventKey::as_str), Some("corr-1"));
+        assert_eq!(event.causation_id().map(EventKey::as_str), Some("cause-1"));
+        assert!(event.metadata().is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    ConsumerGroupId, Event, EventKey, Metadata, Namespace, OrganizationId, StartFrom, Topic,
+    ConsumerGroupId, Event, EventKey, Filter, Metadata, Namespace, OrganizationId, StartFrom, Topic,
 };
 
 /// Read-side subscription: tells a [`Reader`] *which events* to deliver and
@@ -37,10 +37,9 @@ use crate::{
 /// can prune work before bytes hit the consumer task. Use them to scope
 /// *what is delivered*.
 ///
-/// In contrast, [`io::Filter`] is applied **post-read**, inside the consumer
-/// loop, in front of a [`Handler`]. It cannot prune work at the source —
-/// the event has already been deserialized and ack'd through the
-/// pipeline — but it can re-route, drop, or transform per handler.
+/// `EventSubscription` also implements [`io::Filter`], so the same predicate
+/// can be reused in a consumer loop when filtering cannot be pushed down to
+/// a backend.
 ///
 /// As a rule of thumb: push everything you can into the subscription, and
 /// use [`io::Filter`] for handler-specific concerns that depend on
@@ -134,7 +133,9 @@ impl EventSubscription {
             return false;
         }
         if let Some(keys) = self.keys.as_ref()
-            && !keys.iter().any(|k| k == event.key())
+            && !event
+                .key()
+                .is_some_and(|event_key| keys.iter().any(|key| key == event_key))
         {
             return false;
         }
@@ -155,6 +156,12 @@ impl EventSubscription {
     }
 }
 
+impl Filter for EventSubscription {
+    fn matches(&self, event: &Event) -> bool {
+        EventSubscription::matches(self, event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,7 +175,12 @@ mod tests {
     }
 
     fn ev_with_key(org: &str, topic: &str, namespace: &str, key: &str) -> Event {
-        Event::create(org, namespace, topic, key, Payload::from_string("p")).unwrap()
+        Event::builder(org, namespace, topic, Payload::from_string("p"))
+            .unwrap()
+            .key(key)
+            .unwrap()
+            .build()
+            .expect("valid event")
     }
 
     fn ev_with_metadata(

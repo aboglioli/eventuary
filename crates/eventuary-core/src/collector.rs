@@ -55,14 +55,7 @@ mod tests {
     use crate::Payload;
 
     fn ev() -> Event {
-        Event::create(
-            "acme",
-            "/x",
-            "thing.happened",
-            "k",
-            Payload::from_string("p"),
-        )
-        .unwrap()
+        Event::create("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap()
     }
 
     #[test]

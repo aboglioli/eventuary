@@ -18,8 +18,8 @@ impl Writer for PgEventWriter {
         let row = EventRow::from_event(event)?;
 
         sqlx::query(
-            "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version) \
-             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10)",
+            "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id) \
+             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, $11::uuid, $12, $13)",
         )
         .bind(&row.id)
         .bind(&row.organization)
@@ -31,6 +31,9 @@ impl Writer for PgEventWriter {
         .bind(&row.metadata)
         .bind(&row.timestamp)
         .bind(row.version)
+        .bind(&row.parent_id)
+        .bind(&row.correlation_id)
+        .bind(&row.causation_id)
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Store(e.to_string()))?;
@@ -50,8 +53,8 @@ impl Writer for PgEventWriter {
         for event in events {
             let row = EventRow::from_event(event)?;
             sqlx::query(
-                "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version) \
-                 VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10)",
+                "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id) \
+                 VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, $11::uuid, $12, $13)",
             )
             .bind(&row.id)
             .bind(&row.organization)
@@ -63,6 +66,9 @@ impl Writer for PgEventWriter {
             .bind(&row.metadata)
             .bind(&row.timestamp)
             .bind(row.version)
+            .bind(&row.parent_id)
+            .bind(&row.correlation_id)
+            .bind(&row.causation_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -77,12 +83,15 @@ struct EventRow {
     organization: String,
     namespace: String,
     topic: String,
-    key: String,
+    key: Option<String>,
     payload: String,
     content_type: String,
     metadata: String,
     timestamp: String,
     version: i64,
+    parent_id: Option<String>,
+    correlation_id: Option<String>,
+    causation_id: Option<String>,
 }
 
 impl EventRow {
@@ -103,6 +112,9 @@ impl EventRow {
             metadata,
             timestamp: serialized.timestamp.to_rfc3339(),
             version: serialized.version as i64,
+            parent_id: serialized.parent_id,
+            correlation_id: serialized.correlation_id,
+            causation_id: serialized.causation_id,
         })
     }
 }

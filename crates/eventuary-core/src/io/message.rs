@@ -77,14 +77,7 @@ mod tests {
     }
 
     fn ev() -> Event {
-        Event::create(
-            "org",
-            "/x",
-            "thing.happened",
-            "k",
-            Payload::from_string("p"),
-        )
-        .unwrap()
+        Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap()
     }
 
     #[test]
@@ -99,14 +92,7 @@ mod tests {
     fn map_event_swaps_event_keeps_acker() {
         let msg = Message::new(ev(), NoopAcker);
         let mapped = msg.map_event(|e| {
-            Event::create(
-                "org",
-                "/y",
-                e.topic().as_str(),
-                "k2",
-                Payload::from_string("p2"),
-            )
-            .unwrap()
+            Event::create("org", "/y", e.topic().as_str(), Payload::from_string("p2")).unwrap()
         });
         assert_eq!(mapped.event().namespace().as_str(), "/y");
     }

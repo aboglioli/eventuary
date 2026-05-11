@@ -64,7 +64,12 @@ async fn approximate_messages(client: &Client, queue_url: &str) -> i32 {
 }
 
 fn make_event(org: &str, key: &str) -> Event {
-    Event::create(org, "/x", "thing.happened", key, Payload::from_string("v")).unwrap()
+    Event::builder(org, "/x", "thing.happened", Payload::from_string("v"))
+        .unwrap()
+        .key(key)
+        .unwrap()
+        .build()
+        .expect("valid event")
 }
 
 #[tokio::test]
@@ -109,7 +114,7 @@ async fn reader_receives_event() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "k-recv");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "k-recv");
     assert_eq!(msg.event().topic().as_str(), "thing.happened");
 }
 
@@ -133,7 +138,7 @@ async fn ack_deletes_message() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "k-ack");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "k-ack");
     msg.ack().await.unwrap();
     drop(stream);
 
@@ -169,7 +174,7 @@ async fn org_mismatch_is_acked_and_skipped() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().as_str(), "right");
+    assert_eq!(msg.event().key().expect("event has key").as_str(), "right");
 }
 
 #[tokio::test]

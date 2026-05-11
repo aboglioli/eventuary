@@ -14,12 +14,15 @@ CREATE TABLE IF NOT EXISTS events (
     organization TEXT NOT NULL,
     namespace TEXT NOT NULL,
     topic TEXT NOT NULL,
-    event_key TEXT NOT NULL,
+    event_key TEXT,
     payload TEXT NOT NULL,
     content_type TEXT NOT NULL,
     metadata TEXT NOT NULL,
     timestamp TEXT NOT NULL,
-    version INTEGER NOT NULL
+    version INTEGER NOT NULL,
+    parent_id TEXT,
+    correlation_id TEXT,
+    causation_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_org_seq ON events (organization, sequence);
@@ -57,6 +60,15 @@ impl SqliteDatabase {
             .map_err(|e| Error::Store(e.to_string()))?;
         conn.execute_batch(SCHEMA_SQL)
             .map_err(|e| Error::Store(e.to_string()))?;
+
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(|e| Error::Store(e.to_string()))?;
+
+        if version < 1 {
+            migrate_v1(&conn)?;
+        }
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -65,6 +77,33 @@ impl SqliteDatabase {
     pub fn conn(&self) -> SqliteConn {
         Arc::clone(&self.conn)
     }
+}
+
+fn migrate_v1(conn: &Connection) -> Result<()> {
+    let columns: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('events')")
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| Error::Store(e.to_string()))?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?
+    };
+
+    if !columns.contains(&"parent_id".to_owned()) {
+        conn.execute_batch(
+            "ALTER TABLE events ADD COLUMN parent_id TEXT;
+             ALTER TABLE events ADD COLUMN correlation_id TEXT;
+             ALTER TABLE events ADD COLUMN causation_id TEXT;",
+        )
+        .map_err(|e| Error::Store(e.to_string()))?;
+    }
+
+    conn.pragma_update(None, "user_version", 1)
+        .map_err(|e| Error::Store(e.to_string()))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -84,6 +123,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+        let lineage_columns: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name IN ('parent_id', 'correlation_id', 'causation_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage_columns, 3);
     }
 
     #[test]

@@ -16,6 +16,9 @@ pub struct EventKey(String);
 impl EventKey {
     pub fn new(s: impl Into<String>) -> Result<Self> {
         let s = s.into();
+        if s.is_empty() {
+            return Err(Error::InvalidEventKey("must not be empty".into()));
+        }
         if s.len() > 1024 {
             return Err(Error::InvalidEventKey(
                 "event key must not exceed 1024 characters".into(),
@@ -73,8 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_key_is_allowed() {
-        assert!(EventKey::new("").is_ok());
+    fn empty_key_fails() {
+        assert!(EventKey::new("").is_err());
     }
 
     #[test]

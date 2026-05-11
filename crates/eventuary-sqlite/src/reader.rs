@@ -315,7 +315,7 @@ fn fetch_batch(
 ) -> Result<Vec<(SerializedEvent, i64)>> {
     let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
     let mut sql = String::from(
-        "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version \
+        "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id \
          FROM events WHERE sequence > ?1 AND organization = ?2",
     );
     let mut bindings: Vec<rusqlite::types::Value> = vec![
@@ -376,6 +376,9 @@ fn fetch_batch(
                 metadata_str,
                 timestamp_str,
                 version: row.get::<_, i64>(10)? as u64,
+                parent_id: row.get(11)?,
+                correlation_id: row.get(12)?,
+                causation_id: row.get(13)?,
             })
         })
         .map_err(|e| Error::Store(e.to_string()))?;
@@ -396,12 +399,15 @@ struct RawRow {
     organization: String,
     namespace: String,
     topic: String,
-    event_key: String,
+    event_key: Option<String>,
     payload_str: String,
     content_type: String,
     metadata_str: String,
     timestamp_str: String,
     version: u64,
+    parent_id: Option<String>,
+    correlation_id: Option<String>,
+    causation_id: Option<String>,
 }
 
 impl RawRow {
@@ -430,6 +436,9 @@ impl RawRow {
             metadata,
             timestamp,
             version: self.version,
+            parent_id: self.parent_id,
+            correlation_id: self.correlation_id,
+            causation_id: self.causation_id,
         })
     }
 }

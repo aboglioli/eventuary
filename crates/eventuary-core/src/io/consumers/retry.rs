@@ -87,13 +87,19 @@ impl<W: Writer> DeadLetterWriter<W> {
         });
 
         let dead_letter_topic = Topic::new(format!("{}.dead_letter", event.topic().as_str()))?;
-        let dead_letter_event = Event::create(
+        let mut builder = Event::builder(
             event.organization().as_str(),
             event.namespace().as_str(),
             dead_letter_topic.as_str(),
-            event.key().as_str(),
             Payload::from_json(&dead_letter_payload)?,
         )?;
+        if let Some(key) = event.key() {
+            builder = builder.key(key.as_str())?;
+        }
+        if let Some(correlation_id) = event.correlation_id() {
+            builder = builder.correlation_id(correlation_id.as_str())?;
+        }
+        let dead_letter_event = builder.parent_id(event.id()).build()?;
         self.writer.write(&dead_letter_event).await
     }
 }
@@ -169,14 +175,12 @@ mod tests {
     use crate::payload::Payload;
 
     fn make_event() -> Event {
-        Event::create(
-            "acme",
-            "/x",
-            "thing.happened",
-            "k",
-            Payload::from_string("p"),
-        )
-        .unwrap()
+        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("k")
+            .unwrap()
+            .build()
+            .expect("valid event")
     }
 
     struct CapturingWriter {

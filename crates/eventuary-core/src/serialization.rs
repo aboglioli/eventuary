@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::event::{Event, EventId, RestoreEvent};
+use crate::event::{Event, EventId};
 use crate::event_key::EventKey;
 use crate::metadata::Metadata;
 use crate::namespace::Namespace;
@@ -21,12 +21,19 @@ pub struct SerializedEvent {
     pub organization: String,
     pub namespace: String,
     pub topic: String,
-    pub key: String,
+    #[serde(default)]
+    pub key: Option<String>,
     pub payload: serde_json::Value,
     pub content_type: String,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub version: u64,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub correlation_id: Option<String>,
+    #[serde(default)]
+    pub causation_id: Option<String>,
 }
 
 impl SerializedEvent {
@@ -50,12 +57,15 @@ impl SerializedEvent {
             organization: event.organization().to_string(),
             namespace: event.namespace().to_string(),
             topic: event.topic().to_string(),
-            key: event.key().to_string(),
+            key: event.key().map(|key| key.to_string()),
             payload: payload_value,
             content_type: event.payload().content_type().to_string(),
             metadata: event.metadata().as_map().clone(),
             timestamp: event.timestamp(),
             version: event.version(),
+            parent_id: event.parent_id().map(|id| id.to_string()),
+            correlation_id: event.correlation_id().map(|id| id.to_string()),
+            causation_id: event.causation_id().map(|id| id.to_string()),
         })
     }
 
@@ -84,17 +94,38 @@ impl SerializedEvent {
             }
         };
 
-        Ok(Event::restore(RestoreEvent {
-            id: EventId::from_str(&self.id).map_err(|e| Error::Serialization(e.to_string()))?,
-            organization: OrganizationId::new(&self.organization)?,
-            namespace: Namespace::new(&self.namespace)?,
-            topic: Topic::new(&self.topic)?,
-            key: EventKey::new(&self.key)?,
-            payload: Payload::from_raw(data, content_type),
-            metadata: Metadata::from(self.metadata.clone()),
-            timestamp: self.timestamp,
-            version: self.version,
-        }))
+        let key = self.key.as_deref().map(EventKey::new).transpose()?;
+        let parent_id = self
+            .parent_id
+            .as_deref()
+            .map(EventId::from_str)
+            .transpose()
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let correlation_id = self
+            .correlation_id
+            .as_deref()
+            .map(EventKey::new)
+            .transpose()?;
+        let causation_id = self
+            .causation_id
+            .as_deref()
+            .map(EventKey::new)
+            .transpose()?;
+
+        Event::new(
+            EventId::from_str(&self.id).map_err(|e| Error::Serialization(e.to_string()))?,
+            OrganizationId::new(&self.organization)?,
+            Namespace::new(&self.namespace)?,
+            Topic::new(&self.topic)?,
+            Payload::from_raw(data, content_type),
+            Metadata::from(self.metadata.clone()),
+            self.timestamp,
+            self.version,
+            key,
+            parent_id,
+            correlation_id,
+            causation_id,
+        )
     }
 
     pub fn to_json_value(&self) -> serde_json::Value {
@@ -124,26 +155,55 @@ impl SerializedEvent {
 mod tests {
     use super::*;
 
+    fn event_with_key(payload: Payload, key: &str) -> Event {
+        Event::builder("acme", "/x", "thing.happened", payload)
+            .unwrap()
+            .key(key)
+            .unwrap()
+            .build()
+            .expect("valid event")
+    }
+
     #[test]
     fn roundtrip() {
         let payload = Payload::from_json(&serde_json::json!({"key": "value"})).unwrap();
-        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
+        let event = Event::builder("acme", "/task", "task.created", payload)
+            .unwrap()
+            .key("task-123")
+            .unwrap()
+            .build()
+            .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert_eq!(serialized.topic, "task.created");
         assert_eq!(serialized.namespace, "/task");
         assert_eq!(serialized.organization, "acme");
-        assert_eq!(serialized.key, "task-123");
+        assert_eq!(serialized.key.as_deref(), Some("task-123"));
 
         let restored = serialized.to_event().unwrap();
         assert_eq!(restored.topic().as_str(), "task.created");
         assert_eq!(restored.id(), event.id());
+        assert_eq!(restored.key().map(EventKey::as_str), Some("task-123"));
+    }
+
+    #[test]
+    fn optional_key_can_be_absent() {
+        let event = Event::create(
+            "acme",
+            "/x",
+            "thing.happened",
+            Payload::from_string("no-key"),
+        )
+        .unwrap();
+        let serialized = SerializedEvent::from_event(&event).unwrap();
+        assert_eq!(serialized.key, None);
+        let restored = serialized.to_event().unwrap();
+        assert_eq!(restored.key(), None);
     }
 
     #[test]
     fn plain_text_roundtrip_preserves_string() {
-        let payload = Payload::from_string("hello world");
-        let event = Event::create("acme", "/x", "thing.happened", "k", payload).unwrap();
+        let event = event_with_key(Payload::from_string("hello world"), "k");
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert_eq!(
@@ -159,8 +219,7 @@ mod tests {
     #[test]
     fn binary_payload_base64_round_trip_preserves_bytes() {
         let bytes = vec![0xff, 0x00, 0x01, 0xfe, 0x80, 0x7f, 0x10];
-        let payload = Payload::from_bytes(bytes.clone());
-        let event = Event::create("acme", "/x", "thing.happened", "k", payload).unwrap();
+        let event = event_with_key(Payload::from_bytes(bytes.clone()), "k");
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert!(serialized.payload.is_string());
@@ -172,8 +231,17 @@ mod tests {
 
     #[test]
     fn json_value_round_trip() {
-        let payload = Payload::from_json(&serde_json::json!({"key": "value"})).unwrap();
-        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
+        let event = Event::builder(
+            "acme",
+            "/task",
+            "task.created",
+            Payload::from_json(&serde_json::json!({"key": "value"})).unwrap(),
+        )
+        .unwrap()
+        .key("task-123")
+        .unwrap()
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let value = serialized.to_json_value();
@@ -186,8 +254,17 @@ mod tests {
 
     #[test]
     fn json_string_round_trip() {
-        let payload = Payload::from_json(&serde_json::json!({"key": "value"})).unwrap();
-        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
+        let event = Event::builder(
+            "acme",
+            "/task",
+            "task.created",
+            Payload::from_json(&serde_json::json!({"key": "value"})).unwrap(),
+        )
+        .unwrap()
+        .key("task-123")
+        .unwrap()
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let s = serialized.to_json_string().unwrap();
@@ -200,8 +277,17 @@ mod tests {
 
     #[test]
     fn from_json_slice_roundtrip() {
-        let payload = Payload::from_json(&serde_json::json!({"key": "value"})).unwrap();
-        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
+        let event = Event::builder(
+            "acme",
+            "/task",
+            "task.created",
+            Payload::from_json(&serde_json::json!({"key": "value"})).unwrap(),
+        )
+        .unwrap()
+        .key("task-123")
+        .unwrap()
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let bytes = serialized.to_json_string().unwrap().into_bytes();
@@ -215,8 +301,7 @@ mod tests {
     #[test]
     fn json_string_round_trip_with_binary() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
-        let payload = Payload::from_bytes(bytes.clone());
-        let event = Event::create("acme", "/x", "blob.received", "b1", payload).unwrap();
+        let event = event_with_key(Payload::from_bytes(bytes.clone()), "b1");
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let s = serialized.to_json_string().unwrap();
@@ -224,5 +309,39 @@ mod tests {
         let restored = parsed.to_event().unwrap();
 
         assert_eq!(restored.payload().data(), bytes.as_slice());
+    }
+
+    #[test]
+    fn lineage_fields_roundtrip() {
+        let parent_id = EventId::new();
+        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("k")
+            .unwrap()
+            .parent_id(parent_id)
+            .correlation_id("corr")
+            .unwrap()
+            .causation_id("cause")
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let serialized = SerializedEvent::from_event(&event).unwrap();
+        assert_eq!(serialized.key.as_deref(), Some("k"));
+        assert_eq!(
+            serialized.parent_id.as_deref(),
+            Some(parent_id.to_string().as_str())
+        );
+        assert_eq!(serialized.correlation_id.as_deref(), Some("corr"));
+        assert_eq!(serialized.causation_id.as_deref(), Some("cause"));
+
+        let restored = serialized.to_event().unwrap();
+        assert_eq!(restored.key().map(EventKey::as_str), Some("k"));
+        assert_eq!(restored.parent_id(), Some(parent_id));
+        assert_eq!(
+            restored.correlation_id().map(EventKey::as_str),
+            Some("corr")
+        );
+        assert_eq!(restored.causation_id().map(EventKey::as_str), Some("cause"));
     }
 }
