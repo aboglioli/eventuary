@@ -7,37 +7,44 @@ use eventuary_core::{Error, Result};
 
 pub type SqliteConn = Arc<Mutex<Connection>>;
 
-const SCHEMA_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS events (
-    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    id TEXT NOT NULL UNIQUE,
-    organization TEXT NOT NULL,
-    namespace TEXT NOT NULL,
-    topic TEXT NOT NULL,
-    event_key TEXT,
-    payload TEXT NOT NULL,
-    content_type TEXT NOT NULL,
-    metadata TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    parent_id TEXT,
-    correlation_id TEXT,
-    causation_id TEXT
-);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Migration {
+    pub filename: &'static str,
+    pub sql: &'static str,
+}
 
-CREATE INDEX IF NOT EXISTS idx_events_org_seq ON events (organization, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_org_ns_seq ON events (organization, namespace, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_org_topic_seq ON events (organization, topic, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
+impl Migration {
+    pub fn version(&self) -> i64 {
+        migration_version(self.filename)
+    }
+}
 
-CREATE TABLE IF NOT EXISTS consumer_offsets (
-    organization TEXT NOT NULL,
-    consumer_group_id TEXT NOT NULL,
-    stream TEXT NOT NULL DEFAULT 'default',
-    sequence INTEGER NOT NULL,
-    PRIMARY KEY (organization, consumer_group_id, stream)
-);
-"#;
+macro_rules! migration {
+    ($filename:literal) => {
+        Migration {
+            filename: $filename,
+            sql: include_str!(concat!("../migrations/", $filename)),
+        }
+    };
+}
+
+const MIGRATIONS: &[Migration] = &[migration!("0001_init.sql")];
+
+pub fn migrations() -> &'static [Migration] {
+    MIGRATIONS
+}
+
+pub fn schema_sql() -> String {
+    let mut sql = String::new();
+    for migration in migrations() {
+        sql.push_str(migration.sql);
+        if !sql.ends_with('\n') {
+            sql.push('\n');
+        }
+        sql.push_str(&format!("PRAGMA user_version = {};\n", migration.version()));
+    }
+    sql
+}
 
 pub struct SqliteDatabase {
     conn: SqliteConn,
@@ -58,16 +65,7 @@ impl SqliteDatabase {
         let _: String = conn
             .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
             .map_err(|e| Error::Store(e.to_string()))?;
-        conn.execute_batch(SCHEMA_SQL)
-            .map_err(|e| Error::Store(e.to_string()))?;
-
-        let version: i64 = conn
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|e| Error::Store(e.to_string()))?;
-
-        if version < 1 {
-            migrate_v1(&conn)?;
-        }
+        apply_migrations(&conn)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -79,31 +77,33 @@ impl SqliteDatabase {
     }
 }
 
-fn migrate_v1(conn: &Connection) -> Result<()> {
-    let columns: Vec<String> = {
-        let mut stmt = conn
-            .prepare("SELECT name FROM pragma_table_info('events')")
+fn apply_migrations(conn: &Connection) -> Result<()> {
+    let version = current_schema_version(conn)?;
+    for migration in migrations() {
+        let migration_version = migration.version();
+        if migration_version <= version {
+            continue;
+        }
+        conn.execute_batch(migration.sql)
             .map_err(|e| Error::Store(e.to_string()))?;
-        let rows = stmt
-            .query_map([], |row| row.get(0))
+        conn.pragma_update(None, "user_version", migration_version)
             .map_err(|e| Error::Store(e.to_string()))?;
-        rows.collect::<std::result::Result<_, _>>()
-            .map_err(|e| Error::Store(e.to_string()))?
-    };
-
-    if !columns.contains(&"parent_id".to_owned()) {
-        conn.execute_batch(
-            "ALTER TABLE events ADD COLUMN parent_id TEXT;
-             ALTER TABLE events ADD COLUMN correlation_id TEXT;
-             ALTER TABLE events ADD COLUMN causation_id TEXT;",
-        )
-        .map_err(|e| Error::Store(e.to_string()))?;
     }
-
-    conn.pragma_update(None, "user_version", 1)
-        .map_err(|e| Error::Store(e.to_string()))?;
-
     Ok(())
+}
+
+fn current_schema_version(conn: &Connection) -> Result<i64> {
+    conn.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| Error::Store(e.to_string()))
+}
+
+fn migration_version(filename: &str) -> i64 {
+    let Some((version, _)) = filename.split_once('_') else {
+        panic!("migration filename must start with a numeric version prefix")
+    };
+    version
+        .parse()
+        .expect("migration filename version prefix must be numeric")
 }
 
 #[cfg(test)]
@@ -131,6 +131,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(lineage_columns, 3);
+        let version: i64 = guard
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
     }
 
     #[test]
@@ -138,6 +142,19 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let conn = db.conn();
         let guard = conn.lock().unwrap();
-        guard.execute_batch(SCHEMA_SQL).unwrap();
+        guard.execute_batch(&schema_sql()).unwrap();
+    }
+
+    #[test]
+    fn schema_sql_is_available_for_manual_migrations() {
+        let sql: String = schema_sql();
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS events"));
+        assert!(sql.contains("parent_id TEXT"));
+        assert!(sql.contains("event_key TEXT"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS consumer_offsets"));
+        assert!(sql.contains("PRAGMA user_version = 1"));
+        assert!(sql.contains(migrations()[0].sql.trim()));
+        assert_eq!(migrations()[0].filename, "0001_init.sql");
+        assert_eq!(migrations()[0].version(), 1);
     }
 }
