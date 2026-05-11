@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use eventuary::io::Writer;
-use eventuary::{Error, Event, Result, SerializedEvent};
+use eventuary_core::io::Writer;
+use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::database::SqliteConn;
 

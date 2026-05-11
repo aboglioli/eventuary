@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use eventuary::{Error, Result};
+use eventuary_core::{Error, Result};
 
 pub type SqliteConn = Arc<Mutex<Connection>>;
 

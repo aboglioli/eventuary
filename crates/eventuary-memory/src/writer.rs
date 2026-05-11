@@ -1,5 +1,5 @@
-use eventuary::io::Writer;
-use eventuary::{Error, Event, Result};
+use eventuary_core::io::Writer;
+use eventuary_core::{Error, Event, Result};
 
 pub struct InmemWriter {
     tx: tokio::sync::mpsc::Sender<Event>,
@@ -23,8 +23,8 @@ impl Writer for InmemWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary::Payload;
-    use eventuary::io::{BoxWriter, WriterExt};
+    use eventuary_core::Payload;
+    use eventuary_core::io::{BoxWriter, WriterExt};
 
     fn ev() -> Event {
         Event::create(

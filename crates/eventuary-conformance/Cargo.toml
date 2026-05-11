@@ -1,14 +1,15 @@
 [package]
 name = "eventuary-conformance"
 description = "Backend conformance test suite for eventuary"
-publish = false
+keywords = ["events", "testing", "conformance"]
+categories = ["asynchronous", "development-tools::testing"]
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-eventuary = { workspace = true }
+eventuary-core = { workspace = true }
 chrono.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -8,8 +8,10 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
-use eventuary::io::Writer;
-use eventuary::{ConsumerGroupId, Event, Namespace, OrganizationId, Payload, StartFrom, Topic};
+use eventuary_core::io::Writer;
+use eventuary_core::{
+    ConsumerGroupId, Event, Namespace, OrganizationId, Payload, StartFrom, Topic,
+};
 use eventuary_postgres::{PgDatabase, PgEventWriter, PgReader, PgReaderConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {

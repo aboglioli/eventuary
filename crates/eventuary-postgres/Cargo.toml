@@ -14,7 +14,7 @@ default = []
 integration-tests = ["dep:testcontainers"]
 
 [dependencies]
-eventuary = { workspace = true }
+eventuary-core = { workspace = true }
 chrono.workspace = true
 either.workspace = true
 futures.workspace = true

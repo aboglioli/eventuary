@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/eventuary",
+    "crates/eventuary-core",
     "crates/eventuary-memory",
     "crates/eventuary-sqlite",
     "crates/eventuary-postgres",
@@ -18,15 +19,17 @@ repository = "https://github.com/aboglioli/eventuary"
 
 [workspace.dependencies]
 eventuary = { path = "crates/eventuary", version = "0.1.0-alpha.0" }
+eventuary-core = { path = "crates/eventuary-core", version = "0.1.0-alpha.0" }
 eventuary-memory = { path = "crates/eventuary-memory", version = "0.1.0-alpha.0" }
 eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.1.0-alpha.0" }
 eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.1.0-alpha.0" }
 eventuary-sqs = { path = "crates/eventuary-sqs", version = "0.1.0-alpha.0" }
 eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.1.0-alpha.0" }
-eventuary-conformance = { path = "crates/eventuary-conformance" }
+eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.1.0-alpha.0" }
 
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1.89"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 either = "1"
 futures = "0.3"
@@ -35,6 +38,7 @@ rusqlite = { version = "0.37", features = ["bundled-full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres"] }
+tempfile = "3"
 testcontainers = "0.25"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

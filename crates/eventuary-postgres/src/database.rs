@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use eventuary::{Error, Result};
+use eventuary_core::{Error, Result};
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS events (

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
-use eventuary::io::acker::AckBufferConfig;
-use eventuary::{ConsumerGroupId, Error, Namespace, OrganizationId, Result, StartFrom, Topic};
+use eventuary_core::io::acker::AckBufferConfig;
+use eventuary_core::{ConsumerGroupId, Error, Namespace, OrganizationId, Result, StartFrom, Topic};
 
 #[derive(Debug, Clone)]
 pub struct KafkaReaderConfig {

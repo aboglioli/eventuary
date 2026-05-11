@@ -8,9 +8,9 @@ use futures::Stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use eventuary::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary::io::{Message, Reader};
-use eventuary::{Error, EventSubscription, Result, SerializedEvent, StartFrom};
+use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
+use eventuary_core::io::{Message, Reader};
+use eventuary_core::{Error, EventSubscription, Result, SerializedEvent, StartFrom};
 
 use crate::flusher::SqsFlusher;
 use crate::reader_config::SqsReaderConfig;
@@ -48,7 +48,7 @@ impl SqsReader {
     ///
     /// [`default_subscription`]: SqsReader::default_subscription
     pub async fn read(&self) -> Result<SqsStream> {
-        eventuary::io::Reader::read(self, self.default_subscription()).await
+        eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
 }
 

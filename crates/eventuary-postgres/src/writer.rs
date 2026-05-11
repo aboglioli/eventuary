@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
-use eventuary::io::Writer;
-use eventuary::{Error, Event, Result, SerializedEvent};
+use eventuary_core::io::Writer;
+use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 pub struct PgEventWriter {
     pool: PgPool,

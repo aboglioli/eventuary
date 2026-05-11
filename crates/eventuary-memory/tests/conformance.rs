@@ -3,11 +3,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eventuary::io::WriterExt;
-use eventuary::{BoxWriter, EventSubscription, StartFrom};
 use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
+use eventuary_core::io::WriterExt;
+use eventuary_core::{BoxWriter, EventSubscription, StartFrom};
 use eventuary_memory::{InmemReader, InmemWriter};
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc};
@@ -29,7 +29,7 @@ impl MemoryBackend {
         }
     }
 
-    async fn reset(&self) -> mpsc::Sender<eventuary::Event> {
+    async fn reset(&self) -> mpsc::Sender<eventuary_core::Event> {
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let reader = InmemReader::new(rx);
         let mut guard = self.state.lock().await;
@@ -92,7 +92,7 @@ impl Backend for MemoryBackend {
             let subscription = build_subscription(&request);
             let mut guard = reader_handle.lock().await;
             let reader = guard.as_mut()?;
-            let mut stream = eventuary::io::Reader::read(reader, subscription.clone())
+            let mut stream = eventuary_core::io::Reader::read(reader, subscription.clone())
                 .await
                 .ok()?;
 
@@ -135,10 +135,11 @@ impl Backend for MemoryBackend {
             let Some(reader) = guard.as_mut() else {
                 return Vec::new();
             };
-            let mut stream = match eventuary::io::Reader::read(reader, subscription.clone()).await {
-                Ok(s) => s,
-                Err(_) => return Vec::new(),
-            };
+            let mut stream =
+                match eventuary_core::io::Reader::read(reader, subscription.clone()).await {
+                    Ok(s) => s,
+                    Err(_) => return Vec::new(),
+                };
 
             if matches!(request.start_from, StartFrom::Latest) {
                 drain_pending(&mut stream).await;
@@ -172,7 +173,9 @@ impl Backend for MemoryBackend {
 async fn drain_pending<S>(stream: &mut S)
 where
     S: futures::Stream<
-            Item = eventuary::Result<eventuary::io::Message<eventuary::io::acker::NoopAcker>>,
+            Item = eventuary_core::Result<
+                eventuary_core::io::Message<eventuary_core::io::acker::NoopAcker>,
+            >,
         > + Unpin,
 {
     while let Ok(Some(Ok(_))) = tokio::time::timeout(Duration::from_millis(10), stream.next()).await

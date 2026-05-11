@@ -1035,6 +1035,31 @@ dependencies = [
 name = "eventuary"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "eventuary-core",
+ "eventuary-kafka",
+ "eventuary-memory",
+ "eventuary-postgres",
+ "eventuary-sqlite",
+ "eventuary-sqs",
+ "serde_json",
+]
+
+[[package]]
+name = "eventuary-conformance"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "chrono",
+ "eventuary-core",
+ "futures",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "eventuary-core"
+version = "0.1.0-alpha.0"
+dependencies = [
  "base64",
  "chrono",
  "either",
@@ -1049,23 +1074,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "eventuary-conformance"
-version = "0.1.0-alpha.0"
-dependencies = [
- "chrono",
- "eventuary",
- "futures",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "eventuary-kafka"
 version = "0.1.0-alpha.0"
 dependencies = [
  "chrono",
- "eventuary",
+ "eventuary-core",
  "futures",
  "rdkafka",
  "serde_json",
@@ -1080,8 +1093,8 @@ dependencies = [
 name = "eventuary-memory"
 version = "0.1.0-alpha.0"
 dependencies = [
- "eventuary",
  "eventuary-conformance",
+ "eventuary-core",
  "futures",
  "tokio",
 ]
@@ -1092,8 +1105,8 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "chrono",
  "either",
- "eventuary",
  "eventuary-conformance",
+ "eventuary-core",
  "futures",
  "serde_json",
  "sqlx",
@@ -1109,8 +1122,8 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "chrono",
  "either",
- "eventuary",
  "eventuary-conformance",
+ "eventuary-core",
  "futures",
  "rusqlite",
  "serde_json",
@@ -1128,7 +1141,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-sqs",
  "chrono",
- "eventuary",
+ "eventuary-core",
  "futures",
  "serde_json",
  "testcontainers",
