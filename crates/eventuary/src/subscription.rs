@@ -4,18 +4,101 @@ use crate::{
     ConsumerGroupId, Event, EventKey, Metadata, Namespace, OrganizationId, StartFrom, Topic,
 };
 
+/// Read-side subscription: tells a [`Reader`] *which events* to deliver and
+/// *how* to identify the consumer.
+///
+/// Subscriptions are passed to [`Reader::read`]; the reader uses them as
+/// (a) backend hints for query construction (sqlite/postgres push topic and
+/// namespace filters into SQL; kafka/sqs apply them in memory via
+/// [`matches`]) and (b) per-event filter via [`matches`] before each event
+/// is yielded.
+///
+/// # Filter semantics
+///
+/// [`matches`] checks each non-`None` field as a conjunction (logical AND).
+/// A `None` field disables that predicate:
+///
+/// | Field | Predicate when `Some(_)` |
+/// |-------|--------------------------|
+/// | `organization` | event.organization == this (always required) |
+/// | `topics` | event.topic is in the list (OR within list, AND with rest) |
+/// | `namespace_prefix` | event.namespace starts with prefix |
+/// | `keys` | event.key is in the list |
+/// | `metadata` | every (k, v) pair in this is present in event.metadata (subset match, AND across pairs — no OR semantics) |
+/// | `end_at` | event.timestamp <= end_at |
+///
+/// `start_from` and `limit` are not predicates: they are positional
+/// (cursor-like) and count-like respectively, and are honored by the
+/// backend's read loop rather than by [`matches`].
+///
+/// # Subscription vs. `Filter`
+///
+/// Subscriptions are applied **at read time**, at or near the backend, and
+/// can prune work before bytes hit the consumer task. Use them to scope
+/// *what is delivered*.
+///
+/// In contrast, [`io::Filter`] is applied **post-read**, inside the consumer
+/// loop, in front of a [`Handler`]. It cannot prune work at the source —
+/// the event has already been deserialized and ack'd through the
+/// pipeline — but it can re-route, drop, or transform per handler.
+///
+/// As a rule of thumb: push everything you can into the subscription, and
+/// use [`io::Filter`] for handler-specific concerns that depend on
+/// downstream state.
+///
+/// # Backend constraints
+///
+/// Each backend may reject subscriptions that contradict its bound
+/// construction-time configuration. For example, the Kafka reader binds
+/// the consumer group and starting offset behavior at construction and
+/// rejects subscriptions that try to override `start_from` or
+/// `consumer_group_id`. The SQS reader only honors `StartFrom::Latest`
+/// because queue semantics cannot seek. Backends document their
+/// constraints on their `Reader::read` impl.
+///
+/// [`Reader`]: crate::io::Reader
+/// [`Reader::read`]: crate::io::Reader::read
+/// [`matches`]: EventSubscription::matches
+/// [`io::Filter`]: crate::io::Filter
+/// [`Handler`]: crate::io::Handler
 #[derive(Debug, Clone)]
 pub struct EventSubscription {
+    /// Human-readable label for the subscription. Currently informational;
+    /// some backends (sqlite, postgres) may also use it as a stream name
+    /// for consumer-offset bookkeeping.
     pub name: Option<String>,
+    /// Consumer-group identity for backends that support shared
+    /// checkpointing (kafka, sqlite, postgres). `None` means a single
+    /// reader with no persistent offset.
     pub consumer_group_id: Option<ConsumerGroupId>,
 
+    /// Tenant scope. Always required. Events from other organizations are
+    /// filtered out.
     pub organization: OrganizationId,
+    /// Topic allow-list. `None` accepts any topic. `Some(vec![..])` accepts
+    /// any topic in the list (OR within list).
     pub topics: Option<Vec<Topic>>,
+    /// Namespace prefix filter. An event matches when its namespace starts
+    /// with this prefix (`/billing` matches `/billing` and
+    /// `/billing/invoices`).
     pub namespace_prefix: Option<Namespace>,
+    /// Event-key allow-list. `None` accepts any key.
     pub keys: Option<Vec<EventKey>>,
+    /// Metadata predicate: every key/value pair in this map must be present
+    /// (with equal value) in the event's metadata. AND across pairs — no
+    /// OR semantics. Use a separate subscription for alternatives.
     pub metadata: Option<Metadata>,
+    /// Starting position. Honored by backends that can seek (sqlite,
+    /// postgres, kafka at construction). Backends that cannot seek (sqs)
+    /// require `StartFrom::Latest`.
     pub start_from: StartFrom,
+    /// Optional upper-bound timestamp. Events with `timestamp > end_at`
+    /// are filtered out by [`matches`]. Backends do not seek to it; they
+    /// merely stop matching.
     pub end_at: Option<DateTime<Utc>>,
+    /// Optional cap on the number of delivered events. The backend stops
+    /// emitting once `limit` events have been yielded. Applied **after**
+    /// filtering — counts only matched events.
     pub limit: Option<usize>,
 }
 
