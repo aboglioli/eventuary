@@ -26,6 +26,7 @@ fn make_event(org: &OrganizationId, namespace: &str, topic: &str, key: &str) -> 
     .key(key)
     .expect("valid key")
     .build()
+    .expect("valid event")
 }
 
 pub async fn case_write_read_roundtrip(backend: &dyn Backend) {

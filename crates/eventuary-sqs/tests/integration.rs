@@ -69,6 +69,7 @@ fn make_event(org: &str, key: &str) -> Event {
         .key(key)
         .unwrap()
         .build()
+        .expect("valid event")
 }
 
 #[tokio::test]

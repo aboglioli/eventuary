@@ -180,6 +180,7 @@ mod tests {
             .key(key)
             .unwrap()
             .build()
+            .expect("valid event")
     }
 
     fn ev_with_metadata(

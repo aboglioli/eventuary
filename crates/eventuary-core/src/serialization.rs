@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::event::{Event, EventId, RestoreEvent};
+use crate::event::{Event, EventId};
 use crate::event_key::EventKey;
 use crate::metadata::Metadata;
 use crate::namespace::Namespace;
@@ -112,20 +112,20 @@ impl SerializedEvent {
             .map(EventKey::new)
             .transpose()?;
 
-        Ok(Event::restore(RestoreEvent {
-            id: EventId::from_str(&self.id).map_err(|e| Error::Serialization(e.to_string()))?,
-            organization: OrganizationId::new(&self.organization)?,
-            namespace: Namespace::new(&self.namespace)?,
-            topic: Topic::new(&self.topic)?,
-            payload: Payload::from_raw(data, content_type),
-            metadata: Metadata::from(self.metadata.clone()),
-            timestamp: self.timestamp,
-            version: self.version,
+        Event::new(
+            EventId::from_str(&self.id).map_err(|e| Error::Serialization(e.to_string()))?,
+            OrganizationId::new(&self.organization)?,
+            Namespace::new(&self.namespace)?,
+            Topic::new(&self.topic)?,
+            Payload::from_raw(data, content_type),
+            Metadata::from(self.metadata.clone()),
+            self.timestamp,
+            self.version,
             key,
             parent_id,
             correlation_id,
             causation_id,
-        }))
+        )
     }
 
     pub fn to_json_value(&self) -> serde_json::Value {
@@ -161,6 +161,7 @@ mod tests {
             .key(key)
             .unwrap()
             .build()
+            .expect("valid event")
     }
 
     #[test]
@@ -170,7 +171,8 @@ mod tests {
             .unwrap()
             .key("task-123")
             .unwrap()
-            .build();
+            .build()
+            .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert_eq!(serialized.topic, "task.created");
@@ -238,7 +240,8 @@ mod tests {
         .unwrap()
         .key("task-123")
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let value = serialized.to_json_value();
@@ -260,7 +263,8 @@ mod tests {
         .unwrap()
         .key("task-123")
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let s = serialized.to_json_string().unwrap();
@@ -282,7 +286,8 @@ mod tests {
         .unwrap()
         .key("task-123")
         .unwrap()
-        .build();
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let bytes = serialized.to_json_string().unwrap().into_bytes();
@@ -318,7 +323,8 @@ mod tests {
             .unwrap()
             .causation_id("cause")
             .unwrap()
-            .build();
+            .build()
+            .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert_eq!(serialized.key.as_deref(), Some("k"));

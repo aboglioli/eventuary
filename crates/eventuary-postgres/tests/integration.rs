@@ -39,6 +39,7 @@ fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
         .key(key)
         .unwrap()
         .build()
+        .expect("valid event")
 }
 
 fn config(org: &str) -> PgReaderConfig {
@@ -91,7 +92,8 @@ async fn reader_roundtrips_lineage_fields() {
     .unwrap()
     .causation_id("cause")
     .unwrap()
-    .build();
+    .build()
+    .unwrap();
     writer.write(&event).await.unwrap();
 
     let reader = PgReader::new(pool, config("acme"));

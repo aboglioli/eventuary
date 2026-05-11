@@ -124,7 +124,7 @@ impl EventBuilder {
         self
     }
 
-    pub fn build(self) -> Event {
+    pub fn build(self) -> Result<Event> {
         Event::new(
             EventId::new(),
             self.organization,
@@ -157,8 +157,8 @@ impl Event {
         parent_id: Option<EventId>,
         correlation_id: Option<EventKey>,
         causation_id: Option<EventKey>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             id,
             organization,
             namespace,
@@ -171,7 +171,7 @@ impl Event {
             parent_id,
             correlation_id,
             causation_id,
-        }
+        })
     }
 
     pub fn builder(
@@ -194,29 +194,12 @@ impl Event {
         topic: impl Into<String>,
         payload: Payload,
     ) -> Result<Self> {
-        Ok(Self::builder(organization, namespace, topic, payload)?.build())
+        Self::builder(organization, namespace, topic, payload)?.build()
     }
 
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
         self
-    }
-
-    pub fn restore(r: RestoreEvent) -> Self {
-        Self::new(
-            r.id,
-            r.organization,
-            r.namespace,
-            r.topic,
-            r.payload,
-            r.metadata,
-            r.timestamp,
-            r.version,
-            r.key,
-            r.parent_id,
-            r.correlation_id,
-            r.causation_id,
-        )
     }
 
     pub fn id(&self) -> EventId {
@@ -257,21 +240,6 @@ impl Event {
     }
 }
 
-pub struct RestoreEvent {
-    pub id: EventId,
-    pub organization: OrganizationId,
-    pub namespace: Namespace,
-    pub topic: Topic,
-    pub payload: Payload,
-    pub metadata: Metadata,
-    pub timestamp: DateTime<Utc>,
-    pub version: u64,
-    pub key: Option<EventKey>,
-    pub parent_id: Option<EventId>,
-    pub correlation_id: Option<EventKey>,
-    pub causation_id: Option<EventKey>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,7 +270,8 @@ mod tests {
             .unwrap()
             .causation_id("command-9")
             .unwrap()
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(event.key().map(EventKey::as_str), Some("entity-1"));
         assert_eq!(event.parent_id(), Some(parent_id));
@@ -342,7 +311,8 @@ mod tests {
         let event = Event::builder("acme", "/agent", "agent.registered", payload)
             .unwrap()
             .metadata(metadata)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(event.metadata().get("agent_id"), Some("abc-123"));
         assert_eq!(event.metadata().get("project"), Some("acme"));
     }
@@ -355,7 +325,8 @@ mod tests {
             .unwrap()
             .causation_id("cause-1")
             .unwrap()
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(event.correlation_id().map(EventKey::as_str), Some("corr-1"));
         assert_eq!(event.causation_id().map(EventKey::as_str), Some("cause-1"));
         assert!(event.metadata().is_empty());

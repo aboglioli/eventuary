@@ -47,7 +47,7 @@ mod topic;
 pub use collector::EventCollector;
 pub use consumer_group_id::ConsumerGroupId;
 pub use error::{Error, Result};
-pub use event::{Event, EventId, RestoreEvent};
+pub use event::{Event, EventId};
 pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,

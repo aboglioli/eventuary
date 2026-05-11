@@ -75,6 +75,7 @@ fn make_event(org: &str, namespace: &str, topic: &str, key: &str) -> Event {
         .key(key)
         .unwrap()
         .build()
+        .expect("valid event")
 }
 
 #[tokio::test]

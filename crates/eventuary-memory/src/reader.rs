@@ -83,6 +83,7 @@ mod tests {
             .key("k")
             .unwrap()
             .build()
+            .expect("valid event")
     }
 
     #[tokio::test]

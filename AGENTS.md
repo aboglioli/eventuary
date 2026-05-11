@@ -130,7 +130,7 @@ Aggregate.mutate() -> EventCollector.collect(event)
 ```
 
 `Event` is immutable, validated at construction (`Event::create`), and
-reconstructed without revalidation via `Event::restore(RestoreEvent { ... })`.
+reconstructed via `Event::new(...)`.
 UUID v7 is used for `EventId` so events are time-ordered.
 
 ### Constructor Convention
@@ -139,9 +139,9 @@ UUID v7 is used for `EventId` so events are time-ordered.
 |---------|---------|------------|
 | `T::new(...)` | First-time construction (value objects, aggregates) | Yes |
 | `Event::create(...)` | Domain creation that may emit events | Yes |
-| `Event::restore(RestoreEvent { ... })` | Reconstruction from persisted state | No |
+| `Event::new(...)` | Restoration from persisted state | Yes (prepares for future validation) |
 
-`Restore*` structs use named public fields, not positional params. Never
+`Event::new(...)` uses positional params matching the struct field layout. Never
 direct-cast strings into value objects: use the constructor (`Topic::new`,
 `Namespace::new`, etc.) so validation runs.
 

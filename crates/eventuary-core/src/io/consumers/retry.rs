@@ -99,7 +99,7 @@ impl<W: Writer> DeadLetterWriter<W> {
         if let Some(correlation_id) = event.correlation_id() {
             builder = builder.correlation_id(correlation_id.as_str())?;
         }
-        let dead_letter_event = builder.parent_id(event.id()).build();
+        let dead_letter_event = builder.parent_id(event.id()).build()?;
         self.writer.write(&dead_letter_event).await
     }
 }
@@ -180,6 +180,7 @@ mod tests {
             .key("k")
             .unwrap()
             .build()
+            .expect("valid event")
     }
 
     struct CapturingWriter {

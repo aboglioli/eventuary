@@ -54,10 +54,48 @@ impl PgDatabase {
             .execute(&pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
+
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|e| Error::Store(e.to_string()))?;
+
+        let version: Option<i32> = sqlx::query_scalar(
+            "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| Error::Store(e.to_string()))?;
+
+        if version.is_none() || version == Some(0) {
+            migrate_v1(&pool).await?;
+        }
+
         Ok(Self { pool })
     }
 
     pub fn pool(&self) -> PgPool {
         self.pool.clone()
     }
+}
+
+async fn migrate_v1(pool: &PgPool) -> Result<()> {
+    sqlx::raw_sql(
+        "ALTER TABLE events ADD COLUMN IF NOT EXISTS parent_id UUID;
+         ALTER TABLE events ADD COLUMN IF NOT EXISTS correlation_id TEXT;
+         ALTER TABLE events ADD COLUMN IF NOT EXISTS causation_id TEXT;
+         ALTER TABLE events ALTER COLUMN event_key DROP NOT NULL",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| Error::Store(e.to_string()))?;
+
+    sqlx::raw_sql("INSERT INTO schema_migrations (version) VALUES (1)")
+        .execute(pool)
+        .await
+        .map_err(|e| Error::Store(e.to_string()))?;
+
+    Ok(())
 }
