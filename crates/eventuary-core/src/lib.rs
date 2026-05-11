@@ -21,7 +21,7 @@
 //!     Payload::from_json(&serde_json::json!({"amount": 100})).unwrap(),
 //! ).unwrap()
 //! .key("invoice-123").unwrap()
-//! .build();
+//! .build().unwrap();
 //! assert_eq!(event.topic().as_str(), "invoice.created");
 //! ```
 //!
