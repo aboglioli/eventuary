@@ -193,6 +193,10 @@ read-side request:
   `end_at`. AND across fields; the metadata field is a subset match
   (AND across pairs, no OR).
 - **Positional / count:** `start_from`, `limit`.
+- **Partitioning:** `partition: Option<PartitionAssignment>`. `Some(_)`
+  scopes the consumer to events whose `partition_for(event, count)`
+  equals the assignment's id; `None` (default) is unpartitioned. See
+  *Runtime Partitioning* below.
 
 `subscription.matches(event)` is the in-memory predicate used by every
 backend after deserialization. SQL backends (sqlite, postgres) push the
@@ -255,9 +259,55 @@ preserving the original event plus failure metadata.
   `Serialize + DeserializeOwned + SnapshotEventId`. Use to persist
   aggregate state alongside the event log and resume rebuild from the
   snapshot's `EventId`.
-- `PartitionKey` trait with FNV-1a implementation on `EventKey` for
-  deterministic partition routing (used by Kafka writer for record key
-  → partition selection).
+- `PartitionKey` trait with FNV-1a (u64) implementation on `EventKey`
+  for deterministic partition routing (used by Kafka writer for record
+  key → partition selection, and by the runtime partition filter).
+
+### Runtime Partitioning
+
+`PartitionAssignment` + `partition_for(event, count)` (both in
+`eventuary-core/src/partition.rs`) let N consumers split the same event
+log by key hash. Each worker owns one assignment and the read-time
+filter inside `EventSubscription::matches` drops events outside its
+slice.
+
+- `partition_for(event, count)` is the single canonical mapping. It
+  uses `event.key()` when present (sticky per key) and falls back to
+  the UUID v7 id bytes when keyless. Both paths share `fnv1a_u64`.
+- `PartitionAssignment::new(count, id)` rejects `count < 2` and
+  `id >= count`. `Option::None` is the canonical unpartitioned state —
+  there is no `PartitionAssignment::unpartitioned()` shortcut.
+- `EventSubscription.partition` is a plain field; set it like any other
+  predicate. No fluent `with_partition` builder.
+
+**Checkpoint identity.** The SQL backends carry `(partition,
+partition_count)` in `consumer_offsets`'s PK. Unpartitioned consumers
+use `(0, 1)` via column defaults, so they share a single row that
+matches today's behavior. Resizing N (e.g. 10 → 16) gives the new
+scheme a new row family — old rows stay as an audit trail until cleaned
+up. See PLAN.md (or `docs/` if migrated) for the resize SQL runbook.
+
+**Pool sizing.** `PgDatabase::connect_with(url, PgConnectOptions {
+max_connections })` exposes the pool limit (default 20). Rule of thumb:
+`max_connections >= partition_count + writer_concurrency + 4`.
+
+**Backend capability matrix.**
+
+| Backend | `subscription.partition = Some` |
+|---|---|
+| `eventuary-postgres` | implemented |
+| `eventuary-sqlite` | implemented |
+| `eventuary-memory` | rejected at `Reader::read` (`Error::Config`) |
+| `eventuary-sqs` | rejected at `Reader::read` |
+| `eventuary-kafka` | rejected at `Reader::read` (Kafka partitions natively via the group coordinator) |
+
+**Operator responsibility (pre-coordinator).** Two workers booted with
+the same `(group, checkpoint, partition, partition_count)` tuple will
+both walk the log and double-process events; the `EXCLUDED.sequence >
+consumer_offsets.sequence` guard keeps the checkpoint monotonic but
+nothing prevents the wasted work. Each reader logs the tuple at
+`tracing::info!` on spawn so duplicates are greppable. A PG advisory-
+lock coordinator is a future plan.
 
 ### Error Model
 
@@ -294,12 +344,16 @@ cases:
 - `case_nack_does_not_advance_checkpoint`
 - `case_independent_consumer_groups`
 - `case_independent_streams_within_group`
+- `case_runtime_partition_isolates_workers`
+- `case_runtime_partition_per_key_stickiness`
+- `case_runtime_partition_checkpoint_independence`
 
 Each backend test crate provides a `Backend` impl + `Capabilities` flag
 set, then calls `run_all(&backend)`. Capabilities (`supports_replay`,
 `supports_timestamp_start`, `supports_nack_redelivery`,
 `preserves_total_order`, `supports_consumer_groups`,
-`supports_independent_streams`) gate which cases run for that backend.
+`supports_independent_checkpoints`, `supports_runtime_partitioning`)
+gate which cases run for that backend.
 
 When adding a backend, **first** plug it into the conformance suite,
 **then** add backend-specific tests for native features.
@@ -470,6 +524,18 @@ Worth knowing when changing the codebase:
 - **`PartitionKey` trait + FNV-1a on `EventKey`.** Deterministic and
   stable across machines and language ports; same key always routes to
   the same partition.
+- **Runtime partition filter lives in core.** `PartitionAssignment` and
+  `partition_for(event, count)` route events at read time without any
+  write-side schema change. `EventSubscription.partition` carries the
+  assignment; the acker binds `(partition, partition_count)` into the
+  checkpoint row so each partition advances independently. `Option::None`
+  is the only "unpartitioned" representation — no shortcut constructor,
+  no second code path.
+- **Runtime partitioning is opt-in per backend.** Postgres and sqlite
+  implement it; memory, sqs, and kafka reject `subscription.partition =
+  Some(_)` at `Reader::read` with backend-specific `Error::Config`
+  messages. The conformance suite gates partition cases on the
+  `supports_runtime_partitioning` capability flag.
 - **`Snapshot` blanket impl** over `Serialize + DeserializeOwned +
   SnapshotEventId`. Aggregates only need to implement the marker
   `SnapshotEventId` to get JSON snapshotting for free.
