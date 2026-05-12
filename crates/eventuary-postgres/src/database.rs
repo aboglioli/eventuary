@@ -137,7 +137,7 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS events"));
         assert!(sql.contains("parent_id UUID"));
         assert!(sql.contains("event_key TEXT"));
-        assert!(sql.contains("CREATE TABLE IF NOT EXISTS consumer_offsets"));
+        assert!(sql.contains("checkpoint_name"));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS schema_migrations"));
         assert!(sql.contains("INSERT INTO schema_migrations (version) VALUES (1)"));
         assert!(sql.contains(migrations()[0].sql.trim()));

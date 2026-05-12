@@ -20,7 +20,7 @@ use crate::{
 ///
 /// | Field | Predicate when `Some(_)` |
 /// |-------|--------------------------|
-/// | `organization` | event.organization == this (always required) |
+/// | `organization` | event.organization == this (optional; `None` accepts all orgs) |
 /// | `topics` | event.topic is in the list (OR within list, AND with rest) |
 /// | `namespace_prefix` | event.namespace starts with prefix |
 /// | `keys` | event.key is in the list |
@@ -30,6 +30,12 @@ use crate::{
 /// `start_from` and `limit` are not predicates: they are positional
 /// (cursor-like) and count-like respectively, and are honored by the
 /// backend's read loop rather than by [`matches`].
+///
+/// # Checkpoint identity
+///
+/// The checkpoint for SQL backends is identified by
+/// `(consumer_group_id, checkpoint_name)`. Organization is **not** part
+/// of the checkpoint; it is only a read filter.
 ///
 /// # Subscription vs. `Filter`
 ///
@@ -62,18 +68,18 @@ use crate::{
 /// [`Handler`]: crate::io::Handler
 #[derive(Debug, Clone)]
 pub struct EventSubscription {
-    /// Human-readable label for the subscription. Currently informational;
-    /// some backends (sqlite, postgres) may also use it as a stream name
-    /// for consumer-offset bookkeeping.
-    pub name: Option<String>,
+    /// Name for checkpoint bookkeeping (used by sqlite, postgres backends
+    /// as the checkpoint_name in consumer_offsets).
+    pub checkpoint_name: Option<String>,
     /// Consumer-group identity for backends that support shared
     /// checkpointing (kafka, sqlite, postgres). `None` means a single
     /// reader with no persistent offset.
     pub consumer_group_id: Option<ConsumerGroupId>,
 
-    /// Tenant scope. Always required. Events from other organizations are
-    /// filtered out.
-    pub organization: OrganizationId,
+    /// Optional tenant scope. `None` accepts events from all
+    /// organizations. Events from other organizations are filtered out
+    /// when `Some(_)`.
+    pub organization: Option<OrganizationId>,
     /// Topic allow-list. `None` accepts any topic. `Some(vec![..])` accepts
     /// any topic in the list (OR within list).
     pub topics: Option<Vec<Topic>>,
@@ -101,13 +107,19 @@ pub struct EventSubscription {
     pub limit: Option<usize>,
 }
 
-impl EventSubscription {
-    pub fn new(organization: OrganizationId) -> Self {
-        Self {
-            name: None,
-            consumer_group_id: None,
+impl Default for EventSubscription {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-            organization,
+impl EventSubscription {
+    /// Creates a subscription accepting all organizations.
+    pub fn new() -> Self {
+        Self {
+            checkpoint_name: None,
+            consumer_group_id: None,
+            organization: None,
             topics: None,
             namespace_prefix: None,
             keys: None,
@@ -118,8 +130,18 @@ impl EventSubscription {
         }
     }
 
+    /// Creates a subscription scoped to a specific organization.
+    pub fn for_organization(organization: OrganizationId) -> Self {
+        Self {
+            organization: Some(organization),
+            ..Self::new()
+        }
+    }
+
     pub fn matches(&self, event: &Event) -> bool {
-        if event.organization() != &self.organization {
+        if let Some(organization) = self.organization.as_ref()
+            && event.organization() != organization
+        {
             return false;
         }
         if let Some(topics) = self.topics.as_ref()
@@ -195,12 +217,16 @@ mod tests {
 
     #[test]
     fn subscription_keeps_consumer_identity_separate_from_filters() {
-        let mut subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
-        subscription.name = Some("billing-projection".to_owned());
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        subscription.checkpoint_name = Some("billing-projection".to_owned());
         subscription.consumer_group_id = Some(crate::ConsumerGroupId::new("workers").unwrap());
         subscription.topics = Some(vec![Topic::new("invoice.created").unwrap()]);
 
-        assert_eq!(subscription.name.as_deref(), Some("billing-projection"));
+        assert_eq!(
+            subscription.checkpoint_name.as_deref(),
+            Some("billing-projection")
+        );
         assert_eq!(
             subscription
                 .consumer_group_id
@@ -214,7 +240,8 @@ mod tests {
 
     #[test]
     fn match_by_key_list() {
-        let mut subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         subscription.keys = Some(vec![crate::EventKey::new("invoice-1").unwrap()]);
         assert!(subscription.matches(&ev_with_key(
             "acme",
@@ -232,7 +259,8 @@ mod tests {
 
     #[test]
     fn match_by_metadata_pairs() {
-        let mut subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         subscription.metadata = Some(crate::Metadata::new().with("tenant", "north").unwrap());
         assert!(
             subscription.matches(&ev_with_metadata(
@@ -258,14 +286,16 @@ mod tests {
 
     #[test]
     fn match_by_org() {
-        let subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
+        let subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         assert!(subscription.matches(&ev("acme", "thing.happened", "/x")));
         assert!(!subscription.matches(&ev("other", "thing.happened", "/x")));
     }
 
     #[test]
     fn match_by_topic_list() {
-        let mut subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         subscription.topics = Some(vec![Topic::new("a.b").unwrap(), Topic::new("c.d").unwrap()]);
         assert!(subscription.matches(&ev("acme", "a.b", "/x")));
         assert!(subscription.matches(&ev("acme", "c.d", "/x")));
@@ -274,7 +304,8 @@ mod tests {
 
     #[test]
     fn match_by_namespace_prefix() {
-        let mut subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         subscription.namespace_prefix = Some(Namespace::new("/backend").unwrap());
         assert!(subscription.matches(&ev("acme", "a.b", "/backend")));
         assert!(subscription.matches(&ev("acme", "a.b", "/backend/auth")));
@@ -283,7 +314,8 @@ mod tests {
 
     #[test]
     fn exclude_after_end_at() {
-        let mut subscription = EventSubscription::new(OrganizationId::new("acme").unwrap());
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         subscription.end_at = Some(Utc::now() - Duration::seconds(60));
         assert!(!subscription.matches(&ev("acme", "a.b", "/x")));
     }

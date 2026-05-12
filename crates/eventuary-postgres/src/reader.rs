@@ -16,31 +16,44 @@ use eventuary_core::{
     StartFrom, Topic,
 };
 
-const DEFAULT_STREAM: &str = "default";
+const DEFAULT_CHECKPOINT_NAME: &str = "default";
 
 #[derive(Clone)]
 pub struct PgReaderConfig {
-    pub organization: OrganizationId,
+    pub organization: Option<OrganizationId>,
     pub namespace: Option<Namespace>,
     pub topics: Vec<Topic>,
     pub consumer_group_id: Option<ConsumerGroupId>,
-    pub stream: String,
+    pub checkpoint_name: String,
     pub start_from: StartFrom,
     pub poll_interval: Duration,
     pub batch_size: usize,
 }
 
+impl Default for PgReaderConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PgReaderConfig {
-    pub fn new(organization: OrganizationId) -> Self {
+    pub fn new() -> Self {
         Self {
-            organization,
+            organization: None,
             namespace: None,
             topics: Vec::new(),
             consumer_group_id: None,
-            stream: DEFAULT_STREAM.to_owned(),
+            checkpoint_name: DEFAULT_CHECKPOINT_NAME.to_owned(),
             start_from: StartFrom::Latest,
             poll_interval: Duration::from_millis(100),
             batch_size: 100,
+        }
+    }
+
+    pub fn for_organization(organization: OrganizationId) -> Self {
+        Self {
+            organization: Some(organization),
+            ..Self::new()
         }
     }
 }
@@ -51,24 +64,22 @@ impl PgReaderConfig {
 #[derive(Clone)]
 pub struct PgAcker {
     pool: PgPool,
-    organization: OrganizationId,
     consumer_group_id: ConsumerGroupId,
-    stream: String,
+    checkpoint_name: String,
     sequence: i64,
 }
 
 impl Acker for PgAcker {
     async fn ack(&self) -> Result<()> {
         sqlx::query(
-            "INSERT INTO consumer_offsets (organization, consumer_group_id, stream, sequence) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (organization, consumer_group_id, stream) DO UPDATE \
+            "INSERT INTO consumer_offsets (consumer_group_id, checkpoint_name, sequence) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (consumer_group_id, checkpoint_name) DO UPDATE \
              SET sequence = EXCLUDED.sequence \
              WHERE EXCLUDED.sequence > consumer_offsets.sequence",
         )
-        .bind(self.organization.as_str())
         .bind(self.consumer_group_id.as_str())
-        .bind(&self.stream)
+        .bind(&self.checkpoint_name)
         .bind(self.sequence)
         .execute(&self.pool)
         .await
@@ -120,8 +131,9 @@ impl PgReader {
 }
 
 fn subscription_from_config(config: &PgReaderConfig) -> EventSubscription {
-    let mut subscription = EventSubscription::new(config.organization.clone());
-    subscription.name = Some(config.stream.clone());
+    let mut subscription = EventSubscription::new();
+    subscription.organization = config.organization.clone();
+    subscription.checkpoint_name = Some(config.checkpoint_name.clone());
     subscription.consumer_group_id = config.consumer_group_id.clone();
     if !config.topics.is_empty() {
         subscription.topics = Some(config.topics.clone());
@@ -139,8 +151,8 @@ fn apply_subscription(config: &mut PgReaderConfig, subscription: &EventSubscript
         .consumer_group_id
         .clone()
         .or_else(|| config.consumer_group_id.clone());
-    if let Some(name) = subscription.name.as_ref() {
-        config.stream = name.clone();
+    if let Some(checkpoint_name) = subscription.checkpoint_name.as_ref() {
+        config.checkpoint_name = checkpoint_name.clone();
     }
     config.start_from = subscription.start_from;
 }
@@ -209,9 +221,8 @@ impl Reader for PgReader {
                     let acker: PgAckerVariant = match config.consumer_group_id.as_ref() {
                         Some(group) => Either::Right(OnceAcker::new(PgAcker {
                             pool: pool.clone(),
-                            organization: config.organization.clone(),
                             consumer_group_id: group.clone(),
-                            stream: config.stream.clone(),
+                            checkpoint_name: config.checkpoint_name.clone(),
                             sequence,
                         })),
                         None => Either::Left(NoopAcker),
@@ -238,11 +249,10 @@ async fn resolve_initial_position(
     if let Some(group) = config.consumer_group_id.as_ref() {
         let row = sqlx::query(
             "SELECT sequence FROM consumer_offsets \
-             WHERE organization = $1 AND consumer_group_id = $2 AND stream = $3",
+             WHERE consumer_group_id = $1 AND checkpoint_name = $2",
         )
-        .bind(config.organization.as_str())
         .bind(group.as_str())
-        .bind(&config.stream)
+        .bind(&config.checkpoint_name)
         .fetch_optional(pool)
         .await
         .map_err(|e| Error::Store(e.to_string()))?;
@@ -253,25 +263,41 @@ async fn resolve_initial_position(
     match config.start_from {
         StartFrom::Earliest => Ok((0, None)),
         StartFrom::Latest => {
-            let row = sqlx::query(
-                "SELECT COALESCE(MAX(sequence), 0) AS s FROM events WHERE organization = $1",
-            )
-            .bind(config.organization.as_str())
-            .fetch_one(pool)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            let row = match config.organization.as_ref() {
+                Some(org) => sqlx::query(
+                    "SELECT COALESCE(MAX(sequence), 0) AS s FROM events WHERE organization = $1",
+                )
+                .bind(org.as_str())
+                .fetch_one(pool)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?,
+                None => sqlx::query("SELECT COALESCE(MAX(sequence), 0) AS s FROM events")
+                    .fetch_one(pool)
+                    .await
+                    .map_err(|e| Error::Store(e.to_string()))?,
+            };
             Ok((row.get::<i64, _>("s"), None))
         }
         StartFrom::Timestamp(ts) => {
-            let row = sqlx::query(
-                "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM events \
-                 WHERE organization = $1 AND timestamp >= $2::timestamptz",
-            )
-            .bind(config.organization.as_str())
-            .bind(ts.to_rfc3339())
-            .fetch_one(pool)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            let row = match config.organization.as_ref() {
+                Some(org) => sqlx::query(
+                    "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM events \
+                         WHERE organization = $1 AND timestamp >= $2::timestamptz",
+                )
+                .bind(org.as_str())
+                .bind(ts.to_rfc3339())
+                .fetch_one(pool)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?,
+                None => sqlx::query(
+                    "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM events \
+                         WHERE timestamp >= $1::timestamptz",
+                )
+                .bind(ts.to_rfc3339())
+                .fetch_one(pool)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?,
+            };
             Ok((row.get::<i64, _>("s").max(0), Some(ts)))
         }
     }
@@ -289,9 +315,14 @@ async fn fetch_batch(
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
          timestamp::text AS timestamp_text, version, parent_id::text AS parent_id_text, \
          correlation_id, causation_id \
-         FROM events WHERE sequence > $1 AND organization = $2",
+         FROM events WHERE sequence > $1",
     );
-    let mut bind_index = 3usize;
+    let mut bind_index = 2usize;
+
+    if config.organization.is_some() {
+        sql.push_str(&format!(" AND organization = ${bind_index}"));
+        bind_index += 1;
+    }
 
     let topics_filter = !config.topics.is_empty();
     if topics_filter {
@@ -315,9 +346,11 @@ async fn fetch_batch(
     }
     sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ${bind_index}"));
 
-    let mut q = sqlx::query(&sql)
-        .bind(after_seq)
-        .bind(config.organization.as_str());
+    let mut q = sqlx::query(&sql).bind(after_seq);
+
+    if let Some(org) = &config.organization {
+        q = q.bind(org.as_str());
+    }
     if topics_filter {
         let topics: Vec<String> = config
             .topics

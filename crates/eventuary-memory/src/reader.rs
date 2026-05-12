@@ -74,7 +74,7 @@ mod tests {
     use futures::StreamExt;
 
     fn subscription() -> EventSubscription {
-        EventSubscription::new(OrganizationId::new("org").unwrap())
+        EventSubscription::for_organization(OrganizationId::new("org").unwrap())
     }
 
     fn ev() -> Event {

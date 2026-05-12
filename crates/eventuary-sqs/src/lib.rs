@@ -6,8 +6,7 @@
 //!
 //! SQS does not support historical replay: `StartFrom::{Earliest, Timestamp}`,
 //! `end_at`, and `limit` are rejected at config time with `Error::Config`.
-//! Records whose embedded organization does not match the configured one are
-//! acked and skipped.
+//! Organization filtering is optional; filtered records are acked and skipped.
 //!
 //! ack issues `DeleteMessageBatch`; nack issues `ChangeMessageVisibilityBatch`
 //! with timeout zero. Both inspect per-entry failures.

@@ -5,7 +5,7 @@ pub struct Capabilities {
     pub supports_nack_redelivery: bool,
     pub preserves_total_order: bool,
     pub supports_consumer_groups: bool,
-    pub supports_independent_streams: bool,
+    pub supports_independent_checkpoints: bool,
 }
 
 impl Capabilities {
@@ -16,7 +16,7 @@ impl Capabilities {
             supports_nack_redelivery: true,
             preserves_total_order: true,
             supports_consumer_groups: true,
-            supports_independent_streams: true,
+            supports_independent_checkpoints: true,
         }
     }
 }

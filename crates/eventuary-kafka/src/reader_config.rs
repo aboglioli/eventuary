@@ -10,7 +10,7 @@ pub struct KafkaReaderConfig {
     pub brokers: Vec<String>,
     pub kafka_topics: Vec<String>,
     pub consumer_group_id: ConsumerGroupId,
-    pub organization: OrganizationId,
+    pub organization: Option<OrganizationId>,
     pub start_from: StartFrom,
     pub event_topics: Option<Vec<Topic>>,
     pub namespace: Option<Namespace>,
@@ -36,6 +36,18 @@ impl KafkaReaderConfig {
         ))
     }
 
+    pub fn new_all_organizations(
+        brokers: Vec<String>,
+        kafka_topics: Vec<String>,
+        consumer_group_id: ConsumerGroupId,
+    ) -> Result<Self> {
+        Self::validated(Self::streaming_all_organizations(
+            brokers,
+            kafka_topics,
+            consumer_group_id,
+        ))
+    }
+
     pub fn streaming(
         brokers: Vec<String>,
         kafka_topics: Vec<String>,
@@ -46,7 +58,28 @@ impl KafkaReaderConfig {
             brokers,
             kafka_topics,
             consumer_group_id,
-            organization,
+            organization: Some(organization),
+            start_from: StartFrom::Latest,
+            event_topics: None,
+            namespace: None,
+            session_timeout: Duration::from_secs(30),
+            max_poll_records: 100,
+            end_at: None,
+            limit: None,
+            ack_buffer: AckBufferConfig::default(),
+        }
+    }
+
+    pub fn streaming_all_organizations(
+        brokers: Vec<String>,
+        kafka_topics: Vec<String>,
+        consumer_group_id: ConsumerGroupId,
+    ) -> Self {
+        Self {
+            brokers,
+            kafka_topics,
+            consumer_group_id,
+            organization: None,
             start_from: StartFrom::Latest,
             event_topics: None,
             namespace: None,
@@ -110,6 +143,30 @@ mod tests {
         assert!(matches!(c.start_from, StartFrom::Latest));
         assert!(c.event_topics.is_none());
         assert!(c.namespace.is_none());
+    }
+
+    #[test]
+    fn streaming_all_organizations_defaults_to_no_organization_filter() {
+        let c = KafkaReaderConfig::streaming_all_organizations(
+            vec!["broker:9092".to_owned()],
+            vec!["t".to_owned()],
+            ConsumerGroupId::new("g").unwrap(),
+        );
+
+        assert!(c.organization.is_none());
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn new_all_organizations_returns_validated_config() {
+        let err = KafkaReaderConfig::new_all_organizations(
+            Vec::new(),
+            vec!["t".to_owned()],
+            ConsumerGroupId::new("g").unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]

@@ -153,7 +153,9 @@ mod tests {
     async fn into_boxed_yields_dyn_safe_reader() {
         let reader: BoxReader<EventSubscription> = UnitReader.into_boxed();
         let mut stream = reader
-            .read(EventSubscription::new(OrganizationId::new("org").unwrap()))
+            .read(EventSubscription::for_organization(
+                OrganizationId::new("org").unwrap(),
+            ))
             .await
             .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
@@ -165,7 +167,9 @@ mod tests {
         let reader: ArcReader<EventSubscription> = UnitReader.into_arced();
         let clone = Arc::clone(&reader);
         let mut stream = clone
-            .read(EventSubscription::new(OrganizationId::new("org").unwrap()))
+            .read(EventSubscription::for_organization(
+                OrganizationId::new("org").unwrap(),
+            ))
             .await
             .unwrap();
         let msg = stream.next().await.unwrap().unwrap();
@@ -178,7 +182,9 @@ mod tests {
             vec![UnitReader.into_boxed(), UnitReader.into_boxed()];
         for r in &readers {
             let mut stream = r
-                .read(EventSubscription::new(OrganizationId::new("org").unwrap()))
+                .read(EventSubscription::for_organization(
+                    OrganizationId::new("org").unwrap(),
+                ))
                 .await
                 .unwrap();
             let msg = stream.next().await.unwrap().unwrap();

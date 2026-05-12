@@ -12,7 +12,7 @@ const SQS_MAX_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(43_200);
 #[derive(Debug, Clone)]
 pub struct SqsReaderConfig {
     pub queue_url: String,
-    pub organization: OrganizationId,
+    pub organization: Option<OrganizationId>,
     pub namespace: Option<Namespace>,
     pub topics: Vec<Topic>,
     pub max_messages: i32,
@@ -29,7 +29,27 @@ impl SqsReaderConfig {
     pub fn defaults_for(queue_url: impl Into<String>, organization: OrganizationId) -> Self {
         Self {
             queue_url: queue_url.into(),
-            organization,
+            organization: Some(organization),
+            namespace: None,
+            topics: Vec::new(),
+            max_messages: 10,
+            visibility_timeout: Duration::from_secs(30),
+            wait_time: Duration::from_secs(20),
+            ack_buffer: AckBufferConfig {
+                max_pending: 10,
+                flush_interval: Duration::from_secs(1),
+            },
+            start_from: StartFrom::Latest,
+            end_at: None,
+            limit: None,
+            consumer_group_id: None,
+        }
+    }
+
+    pub fn defaults_for_all_organizations(queue_url: impl Into<String>) -> Self {
+        Self {
+            queue_url: queue_url.into(),
+            organization: None,
             namespace: None,
             topics: Vec::new(),
             max_messages: 10,
@@ -108,6 +128,14 @@ mod tests {
     #[test]
     fn defaults_ok() {
         base().validate().unwrap();
+    }
+
+    #[test]
+    fn all_organization_defaults_do_not_filter_by_organization() {
+        let config = SqsReaderConfig::defaults_for_all_organizations("q");
+
+        assert!(config.organization.is_none());
+        config.validate().unwrap();
     }
 
     #[test]
