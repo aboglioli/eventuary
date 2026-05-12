@@ -8,9 +8,10 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
-use eventuary_core::io::Writer;
+use eventuary_core::io::{Reader, Writer};
 use eventuary_core::{
-    ConsumerGroupId, Event, EventId, Namespace, OrganizationId, Payload, StartFrom, Topic,
+    ConsumerGroupId, Event, EventId, EventSubscription, Namespace, OrganizationId,
+    PartitionAssignment, Payload, StartFrom, Topic, partition_for,
 };
 use eventuary_postgres::{PgDatabase, PgEventWriter, PgReader, PgReaderConfig};
 
@@ -388,4 +389,142 @@ async fn namespace_filter() {
         .unwrap()
         .unwrap();
     assert_eq!(m2.event().key().expect("event has key").as_str(), "b2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runtime_partition_workers_split_event_log() {
+    use std::collections::HashSet;
+    use std::num::NonZeroU32;
+    use std::sync::Arc;
+
+    let (_c, pool) = start_postgres().await;
+    let writer = Arc::new(PgEventWriter::new(pool.clone()));
+    let org = "acme";
+    let total_keyed: usize = 800;
+    let total_keyless: usize = 200;
+    let count: u32 = 4;
+    let count_nz = NonZeroU32::new(count).unwrap();
+
+    let mut all_event_ids: HashSet<String> = HashSet::new();
+    for i in 0..total_keyed {
+        let event = ev(org, "/orders", "order.placed", &format!("order-{i:04}"));
+        all_event_ids.insert(event.id().to_string());
+        writer.write(&event).await.unwrap();
+    }
+    for i in 0..total_keyless {
+        let event = Event::builder(
+            org,
+            "/orders",
+            "order.audited",
+            Payload::from_string(format!("k{i}")),
+        )
+        .unwrap()
+        .build()
+        .expect("valid event");
+        all_event_ids.insert(event.id().to_string());
+        writer.write(&event).await.unwrap();
+    }
+    let total = total_keyed + total_keyless;
+
+    let group = ConsumerGroupId::new("orders-projection").expect("valid group id");
+    let checkpoint = "runtime-partition";
+
+    let mut tasks = Vec::with_capacity(count as usize);
+    for partition_id in 0..count {
+        let pool = pool.clone();
+        let group = group.clone();
+        let task = tokio::spawn(async move {
+            let cfg = PgReaderConfig {
+                organization: Some(OrganizationId::new("acme").unwrap()),
+                namespace: None,
+                topics: Vec::new(),
+                consumer_group_id: Some(group.clone()),
+                checkpoint_name: checkpoint.to_owned(),
+                start_from: StartFrom::Earliest,
+                poll_interval: Duration::from_millis(20),
+                batch_size: 50,
+            };
+            let reader = PgReader::new(pool, cfg);
+            let mut subscription =
+                EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+            subscription.consumer_group_id = Some(group);
+            subscription.checkpoint_name = Some(checkpoint.to_owned());
+            subscription.partition = Some(PartitionAssignment::new(count, partition_id).unwrap());
+            subscription.start_from = StartFrom::Earliest;
+            let mut stream = Reader::read(&reader, subscription)
+                .await
+                .expect("read stream");
+            let mut events: Vec<Event> = Vec::new();
+            while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(2), stream.next()).await {
+                msg.ack().await.expect("ack");
+                events.push(msg.into_event());
+            }
+            (partition_id, events)
+        });
+        tasks.push(task);
+    }
+
+    let mut by_partition: Vec<(u32, Vec<Event>)> = Vec::new();
+    for task in tasks {
+        by_partition.push(task.await.expect("worker join"));
+    }
+    by_partition.sort_by_key(|(p, _)| *p);
+
+    let mut union_ids: HashSet<String> = HashSet::new();
+    let mut keyless_buckets = [0usize; 4];
+    for (partition_id, events) in &by_partition {
+        assert!(
+            !events.is_empty(),
+            "partition {partition_id} consumed nothing",
+        );
+        for event in events {
+            assert_eq!(
+                partition_for(event, count_nz),
+                *partition_id,
+                "event routed to wrong partition"
+            );
+            assert!(
+                union_ids.insert(event.id().to_string()),
+                "event {} delivered to multiple partitions",
+                event.id()
+            );
+            if event.key().is_none() {
+                keyless_buckets[*partition_id as usize] += 1;
+            }
+        }
+    }
+    assert_eq!(
+        union_ids.len(),
+        total,
+        "union must cover every written event"
+    );
+    assert_eq!(union_ids, all_event_ids);
+
+    for bucket in keyless_buckets {
+        assert!(
+            bucket > 20,
+            "keyless events under-distributed: {keyless_buckets:?}"
+        );
+    }
+
+    let rows: Vec<(String, i32, i32, i64)> = sqlx::query_as(
+        "SELECT checkpoint_name, partition, partition_count, sequence \
+         FROM consumer_offsets \
+         WHERE consumer_group_id = $1 AND checkpoint_name = $2 \
+         ORDER BY partition",
+    )
+    .bind(group.as_str())
+    .bind(checkpoint)
+    .fetch_all(&pool)
+    .await
+    .expect("query offsets");
+    assert_eq!(rows.len(), count as usize, "expected one row per partition");
+    for (idx, (_, partition, partition_count, sequence)) in rows.iter().enumerate() {
+        assert_eq!(*partition, idx as i32);
+        assert_eq!(*partition_count, count as i32);
+        assert!(
+            *sequence > 0,
+            "partition {idx} checkpoint did not advance: {sequence}"
+        );
+    }
 }
