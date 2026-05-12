@@ -60,7 +60,7 @@ pub use io::{
 pub use metadata::Metadata;
 pub use namespace::Namespace;
 pub use organization::OrganizationId;
-pub use partition::PartitionKey;
+pub use partition::{PartitionAssignment, PartitionKey, partition_for};
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};
