@@ -54,7 +54,7 @@ impl PostgresBackend {
             namespace: request.namespace.clone(),
             topics: request.topics.clone(),
             consumer_group_id: request.consumer_group_id.clone(),
-            stream: request.stream.clone(),
+            checkpoint_name: request.checkpoint_name.clone(),
             start_from: request.start_from,
             poll_interval: request.poll_interval,
             batch_size: 10,

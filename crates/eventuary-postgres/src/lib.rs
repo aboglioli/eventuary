@@ -2,7 +2,7 @@
 //!
 //! `BIGSERIAL` sequence on an append-only events table, `(organization, sequence)`,
 //! `(organization, topic, sequence)` and `(organization, namespace, sequence)`
-//! indexes. Consumer offsets keyed by `(organization, consumer_group_id, stream)`.
+//! indexes. Consumer offsets keyed by `(consumer_group_id, checkpoint_name)`.
 //!
 //! Polling reader (no LISTEN/NOTIFY in this version). ack advances the
 //! checkpoint with a backwards-move guard, nack leaves it unchanged.

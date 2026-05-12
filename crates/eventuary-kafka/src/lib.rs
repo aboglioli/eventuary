@@ -7,8 +7,8 @@
 //!
 //! Configuration separates `kafka_topics: Vec<String>` (Kafka topic names to
 //! subscribe) from `event_topics: Option<Vec<Topic>>` (post-deserialization
-//! filter on the eventuary topic). `namespace` filters by prefix.
-//! `StartFrom::{Earliest, Latest, Timestamp}` are honored.
+//! filter on the eventuary topic). `organization` and `namespace` are optional
+//! post-deserialization filters. `StartFrom::{Earliest, Latest, Timestamp}` are honored.
 //!
 //! ack commits the highest offset per partition; nack is a no-op (uncommitted
 //! offsets are redelivered after rebalance/restart/session expiry).

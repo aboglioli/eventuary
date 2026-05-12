@@ -17,31 +17,44 @@ use eventuary_core::{
 
 use crate::database::SqliteConn;
 
-const DEFAULT_STREAM: &str = "default";
+const DEFAULT_CHECKPOINT_NAME: &str = "default";
 
 #[derive(Clone)]
 pub struct SqliteReaderConfig {
-    pub organization: OrganizationId,
+    pub organization: Option<OrganizationId>,
     pub namespace: Option<Namespace>,
     pub topics: Vec<Topic>,
     pub consumer_group_id: Option<ConsumerGroupId>,
-    pub stream: String,
+    pub checkpoint_name: String,
     pub start_from: StartFrom,
     pub poll_interval: Duration,
     pub batch_size: usize,
 }
 
+impl Default for SqliteReaderConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SqliteReaderConfig {
-    pub fn new(organization: OrganizationId) -> Self {
+    pub fn new() -> Self {
         Self {
-            organization,
+            organization: None,
             namespace: None,
             topics: Vec::new(),
             consumer_group_id: None,
-            stream: DEFAULT_STREAM.to_owned(),
+            checkpoint_name: DEFAULT_CHECKPOINT_NAME.to_owned(),
             start_from: StartFrom::Latest,
             poll_interval: Duration::from_millis(100),
             batch_size: 100,
+        }
+    }
+
+    pub fn for_organization(organization: OrganizationId) -> Self {
+        Self {
+            organization: Some(organization),
+            ..Self::new()
         }
     }
 }
@@ -53,29 +66,27 @@ impl SqliteReaderConfig {
 #[derive(Clone)]
 pub struct SqliteAcker {
     conn: SqliteConn,
-    organization: OrganizationId,
     consumer_group_id: ConsumerGroupId,
-    stream: String,
+    checkpoint_name: String,
     sequence: i64,
 }
 
 impl Acker for SqliteAcker {
     async fn ack(&self) -> Result<()> {
         let conn = Arc::clone(&self.conn);
-        let organization = self.organization.as_str().to_owned();
         let consumer_group_id = self.consumer_group_id.as_str().to_owned();
-        let stream = self.stream.clone();
+        let checkpoint_name = self.checkpoint_name.clone();
         let sequence = self.sequence;
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             guard
                 .execute(
-                    "INSERT INTO consumer_offsets (organization, consumer_group_id, stream, sequence)
-                     VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(organization, consumer_group_id, stream) DO UPDATE
+                    "INSERT INTO consumer_offsets (consumer_group_id, checkpoint_name, sequence)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(consumer_group_id, checkpoint_name) DO UPDATE
                      SET sequence = excluded.sequence
                      WHERE excluded.sequence > consumer_offsets.sequence",
-                    rusqlite::params![organization, consumer_group_id, stream, sequence],
+                    rusqlite::params![consumer_group_id, checkpoint_name, sequence],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             Ok(())
@@ -128,8 +139,9 @@ impl SqliteReader {
 }
 
 fn subscription_from_config(config: &SqliteReaderConfig) -> EventSubscription {
-    let mut subscription = EventSubscription::new(config.organization.clone());
-    subscription.name = Some(config.stream.clone());
+    let mut subscription = EventSubscription::new();
+    subscription.organization = config.organization.clone();
+    subscription.checkpoint_name = Some(config.checkpoint_name.clone());
     subscription.consumer_group_id = config.consumer_group_id.clone();
     if !config.topics.is_empty() {
         subscription.topics = Some(config.topics.clone());
@@ -147,8 +159,8 @@ fn apply_subscription(config: &mut SqliteReaderConfig, subscription: &EventSubsc
         .consumer_group_id
         .clone()
         .or_else(|| config.consumer_group_id.clone());
-    if let Some(name) = subscription.name.as_ref() {
-        config.stream = name.clone();
+    if let Some(checkpoint_name) = subscription.checkpoint_name.as_ref() {
+        config.checkpoint_name = checkpoint_name.clone();
     }
     config.start_from = subscription.start_from;
 }
@@ -240,9 +252,8 @@ impl Reader for SqliteReader {
                     let acker: SqliteAckerVariant = match config.consumer_group_id.as_ref() {
                         Some(group) => Either::Right(OnceAcker::new(SqliteAcker {
                             conn: Arc::clone(&conn),
-                            organization: config.organization.clone(),
                             consumer_group_id: group.clone(),
-                            stream: config.stream.clone(),
+                            checkpoint_name: config.checkpoint_name.clone(),
                             sequence,
                         })),
                         None => Either::Left(NoopAcker),
@@ -271,8 +282,8 @@ fn resolve_initial_position(
         let row: Option<i64> = guard
             .query_row(
                 "SELECT sequence FROM consumer_offsets
-                 WHERE organization = ?1 AND consumer_group_id = ?2 AND stream = ?3",
-                rusqlite::params![config.organization.as_str(), group.as_str(), config.stream],
+                 WHERE consumer_group_id = ?1 AND checkpoint_name = ?2",
+                rusqlite::params![group.as_str(), config.checkpoint_name],
                 |r| r.get(0),
             )
             .ok();
@@ -283,25 +294,43 @@ fn resolve_initial_position(
     match config.start_from {
         StartFrom::Earliest => Ok((0, None)),
         StartFrom::Latest => {
-            let max: i64 = guard
-                .query_row(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE organization = ?1",
-                    rusqlite::params![config.organization.as_str()],
-                    |r| r.get(0),
-                )
-                .map_err(|e| Error::Store(e.to_string()))?;
-            Ok((max, None))
+            let sql = match config.organization.as_ref() {
+                Some(org) => {
+                    let sql =
+                        "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE organization = ?1";
+                    guard
+                        .query_row(sql, rusqlite::params![org.as_str()], |r| r.get::<_, i64>(0))
+                        .map_err(|e| Error::Store(e.to_string()))?
+                }
+                None => {
+                    let sql = "SELECT COALESCE(MAX(sequence), 0) FROM events";
+                    guard
+                        .query_row(sql, [], |r| r.get::<_, i64>(0))
+                        .map_err(|e| Error::Store(e.to_string()))?
+                }
+            };
+            Ok((sql, None))
         }
         StartFrom::Timestamp(ts) => {
-            let prior: Option<i64> = guard
-                .query_row(
-                    "SELECT MIN(sequence) - 1 FROM events
-                     WHERE organization = ?1 AND timestamp >= ?2",
-                    rusqlite::params![config.organization.as_str(), ts.to_rfc3339()],
-                    |r| r.get(0),
-                )
-                .ok();
-            Ok((prior.unwrap_or(0).max(0), Some(ts)))
+            let row = match config.organization.as_ref() {
+                Some(org) => {
+                    let sql = "SELECT MIN(sequence) - 1 FROM events
+                               WHERE organization = ?1 AND timestamp >= ?2";
+                    guard
+                        .query_row(sql, rusqlite::params![org.as_str(), ts.to_rfc3339()], |r| {
+                            r.get(0)
+                        })
+                        .ok()
+                }
+                None => {
+                    let sql = "SELECT MIN(sequence) - 1 FROM events
+                               WHERE timestamp >= ?1";
+                    guard
+                        .query_row(sql, rusqlite::params![ts.to_rfc3339()], |r| r.get(0))
+                        .ok()
+                }
+            };
+            Ok((row.unwrap_or(0).max(0), Some(ts)))
         }
     }
 }
@@ -314,14 +343,18 @@ fn fetch_batch(
     lower_bound_ts: Option<DateTime<Utc>>,
 ) -> Result<Vec<(SerializedEvent, i64)>> {
     let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+
     let mut sql = String::from(
         "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id \
-         FROM events WHERE sequence > ?1 AND organization = ?2",
+         FROM events WHERE sequence > ?1",
     );
-    let mut bindings: Vec<rusqlite::types::Value> = vec![
-        after_seq.into(),
-        config.organization.as_str().to_owned().into(),
-    ];
+    let mut bindings: Vec<rusqlite::types::Value> = vec![after_seq.into()];
+
+    if let Some(org) = config.organization.as_ref() {
+        let i = bindings.len() + 1;
+        sql.push_str(&format!(" AND organization = ?{i}"));
+        bindings.push(org.as_str().to_owned().into());
+    }
 
     if !config.topics.is_empty() {
         let placeholders: Vec<String> = (0..config.topics.len())

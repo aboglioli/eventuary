@@ -29,11 +29,11 @@ fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
 
 fn config(org: &str) -> SqliteReaderConfig {
     SqliteReaderConfig {
-        organization: OrganizationId::new(org).unwrap(),
+        organization: Some(OrganizationId::new(org).unwrap()),
         namespace: None,
         topics: Vec::new(),
         consumer_group_id: None,
-        stream: "default".to_owned(),
+        checkpoint_name: "default".to_owned(),
         start_from: StartFrom::Earliest,
         poll_interval: Duration::from_millis(20),
         batch_size: 10,

@@ -9,25 +9,38 @@ use eventuary_core::{
 use crate::Capabilities;
 
 pub struct ReaderRequest {
-    pub organization: OrganizationId,
+    pub organization: Option<OrganizationId>,
     pub namespace: Option<Namespace>,
     pub topics: Vec<Topic>,
     pub consumer_group_id: Option<ConsumerGroupId>,
-    pub stream: String,
+    pub checkpoint_name: String,
     pub start_from: StartFrom,
     pub poll_interval: Duration,
 }
 
+impl Default for ReaderRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReaderRequest {
-    pub fn new(organization: OrganizationId) -> Self {
+    pub fn new() -> Self {
         Self {
-            organization,
+            organization: None,
             namespace: None,
             topics: Vec::new(),
             consumer_group_id: None,
-            stream: "default".to_owned(),
+            checkpoint_name: "default".to_owned(),
             start_from: StartFrom::Earliest,
             poll_interval: Duration::from_millis(20),
+        }
+    }
+
+    pub fn for_organization(organization: OrganizationId) -> Self {
+        Self {
+            organization: Some(organization),
+            ..Self::new()
         }
     }
 }

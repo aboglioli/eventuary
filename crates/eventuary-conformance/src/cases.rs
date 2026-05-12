@@ -35,7 +35,7 @@ pub async fn case_write_read_roundtrip(backend: &dyn Backend) {
     let event = make_event(&org, "/x", "thing.happened", "k0");
     writer.write(&event).await.expect("write");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     let received = backend
         .read_one(request, READ_TIMEOUT)
@@ -64,6 +64,36 @@ pub async fn case_write_read_roundtrip(backend: &dyn Backend) {
     (received.ack)().await.expect("ack");
 }
 
+pub async fn case_all_organizations_read(backend: &dyn Backend) {
+    let org_a = unique_organization();
+    let org_b = unique_organization();
+    let namespace =
+        Namespace::new(format!("/all-org/{}", uuid::Uuid::now_v7())).expect("valid namespace");
+    let writer = backend.writer().await;
+    let event_a = make_event(&org_a, namespace.as_str(), "thing.happened", "org-a");
+    let event_b = make_event(&org_b, namespace.as_str(), "thing.happened", "org-b");
+    writer.write(&event_a).await.expect("write org a");
+    writer.write(&event_b).await.expect("write org b");
+
+    let mut request = ReaderRequest::new();
+    request.namespace = Some(namespace);
+    request.start_from = StartFrom::Earliest;
+    let received = backend.read_many(request, 2, READ_TIMEOUT).await;
+    assert_eq!(
+        received.len(),
+        2,
+        "all_organizations_read: expected events from both organizations"
+    );
+    let organizations: HashSet<String> = received
+        .iter()
+        .map(|c| c.event.organization().as_str().to_owned())
+        .collect();
+    assert_eq!(
+        organizations,
+        HashSet::from([org_a.as_str().to_owned(), org_b.as_str().to_owned()])
+    );
+}
+
 pub async fn case_write_all_preserves_all_events(backend: &dyn Backend) {
     let org = unique_organization();
     let writer = backend.writer().await;
@@ -72,7 +102,7 @@ pub async fn case_write_all_preserves_all_events(backend: &dyn Backend) {
         .collect();
     writer.write_all(&events).await.expect("write_all");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     let received = backend.read_many(request, events.len(), READ_TIMEOUT).await;
     assert_eq!(
@@ -103,7 +133,7 @@ pub async fn case_ordering_preserved(backend: &dyn Backend) {
         writer.write(event).await.expect("write");
     }
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     let received = backend.read_many(request, events.len(), READ_TIMEOUT).await;
     assert_eq!(received.len(), events.len(), "expected all events");
@@ -131,7 +161,7 @@ pub async fn case_start_from_earliest(backend: &dyn Backend) {
             .expect("write");
     }
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     let received = backend.read_many(request, 3, READ_TIMEOUT).await;
     assert_eq!(
@@ -157,7 +187,7 @@ pub async fn case_start_from_latest(backend: &dyn Backend) {
             .expect("write");
     }
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Latest;
 
     let backend_ref = backend;
@@ -195,7 +225,7 @@ pub async fn case_start_from_timestamp(backend: &dyn Backend) {
         .await
         .expect("write after");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Timestamp(cutoff);
     let received = backend
         .read_one(request, READ_TIMEOUT)
@@ -224,7 +254,7 @@ pub async fn case_topic_filter(backend: &dyn Backend) {
         .await
         .expect("write");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     request.topics = vec![Topic::new("task.created").expect("valid topic")];
     let received = backend.read_many(request, 2, READ_TIMEOUT).await;
@@ -259,7 +289,7 @@ pub async fn case_namespace_prefix_filter(backend: &dyn Backend) {
         .await
         .expect("write");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     request.namespace = Some(Namespace::new("/backend").expect("valid namespace"));
     let received = backend.read_many(request, 2, READ_TIMEOUT).await;
@@ -287,7 +317,7 @@ pub async fn case_ack_advances_checkpoint(backend: &dyn Backend) {
 
     let group = ConsumerGroupId::new("conf-group").expect("valid group id");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     request.consumer_group_id = Some(group.clone());
 
@@ -298,7 +328,7 @@ pub async fn case_ack_advances_checkpoint(backend: &dyn Backend) {
     assert_eq!(first.event.key().expect("event has key").as_str(), "k0");
     (first.ack)().await.expect("ack");
 
-    let mut resume_request = ReaderRequest::new(org);
+    let mut resume_request = ReaderRequest::for_organization(org);
     resume_request.start_from = StartFrom::Earliest;
     resume_request.consumer_group_id = Some(group);
     let remaining = backend.read_many(resume_request, 2, READ_TIMEOUT).await;
@@ -325,7 +355,7 @@ pub async fn case_nack_does_not_advance_checkpoint(backend: &dyn Backend) {
 
     let group = ConsumerGroupId::new("conf-group").expect("valid group id");
 
-    let mut request = ReaderRequest::new(org.clone());
+    let mut request = ReaderRequest::for_organization(org.clone());
     request.start_from = StartFrom::Earliest;
     request.consumer_group_id = Some(group.clone());
 
@@ -336,7 +366,7 @@ pub async fn case_nack_does_not_advance_checkpoint(backend: &dyn Backend) {
     assert_eq!(first.event.key().expect("event has key").as_str(), "k0");
     (first.nack)().await.expect("nack");
 
-    let mut resume_request = ReaderRequest::new(org);
+    let mut resume_request = ReaderRequest::for_organization(org);
     resume_request.start_from = StartFrom::Earliest;
     resume_request.consumer_group_id = Some(group);
     let again = backend
@@ -363,7 +393,7 @@ pub async fn case_independent_consumer_groups(backend: &dyn Backend) {
     let group_a = ConsumerGroupId::new("group-a").expect("valid group id");
     let group_b = ConsumerGroupId::new("group-b").expect("valid group id");
 
-    let mut request_a = ReaderRequest::new(org.clone());
+    let mut request_a = ReaderRequest::for_organization(org.clone());
     request_a.start_from = StartFrom::Earliest;
     request_a.consumer_group_id = Some(group_a);
     let a_events = backend.read_many(request_a, 3, READ_TIMEOUT).await;
@@ -372,7 +402,7 @@ pub async fn case_independent_consumer_groups(backend: &dyn Backend) {
         (e.ack)().await.expect("ack");
     }
 
-    let mut request_b = ReaderRequest::new(org);
+    let mut request_b = ReaderRequest::for_organization(org);
     request_b.start_from = StartFrom::Earliest;
     request_b.consumer_group_id = Some(group_b);
     let b_events = backend.read_many(request_b, 3, READ_TIMEOUT).await;
@@ -383,7 +413,7 @@ pub async fn case_independent_consumer_groups(backend: &dyn Backend) {
     );
 }
 
-pub async fn case_independent_streams_within_group(backend: &dyn Backend) {
+pub async fn case_independent_checkpoints_within_group(backend: &dyn Backend) {
     let org = unique_organization();
     let writer = backend.writer().await;
     for i in 0..2 {
@@ -395,31 +425,32 @@ pub async fn case_independent_streams_within_group(backend: &dyn Backend) {
 
     let group = ConsumerGroupId::new("shared-group").expect("valid group id");
 
-    let mut request_s1 = ReaderRequest::new(org.clone());
+    let mut request_s1 = ReaderRequest::for_organization(org.clone());
     request_s1.start_from = StartFrom::Earliest;
     request_s1.consumer_group_id = Some(group.clone());
-    request_s1.stream = "stream-one".to_owned();
+    request_s1.checkpoint_name = "checkpoint-one".to_owned();
     let s1 = backend.read_many(request_s1, 2, READ_TIMEOUT).await;
     assert_eq!(s1.len(), 2);
     for e in s1 {
         (e.ack)().await.expect("ack");
     }
 
-    let mut request_s2 = ReaderRequest::new(org);
+    let mut request_s2 = ReaderRequest::for_organization(org);
     request_s2.start_from = StartFrom::Earliest;
     request_s2.consumer_group_id = Some(group);
-    request_s2.stream = "stream-two".to_owned();
+    request_s2.checkpoint_name = "checkpoint-two".to_owned();
     let s2 = backend.read_many(request_s2, 2, READ_TIMEOUT).await;
     assert_eq!(
         s2.len(),
         2,
-        "independent_streams_within_group: stream-two offset must be independent"
+        "independent_checkpoints_within_group: checkpoint-two offset must be independent"
     );
 }
 
 pub async fn run_all(backend: &dyn Backend) {
     let caps = backend.capabilities();
     case_write_read_roundtrip(backend).await;
+    case_all_organizations_read(backend).await;
     case_write_all_preserves_all_events(backend).await;
     if caps.preserves_total_order {
         case_ordering_preserved(backend).await;
@@ -438,7 +469,7 @@ pub async fn run_all(backend: &dyn Backend) {
         case_nack_does_not_advance_checkpoint(backend).await;
         case_independent_consumer_groups(backend).await;
     }
-    if caps.supports_independent_streams {
-        case_independent_streams_within_group(backend).await;
+    if caps.supports_independent_checkpoints {
+        case_independent_checkpoints_within_group(backend).await;
     }
 }

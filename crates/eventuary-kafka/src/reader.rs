@@ -13,7 +13,9 @@ use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
 use eventuary_core::io::{Message, Reader};
-use eventuary_core::{Error, Event, EventSubscription, Result, SerializedEvent, StartFrom};
+use eventuary_core::{
+    Error, Event, EventSubscription, OrganizationId, Result, SerializedEvent, StartFrom,
+};
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
 use crate::reader_config::KafkaReaderConfig;
@@ -63,7 +65,10 @@ impl KafkaReader {
     /// prefix, `start_from`, `end_at`, and `limit`. Use it as a starting
     /// point and tweak before passing to [`Reader::read`].
     pub fn default_subscription(&self) -> EventSubscription {
-        let mut subscription = EventSubscription::new(self.config.organization.clone());
+        let mut subscription = match &self.config.organization {
+            Some(org) => EventSubscription::for_organization(org.clone()),
+            None => EventSubscription::new(),
+        };
         subscription.consumer_group_id = Some(self.config.consumer_group_id.clone());
         subscription.topics = self.config.event_topics.clone();
         subscription.namespace_prefix = self.config.namespace.clone();
@@ -142,18 +147,28 @@ impl Stream for KafkaStream {
     }
 }
 
+fn validate_organization_filter(
+    subscription: &EventSubscription,
+    configured: &Option<OrganizationId>,
+) -> Result<()> {
+    if let (Some(sub_org), Some(cfg_org)) = (&subscription.organization, configured)
+        && sub_org != cfg_org
+    {
+        return Err(Error::Config(format!(
+            "subscription organization `{:?}` does not match reader tenant `{:?}`",
+            subscription.organization, configured
+        )));
+    }
+    Ok(())
+}
+
 impl Reader for KafkaReader {
     type Subscription = EventSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
     type Stream = KafkaStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        if subscription.organization != self.config.organization {
-            return Err(Error::Config(format!(
-                "subscription organization `{}` does not match reader tenant `{}`",
-                subscription.organization, self.config.organization
-            )));
-        }
+        validate_organization_filter(&subscription, &self.config.organization)?;
         if let Some(group) = subscription.consumer_group_id.as_ref()
             && group != &self.config.consumer_group_id
         {
@@ -267,5 +282,39 @@ impl Reader for KafkaReader {
             handle: Some(handle),
             ack_buffer,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eventuary_core::OrganizationId;
+
+    fn org(value: &str) -> OrganizationId {
+        OrganizationId::new(value).unwrap()
+    }
+
+    #[test]
+    fn organization_filter_allows_all_subscription_with_configured_organization() {
+        let subscription = EventSubscription::new();
+        let configured = Some(org("acme"));
+
+        validate_organization_filter(&subscription, &configured).unwrap();
+    }
+
+    #[test]
+    fn organization_filter_allows_scoped_subscription_with_all_organizations_config() {
+        let subscription = EventSubscription::for_organization(org("acme"));
+
+        validate_organization_filter(&subscription, &None).unwrap();
+    }
+
+    #[test]
+    fn organization_filter_rejects_different_scoped_organizations() {
+        let subscription = EventSubscription::for_organization(org("acme"));
+        let configured = Some(org("other"));
+
+        let err = validate_organization_filter(&subscription, &configured).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 }

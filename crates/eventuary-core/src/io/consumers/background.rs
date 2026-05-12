@@ -231,7 +231,7 @@ mod tests {
     }
 
     fn subscription() -> EventSubscription {
-        EventSubscription::new(OrganizationId::new("org").unwrap())
+        EventSubscription::for_organization(OrganizationId::new("org").unwrap())
     }
 
     struct AllowNothing;

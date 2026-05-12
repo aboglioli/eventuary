@@ -2,7 +2,7 @@
 //!
 //! Append-only events table with auto-incrementing sequence. Reader streams
 //! events in sequence order and supports consumer groups via a
-//! `consumer_offsets` table scoped by `(organization, consumer_group_id, stream)`.
+//! `consumer_offsets` table scoped by `(consumer_group_id, checkpoint_name)`.
 //!
 //! ack advances the checkpoint, nack leaves it unchanged. SQLite work runs in
 //! `tokio::task::spawn_blocking` to avoid blocking the async runtime.

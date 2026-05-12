@@ -21,11 +21,10 @@ CREATE INDEX IF NOT EXISTS idx_events_org_namespace_sequence ON events (organiza
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
 
 CREATE TABLE IF NOT EXISTS consumer_offsets (
-    organization TEXT NOT NULL,
     consumer_group_id TEXT NOT NULL,
-    stream TEXT NOT NULL DEFAULT 'default',
+    checkpoint_name TEXT NOT NULL DEFAULT 'default',
     sequence BIGINT NOT NULL,
-    PRIMARY KEY (organization, consumer_group_id, stream)
+    PRIMARY KEY (consumer_group_id, checkpoint_name)
 );
 
 CREATE TABLE IF NOT EXISTS schema_migrations (

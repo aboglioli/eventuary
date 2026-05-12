@@ -55,7 +55,10 @@ fn noop_ack() -> AckFn {
 }
 
 fn build_subscription(request: &ReaderRequest) -> EventSubscription {
-    let mut subscription = EventSubscription::new(request.organization.clone());
+    let mut subscription = match request.organization.clone() {
+        Some(organization) => EventSubscription::for_organization(organization),
+        None => EventSubscription::new(),
+    };
     if !request.topics.is_empty() {
         subscription.topics = Some(request.topics.clone());
     }
@@ -71,7 +74,7 @@ impl Backend for MemoryBackend {
             supports_nack_redelivery: false,
             preserves_total_order: true,
             supports_consumer_groups: false,
-            supports_independent_streams: false,
+            supports_independent_checkpoints: false,
         }
     }
 

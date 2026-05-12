@@ -142,7 +142,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let conn = db.conn();
         let guard = conn.lock().unwrap();
-        guard.execute_batch(&schema_sql()).unwrap();
+        guard.execute_batch(migrations()[0].sql).unwrap();
     }
 
     #[test]
@@ -151,7 +151,7 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS events"));
         assert!(sql.contains("parent_id TEXT"));
         assert!(sql.contains("event_key TEXT"));
-        assert!(sql.contains("CREATE TABLE IF NOT EXISTS consumer_offsets"));
+        assert!(sql.contains("checkpoint_name"));
         assert!(sql.contains("PRAGMA user_version = 1"));
         assert!(sql.contains(migrations()[0].sql.trim()));
         assert_eq!(migrations()[0].filename, "0001_init.sql");
