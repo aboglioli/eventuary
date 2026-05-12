@@ -32,13 +32,19 @@ pub struct PartitionAssignment {
 impl PartitionAssignment {
     /// Creates a new partition assignment.
     ///
-    /// Rejects `count < 2` (use `Option::None` for the unpartitioned case)
-    /// and `id >= count` (out of range).
+    /// Rejects `count < 2` (use `Option::None` for the unpartitioned case),
+    /// `count > i32::MAX` (the SQL checkpoint columns are `INTEGER`/`i32`
+    /// in both backends), and `id >= count` (out of range).
     pub fn new(count: u32, id: u32) -> Result<Self> {
         if count < 2 {
             return Err(Error::Config(
                 "partition_count must be > 1; use Option::None for unpartitioned".to_owned(),
             ));
+        }
+        if count > i32::MAX as u32 {
+            return Err(Error::Config(format!(
+                "partition_count {count} exceeds i32::MAX; SQL checkpoint columns are 32-bit signed integers"
+            )));
         }
         let count_nz = NonZeroU32::new(count).expect("count > 1");
         if id >= count {
@@ -119,6 +125,17 @@ mod tests {
         assert!(matches!(err, Error::Config(_)));
         let err = PartitionAssignment::new(0, 0).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn assignment_rejects_count_above_i32_max() {
+        let err = PartitionAssignment::new(i32::MAX as u32 + 1, 0).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn assignment_accepts_count_at_i32_max() {
+        PartitionAssignment::new(i32::MAX as u32, 0).expect("i32::MAX is the upper bound");
     }
 
     #[test]
