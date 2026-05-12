@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -279,6 +280,36 @@ async fn start_from_timestamp_filters_old_events() {
 }
 
 #[tokio::test]
+async fn partitioned_subscription_uses_config_consumer_group() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgEventWriter::new(pool.clone());
+    let event = ev("acme", "/x", "thing.happened", "partition-config-group");
+    let partition = partition_for(&event, NonZeroU32::new(4).unwrap());
+    writer.write(&event).await.unwrap();
+
+    let mut cfg = config("acme");
+    cfg.consumer_group_id = Some(ConsumerGroupId::new("partition-config-group").unwrap());
+    let reader = PgReader::new(pool, cfg);
+
+    let mut subscription =
+        EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+    subscription.start_from = StartFrom::Earliest;
+    subscription.partition = Some(PartitionAssignment::new(4, partition).unwrap());
+
+    let mut stream = Reader::read(&reader, subscription).await.unwrap();
+    let msg = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        msg.event().key().expect("event has key").as_str(),
+        "partition-config-group"
+    );
+    msg.ack().await.unwrap();
+}
+
+#[tokio::test]
 async fn independent_consumer_groups() {
     let (_c, pool) = start_postgres().await;
     let writer = PgEventWriter::new(pool.clone());
@@ -394,7 +425,6 @@ async fn namespace_filter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runtime_partition_workers_split_event_log() {
     use std::collections::HashSet;
-    use std::num::NonZeroU32;
     use std::sync::Arc;
 
     let (_c, pool) = start_postgres().await;

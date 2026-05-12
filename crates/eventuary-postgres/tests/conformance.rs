@@ -7,7 +7,7 @@ use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
 use eventuary_core::io::WriterExt;
-use eventuary_core::{BoxWriter, EventSubscription};
+use eventuary_core::{BoxWriter, EventSubscription, Result};
 use eventuary_postgres::{PgDatabase, PgEventWriter, PgReader, PgReaderConfig};
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -163,6 +163,20 @@ impl Backend for PostgresBackend {
                 });
             }
             received
+        })
+    }
+
+    fn read_result<'a>(
+        &'a self,
+        request: ReaderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let cfg = self.reader_config(&request);
+            let subscription = self.subscription(&request);
+            let reader = PgReader::new(self.pool.clone(), cfg);
+            eventuary_core::io::Reader::read(&reader, subscription)
+                .await
+                .map(|_| ())
         })
     }
 }

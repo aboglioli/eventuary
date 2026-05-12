@@ -74,4 +74,9 @@ pub trait Backend: Send + Sync {
         count: usize,
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Vec<ConsumerEvent>> + Send + 'a>>;
+
+    fn read_result<'a>(
+        &'a self,
+        request: ReaderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }

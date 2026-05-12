@@ -223,11 +223,13 @@ Ack semantics are backend-specific:
 | sqs | `BatchedAcker` -> `SqsFlusher` -> `DeleteMessageBatch` | no-op; visibility timeout redelivers |
 | kafka | `BatchedAcker` -> `KafkaFlusher` -> `consumer.commit` with highest contiguous offset per partition | no-op; offset left uncommitted, redelivered after rebalance/restart |
 
-**Skip-ack rule:** when a backend filters out an event (org mismatch,
-subscription mismatch, or poison record that fails to deserialize), it
-**must ack** so the underlying offset advances. Otherwise readers stall
-behind a record they will never deliver. Apply this in every skip path,
-not just the obvious ones.
+**Skip-ack rule:** when a queue/stream backend filters out an event (org
+mismatch, subscription mismatch, or poison record that fails to
+deserialize), it **must ack** so the underlying offset advances.
+Otherwise readers stall behind a record they will never deliver. SQL
+backends are different: skipped records advance the poll cursor in memory,
+but the persisted `consumer_offsets` row only advances when a delivered
+message is acked, so a restart never skips a delivered-but-unacked event.
 
 ### Batched Ack
 
@@ -285,7 +287,7 @@ partition_count)` in `consumer_offsets`'s PK. Unpartitioned consumers
 use `(0, 1)` via column defaults, so they share a single row that
 matches today's behavior. Resizing N (e.g. 10 → 16) gives the new
 scheme a new row family — old rows stay as an audit trail until cleaned
-up. See PLAN.md (or `docs/` if migrated) for the resize SQL runbook.
+up.
 
 **Pool sizing.** `PgDatabase::connect_with(url, PgConnectOptions {
 max_connections })` exposes the pool limit (default 20). Rule of thumb:
@@ -347,6 +349,7 @@ cases:
 - `case_runtime_partition_isolates_workers`
 - `case_runtime_partition_per_key_stickiness`
 - `case_runtime_partition_checkpoint_independence`
+- `case_runtime_partition_unsupported_rejects`
 
 Each backend test crate provides a `Backend` impl + `Capabilities` flag
 set, then calls `run_all(&backend)`. Capabilities (`supports_replay`,

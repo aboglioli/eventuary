@@ -172,14 +172,14 @@ impl Reader for PgReader {
     type Stream = PgStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        if subscription.partition.is_some() && subscription.consumer_group_id.is_none() {
+        let pool = self.pool.clone();
+        let mut config = self.config.clone();
+        apply_subscription(&mut config, &subscription);
+        if subscription.partition.is_some() && config.consumer_group_id.is_none() {
             return Err(Error::Config(
                 "subscription.partition requires consumer_group_id; partition checkpoints have no identity without a group".to_owned(),
             ));
         }
-        let pool = self.pool.clone();
-        let mut config = self.config.clone();
-        apply_subscription(&mut config, &subscription);
         let (partition_id, partition_count) = match subscription.partition {
             Some(a) => (a.id() as i32, a.count() as i32),
             None => (0, 1),

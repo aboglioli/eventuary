@@ -27,6 +27,7 @@ use crate::{
 /// | `keys` | event.key is in the list |
 /// | `metadata` | every (k, v) pair in this is present in event.metadata (subset match, AND across pairs — no OR semantics) |
 /// | `end_at` | event.timestamp <= end_at |
+/// | `partition` | `partition_for(event, count) == id` |
 ///
 /// `start_from` and `limit` are not predicates: they are positional
 /// (cursor-like) and count-like respectively, and are honored by the
@@ -35,8 +36,10 @@ use crate::{
 /// # Checkpoint identity
 ///
 /// The checkpoint for SQL backends is identified by
-/// `(consumer_group_id, checkpoint_name)`. Organization is **not** part
-/// of the checkpoint; it is only a read filter.
+/// `(consumer_group_id, checkpoint_name, partition, partition_count)`.
+/// Unpartitioned consumers use `(0, 1)` for the partition pair.
+/// Organization is **not** part of the checkpoint; it is only a read
+/// filter.
 ///
 /// # Subscription vs. `Filter`
 ///

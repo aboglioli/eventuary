@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -5,9 +6,10 @@ use futures::StreamExt;
 use tempfile::NamedTempFile;
 use tokio::time::timeout;
 
-use eventuary_core::io::Writer;
+use eventuary_core::io::{Reader, Writer};
 use eventuary_core::{
-    ConsumerGroupId, Event, EventId, Namespace, OrganizationId, Payload, StartFrom, Topic,
+    ConsumerGroupId, Event, EventId, EventSubscription, Namespace, OrganizationId,
+    PartitionAssignment, Payload, StartFrom, Topic, partition_for,
 };
 
 use eventuary_sqlite::{SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig};
@@ -262,6 +264,36 @@ async fn nack_does_not_advance_checkpoint() {
         .unwrap()
         .unwrap();
     assert_eq!(msg.event().key().expect("event has key").as_str(), "k0");
+}
+
+#[tokio::test]
+async fn partitioned_subscription_uses_config_consumer_group() {
+    let (_file, db) = fresh_db();
+    let writer = SqliteEventWriter::new(db.conn());
+    let event = ev("acme", "/x", "thing.happened", "partition-config-group");
+    let partition = partition_for(&event, NonZeroU32::new(4).unwrap());
+    writer.write(&event).await.unwrap();
+
+    let mut cfg = config("acme");
+    cfg.consumer_group_id = Some(ConsumerGroupId::new("partition-config-group").unwrap());
+    let reader = SqliteReader::new(db.conn(), cfg);
+
+    let mut subscription =
+        EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+    subscription.start_from = StartFrom::Earliest;
+    subscription.partition = Some(PartitionAssignment::new(4, partition).unwrap());
+
+    let mut stream = Reader::read(&reader, subscription).await.unwrap();
+    let msg = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        msg.event().key().expect("event has key").as_str(),
+        "partition-config-group"
+    );
+    msg.ack().await.unwrap();
 }
 
 #[tokio::test]

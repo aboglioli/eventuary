@@ -7,7 +7,7 @@ use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
 use eventuary_core::io::WriterExt;
-use eventuary_core::{BoxWriter, EventSubscription};
+use eventuary_core::{BoxWriter, EventSubscription, Result};
 use eventuary_sqlite::{SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig};
 use futures::StreamExt;
 use tempfile::TempDir;
@@ -143,6 +143,20 @@ impl Backend for SqliteBackend {
                 });
             }
             received
+        })
+    }
+
+    fn read_result<'a>(
+        &'a self,
+        request: ReaderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let cfg = self.reader_config(&request);
+            let subscription = self.subscription(&request);
+            let reader = SqliteReader::new(self.db.conn(), cfg);
+            eventuary_core::io::Reader::read(&reader, subscription)
+                .await
+                .map(|_| ())
         })
     }
 }

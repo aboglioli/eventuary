@@ -5,8 +5,8 @@ use std::time::Duration;
 use chrono::Utc;
 use eventuary_core::io::Writer;
 use eventuary_core::{
-    ConsumerGroupId, Event, Namespace, OrganizationId, PartitionAssignment, Payload, StartFrom,
-    Topic, partition_for,
+    ConsumerGroupId, Error, Event, Namespace, OrganizationId, PartitionAssignment, Payload,
+    StartFrom, Topic, partition_for,
 };
 
 use crate::factory::{Backend, ReaderRequest};
@@ -547,6 +547,21 @@ pub async fn case_runtime_partition_per_key_stickiness(backend: &dyn Backend) {
     );
 }
 
+pub async fn case_runtime_partition_unsupported_rejects(backend: &dyn Backend) {
+    let _writer = backend.writer().await;
+    let mut request = ReaderRequest::new();
+    request.partition = Some(PartitionAssignment::new(4, 0).unwrap());
+
+    let err = backend
+        .read_result(request)
+        .await
+        .expect_err("runtime partitioning must be rejected by unsupported backends");
+    assert!(
+        matches!(err, Error::Config(_)),
+        "unsupported runtime partitioning must return Error::Config, got {err:?}"
+    );
+}
+
 pub async fn case_runtime_partition_checkpoint_independence(backend: &dyn Backend) {
     let org = unique_organization();
     let writer = backend.writer().await;
@@ -641,5 +656,7 @@ pub async fn run_all(backend: &dyn Backend) {
         if caps.supports_consumer_groups {
             case_runtime_partition_checkpoint_independence(backend).await;
         }
+    } else {
+        case_runtime_partition_unsupported_rejects(backend).await;
     }
 }
