@@ -351,14 +351,12 @@ mod tests {
         let event = ev_with_key("acme", "a.b", "/x", "entity-1");
         let owner_id = crate::partition_for(&event, count);
 
-        let mut owner =
-            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        let mut owner = EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         owner.partition = Some(PartitionAssignment::new(4, owner_id).unwrap());
         assert!(owner.matches(&event));
 
         let other_id = (owner_id + 1) % 4;
-        let mut other =
-            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        let mut other = EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         other.partition = Some(PartitionAssignment::new(4, other_id).unwrap());
         assert!(!other.matches(&event));
     }
@@ -384,14 +382,12 @@ mod tests {
             .expect("valid event");
         let owner_id = crate::partition_for(&event, count);
 
-        let mut owner =
-            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        let mut owner = EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         owner.partition = Some(PartitionAssignment::new(4, owner_id).unwrap());
         assert!(owner.matches(&event));
 
         let other_id = (owner_id + 1) % 4;
-        let mut other =
-            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        let mut other = EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         other.partition = Some(PartitionAssignment::new(4, other_id).unwrap());
         assert!(!other.matches(&event));
     }

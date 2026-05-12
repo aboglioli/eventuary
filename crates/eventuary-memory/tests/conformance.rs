@@ -75,6 +75,7 @@ impl Backend for MemoryBackend {
             preserves_total_order: true,
             supports_consumer_groups: false,
             supports_independent_checkpoints: false,
+            supports_runtime_partitioning: false,
         }
     }
 

@@ -195,7 +195,8 @@ impl Reader for PgReader {
 
         let handle = tokio::spawn(async move {
             let (mut after_seq, lower_bound_ts) =
-                match resolve_initial_position(&pool, &config, partition_id, partition_count).await {
+                match resolve_initial_position(&pool, &config, partition_id, partition_count).await
+                {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
