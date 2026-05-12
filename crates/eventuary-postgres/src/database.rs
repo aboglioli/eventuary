@@ -138,6 +138,11 @@ mod tests {
         assert!(sql.contains("parent_id UUID"));
         assert!(sql.contains("event_key TEXT"));
         assert!(sql.contains("checkpoint_name"));
+        assert!(sql.contains("partition         INTEGER NOT NULL DEFAULT 0"));
+        assert!(sql.contains("partition_count   INTEGER NOT NULL DEFAULT 1"));
+        assert!(sql.contains(
+            "PRIMARY KEY (consumer_group_id, checkpoint_name, partition, partition_count)"
+        ));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS schema_migrations"));
         assert!(sql.contains("INSERT INTO schema_migrations (version) VALUES (1)"));
         assert!(sql.contains(migrations()[0].sql.trim()));

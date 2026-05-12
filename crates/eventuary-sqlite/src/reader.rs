@@ -63,11 +63,17 @@ impl SqliteReaderConfig {
 /// nack leaves the checkpoint unchanged so the event is redelivered on next
 /// reader start. Backwards moves are guarded by
 /// `WHERE excluded.sequence > consumer_offsets.sequence`.
+///
+/// The (`partition`, `partition_count`) pair scopes the checkpoint row to a
+/// specific partition assignment. Unpartitioned consumers use `(0, 1)`,
+/// matching the column defaults, so they transparently share one row.
 #[derive(Clone)]
 pub struct SqliteAcker {
     conn: SqliteConn,
     consumer_group_id: ConsumerGroupId,
     checkpoint_name: String,
+    partition: i32,
+    partition_count: i32,
     sequence: i64,
 }
 
@@ -76,17 +82,26 @@ impl Acker for SqliteAcker {
         let conn = Arc::clone(&self.conn);
         let consumer_group_id = self.consumer_group_id.as_str().to_owned();
         let checkpoint_name = self.checkpoint_name.clone();
+        let partition = self.partition;
+        let partition_count = self.partition_count;
         let sequence = self.sequence;
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             guard
                 .execute(
-                    "INSERT INTO consumer_offsets (consumer_group_id, checkpoint_name, sequence)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(consumer_group_id, checkpoint_name) DO UPDATE
-                     SET sequence = excluded.sequence
+                    "INSERT INTO consumer_offsets
+                       (consumer_group_id, checkpoint_name, partition, partition_count, sequence)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(consumer_group_id, checkpoint_name, partition, partition_count)
+                     DO UPDATE SET sequence = excluded.sequence
                      WHERE excluded.sequence > consumer_offsets.sequence",
-                    rusqlite::params![consumer_group_id, checkpoint_name, sequence],
+                    rusqlite::params![
+                        consumer_group_id,
+                        checkpoint_name,
+                        partition,
+                        partition_count,
+                        sequence
+                    ],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             Ok(())
@@ -171,16 +186,35 @@ impl Reader for SqliteReader {
     type Stream = SqliteStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        if subscription.partition.is_some() && subscription.consumer_group_id.is_none() {
+            return Err(Error::Config(
+                "subscription.partition requires consumer_group_id; partition checkpoints have no identity without a group".to_owned(),
+            ));
+        }
         let conn = Arc::clone(&self.conn);
         let mut config = self.config.clone();
         apply_subscription(&mut config, &subscription);
+        let (partition_id, partition_count) = match subscription.partition {
+            Some(a) => (a.id() as i32, a.count() as i32),
+            None => (0, 1),
+        };
+        tracing::info!(
+            consumer_group_id = config.consumer_group_id.as_ref().map(|g| g.as_str()),
+            checkpoint_name = %config.checkpoint_name,
+            partition = partition_id,
+            partition_count = partition_count,
+            "sqlite reader spawned",
+        );
         let (tx, rx) = mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
             let initial = {
                 let conn = Arc::clone(&conn);
                 let config = config.clone();
-                tokio::task::spawn_blocking(move || resolve_initial_position(&conn, &config)).await
+                tokio::task::spawn_blocking(move || {
+                    resolve_initial_position(&conn, &config, partition_id, partition_count)
+                })
+                .await
             };
             let (mut after_seq, lower_bound_ts) = match initial {
                 Ok(Ok(p)) => p,
@@ -221,7 +255,13 @@ impl Reader for SqliteReader {
                     }
                 };
 
-                tracing::trace!(after_seq, fetched = batch.len(), "sqlite poll");
+                tracing::trace!(
+                    after_seq,
+                    fetched = batch.len(),
+                    partition = partition_id,
+                    partition_count = partition_count,
+                    "sqlite poll",
+                );
 
                 if batch.is_empty() {
                     tokio::time::sleep(config.poll_interval).await;
@@ -254,6 +294,8 @@ impl Reader for SqliteReader {
                             conn: Arc::clone(&conn),
                             consumer_group_id: group.clone(),
                             checkpoint_name: config.checkpoint_name.clone(),
+                            partition: partition_id,
+                            partition_count,
                             sequence,
                         })),
                         None => Either::Left(NoopAcker),
@@ -276,14 +318,24 @@ impl Reader for SqliteReader {
 fn resolve_initial_position(
     conn: &SqliteConn,
     config: &SqliteReaderConfig,
+    partition: i32,
+    partition_count: i32,
 ) -> Result<(i64, Option<DateTime<Utc>>)> {
     let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
     if let Some(group) = config.consumer_group_id.as_ref() {
         let row: Option<i64> = guard
             .query_row(
                 "SELECT sequence FROM consumer_offsets
-                 WHERE consumer_group_id = ?1 AND checkpoint_name = ?2",
-                rusqlite::params![group.as_str(), config.checkpoint_name],
+                 WHERE consumer_group_id = ?1
+                   AND checkpoint_name   = ?2
+                   AND partition         = ?3
+                   AND partition_count   = ?4",
+                rusqlite::params![
+                    group.as_str(),
+                    config.checkpoint_name,
+                    partition,
+                    partition_count
+                ],
                 |r| r.get(0),
             )
             .ok();

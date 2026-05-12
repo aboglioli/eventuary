@@ -61,25 +61,34 @@ impl PgReaderConfig {
 /// ack advances the consumer group's checkpoint to this event's sequence;
 /// nack leaves the checkpoint unchanged. Backwards moves are guarded by
 /// `WHERE EXCLUDED.sequence > consumer_offsets.sequence`.
+///
+/// The (`partition`, `partition_count`) pair scopes the checkpoint row to a
+/// specific partition assignment. Unpartitioned consumers use `(0, 1)`,
+/// matching the column defaults, so they transparently share one row.
 #[derive(Clone)]
 pub struct PgAcker {
     pool: PgPool,
     consumer_group_id: ConsumerGroupId,
     checkpoint_name: String,
+    partition: i32,
+    partition_count: i32,
     sequence: i64,
 }
 
 impl Acker for PgAcker {
     async fn ack(&self) -> Result<()> {
         sqlx::query(
-            "INSERT INTO consumer_offsets (consumer_group_id, checkpoint_name, sequence) \
-             VALUES ($1, $2, $3) \
-             ON CONFLICT (consumer_group_id, checkpoint_name) DO UPDATE \
-             SET sequence = EXCLUDED.sequence \
+            "INSERT INTO consumer_offsets \
+               (consumer_group_id, checkpoint_name, partition, partition_count, sequence) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (consumer_group_id, checkpoint_name, partition, partition_count) \
+             DO UPDATE SET sequence = EXCLUDED.sequence \
              WHERE EXCLUDED.sequence > consumer_offsets.sequence",
         )
         .bind(self.consumer_group_id.as_str())
         .bind(&self.checkpoint_name)
+        .bind(self.partition)
+        .bind(self.partition_count)
         .bind(self.sequence)
         .execute(&self.pool)
         .await
@@ -163,14 +172,30 @@ impl Reader for PgReader {
     type Stream = PgStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        if subscription.partition.is_some() && subscription.consumer_group_id.is_none() {
+            return Err(Error::Config(
+                "subscription.partition requires consumer_group_id; partition checkpoints have no identity without a group".to_owned(),
+            ));
+        }
         let pool = self.pool.clone();
         let mut config = self.config.clone();
         apply_subscription(&mut config, &subscription);
+        let (partition_id, partition_count) = match subscription.partition {
+            Some(a) => (a.id() as i32, a.count() as i32),
+            None => (0, 1),
+        };
+        tracing::info!(
+            consumer_group_id = config.consumer_group_id.as_ref().map(|g| g.as_str()),
+            checkpoint_name = %config.checkpoint_name,
+            partition = partition_id,
+            partition_count = partition_count,
+            "postgres reader spawned",
+        );
         let (tx, rx) = mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
             let (mut after_seq, lower_bound_ts) =
-                match resolve_initial_position(&pool, &config).await {
+                match resolve_initial_position(&pool, &config, partition_id, partition_count).await {
                     Ok(p) => p,
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
@@ -190,7 +215,13 @@ impl Reader for PgReader {
                     }
                 };
 
-                tracing::trace!(after_seq, fetched = batch.len(), "postgres poll");
+                tracing::trace!(
+                    after_seq,
+                    fetched = batch.len(),
+                    partition = partition_id,
+                    partition_count = partition_count,
+                    "postgres poll",
+                );
 
                 if batch.is_empty() {
                     tokio::time::sleep(config.poll_interval).await;
@@ -223,6 +254,8 @@ impl Reader for PgReader {
                             pool: pool.clone(),
                             consumer_group_id: group.clone(),
                             checkpoint_name: config.checkpoint_name.clone(),
+                            partition: partition_id,
+                            partition_count,
                             sequence,
                         })),
                         None => Either::Left(NoopAcker),
@@ -245,14 +278,21 @@ impl Reader for PgReader {
 async fn resolve_initial_position(
     pool: &PgPool,
     config: &PgReaderConfig,
+    partition: i32,
+    partition_count: i32,
 ) -> Result<(i64, Option<DateTime<Utc>>)> {
     if let Some(group) = config.consumer_group_id.as_ref() {
         let row = sqlx::query(
             "SELECT sequence FROM consumer_offsets \
-             WHERE consumer_group_id = $1 AND checkpoint_name = $2",
+             WHERE consumer_group_id = $1 \
+               AND checkpoint_name   = $2 \
+               AND partition         = $3 \
+               AND partition_count   = $4",
         )
         .bind(group.as_str())
         .bind(&config.checkpoint_name)
+        .bind(partition)
+        .bind(partition_count)
         .fetch_optional(pool)
         .await
         .map_err(|e| Error::Store(e.to_string()))?;
