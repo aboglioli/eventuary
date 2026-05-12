@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    ConsumerGroupId, Event, EventKey, Filter, Metadata, Namespace, OrganizationId, StartFrom, Topic,
+    ConsumerGroupId, Event, EventKey, Filter, Metadata, Namespace, OrganizationId,
+    PartitionAssignment, StartFrom, Topic, partition_for,
 };
 
 /// Read-side subscription: tells a [`Reader`] *which events* to deliver and
@@ -105,6 +106,20 @@ pub struct EventSubscription {
     /// emitting once `limit` events have been yielded. Applied **after**
     /// filtering — counts only matched events.
     pub limit: Option<usize>,
+    /// Optional runtime partition assignment. When `Some`, [`matches`]
+    /// rejects events whose [`partition_for`] does not equal the
+    /// assignment's id, so two workers using the same `count` and
+    /// distinct `id` receive disjoint slices of the event log.
+    ///
+    /// `None` (the default) disables partition filtering — the consumer
+    /// receives every event allowed by the other predicates.
+    ///
+    /// Backends that cannot honor runtime partitioning meaningfully
+    /// (memory, kafka, sqs) reject `Some(_)` at [`Reader::read`].
+    ///
+    /// [`Reader::read`]: crate::io::Reader::read
+    /// [`matches`]: EventSubscription::matches
+    pub partition: Option<PartitionAssignment>,
 }
 
 impl Default for EventSubscription {
@@ -127,6 +142,7 @@ impl EventSubscription {
             start_from: StartFrom::Latest,
             end_at: None,
             limit: None,
+            partition: None,
         }
     }
 
@@ -171,6 +187,11 @@ impl EventSubscription {
         }
         if let Some(end_at) = self.end_at
             && event.timestamp() > end_at
+        {
+            return false;
+        }
+        if let Some(assignment) = self.partition
+            && partition_for(event, assignment.count_nz()) != assignment.id()
         {
             return false;
         }
@@ -318,5 +339,77 @@ mod tests {
             EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
         subscription.end_at = Some(Utc::now() - Duration::seconds(60));
         assert!(!subscription.matches(&ev("acme", "a.b", "/x")));
+    }
+
+    #[test]
+    fn partition_filter_keeps_events_in_its_slice() {
+        use std::num::NonZeroU32;
+
+        use crate::PartitionAssignment;
+
+        let count = NonZeroU32::new(4).unwrap();
+        let event = ev_with_key("acme", "a.b", "/x", "entity-1");
+        let owner_id = crate::partition_for(&event, count);
+
+        let mut owner =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        owner.partition = Some(PartitionAssignment::new(4, owner_id).unwrap());
+        assert!(owner.matches(&event));
+
+        let other_id = (owner_id + 1) % 4;
+        let mut other =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        other.partition = Some(PartitionAssignment::new(4, other_id).unwrap());
+        assert!(!other.matches(&event));
+    }
+
+    #[test]
+    fn partition_filter_is_none_by_default() {
+        let subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        assert!(subscription.partition.is_none());
+        assert!(subscription.matches(&ev("acme", "a.b", "/x")));
+    }
+
+    #[test]
+    fn partition_filter_partitions_keyless_events_too() {
+        use std::num::NonZeroU32;
+
+        use crate::{PartitionAssignment, Payload};
+
+        let count = NonZeroU32::new(4).unwrap();
+        let event = Event::builder("acme", "/x", "a.b", Payload::from_string("p"))
+            .unwrap()
+            .build()
+            .expect("valid event");
+        let owner_id = crate::partition_for(&event, count);
+
+        let mut owner =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        owner.partition = Some(PartitionAssignment::new(4, owner_id).unwrap());
+        assert!(owner.matches(&event));
+
+        let other_id = (owner_id + 1) % 4;
+        let mut other =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        other.partition = Some(PartitionAssignment::new(4, other_id).unwrap());
+        assert!(!other.matches(&event));
+    }
+
+    #[test]
+    fn partition_filter_combines_with_other_predicates() {
+        use std::num::NonZeroU32;
+
+        use crate::PartitionAssignment;
+
+        let count = NonZeroU32::new(4).unwrap();
+        let event = ev_with_key("acme", "a.b", "/x", "entity-7");
+        let owner_id = crate::partition_for(&event, count);
+
+        let mut subscription =
+            EventSubscription::for_organization(OrganizationId::new("acme").unwrap());
+        subscription.partition = Some(PartitionAssignment::new(4, owner_id).unwrap());
+        subscription.topics = Some(vec![Topic::new("never.matches").unwrap()]);
+        assert!(!subscription.matches(&event));
     }
 }
