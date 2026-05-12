@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use eventuary_core::io::acker::NoopAcker;
 use eventuary_core::io::{Message, Reader};
-use eventuary_core::{Event, EventSubscription, Result};
+use eventuary_core::{Error, Event, EventSubscription, Result};
 
 pub struct InmemReader {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
@@ -58,6 +58,11 @@ impl Reader for InmemReader {
     type Stream = InmemStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        if subscription.partition.is_some() {
+            return Err(Error::Config(
+                "memory backend does not support runtime partition filter; events would be silently dropped from the shared mpsc channel".to_owned(),
+            ));
+        }
         Ok(InmemStream {
             rx: Arc::clone(&self.rx),
             subscription,
@@ -116,6 +121,24 @@ mod tests {
 
         let msg2 = stream.next().await.unwrap().unwrap();
         msg2.ack().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_rejects_subscription_partition() {
+        use eventuary_core::PartitionAssignment;
+
+        let (_tx, rx) = mpsc::channel(1);
+        let reader = InmemReader::new(rx);
+
+        let mut subscription = subscription();
+        subscription.partition = Some(PartitionAssignment::new(4, 0).unwrap());
+
+        let result = reader.read(subscription).await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected Error::Config rejection"),
+        };
+        assert!(matches!(err, eventuary_core::Error::Config(_)));
     }
 
     #[tokio::test]

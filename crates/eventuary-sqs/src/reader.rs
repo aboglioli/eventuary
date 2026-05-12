@@ -84,6 +84,15 @@ impl Stream for SqsStream {
     }
 }
 
+fn reject_runtime_partition(subscription: &EventSubscription) -> Result<()> {
+    if subscription.partition.is_some() {
+        return Err(Error::Config(
+            "SQS backend does not support runtime partition filter; workers compete on receive and the filter would force each worker to discard most messages".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_organization_filter(
     subscription: &EventSubscription,
     configured: &Option<OrganizationId>,
@@ -106,6 +115,7 @@ impl Reader for SqsReader {
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         validate_organization_filter(&subscription, &self.config.organization)?;
+        reject_runtime_partition(&subscription)?;
         if !matches!(subscription.start_from, StartFrom::Latest) {
             return Err(Error::Config(
                 "SQS reader only supports StartFrom::Latest; queue semantics deliver pending messages and cannot seek".to_owned(),
@@ -248,6 +258,23 @@ mod tests {
         let configured = Some(org("other"));
 
         let err = validate_organization_filter(&subscription, &configured).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn reject_runtime_partition_accepts_unpartitioned() {
+        let subscription = EventSubscription::for_organization(org("acme"));
+        reject_runtime_partition(&subscription).unwrap();
+    }
+
+    #[test]
+    fn reject_runtime_partition_rejects_partitioned() {
+        use eventuary_core::PartitionAssignment;
+
+        let mut subscription = EventSubscription::for_organization(org("acme"));
+        subscription.partition = Some(PartitionAssignment::new(4, 0).unwrap());
+
+        let err = reject_runtime_partition(&subscription).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }
 }
