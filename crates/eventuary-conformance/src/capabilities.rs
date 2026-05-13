@@ -6,6 +6,9 @@ pub struct Capabilities {
     pub preserves_total_order: bool,
     pub supports_consumer_groups: bool,
     pub supports_independent_checkpoints: bool,
+    /// Backend honors `subscription.partition` so N workers with distinct
+    /// ids and the same count receive disjoint slices of the event log.
+    pub supports_runtime_partitioning: bool,
 }
 
 impl Capabilities {
@@ -17,6 +20,7 @@ impl Capabilities {
             preserves_total_order: true,
             supports_consumer_groups: true,
             supports_independent_checkpoints: true,
+            supports_runtime_partitioning: true,
         }
     }
 }

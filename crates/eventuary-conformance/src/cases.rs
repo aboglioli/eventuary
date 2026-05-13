@@ -1,10 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use chrono::Utc;
 use eventuary_core::io::Writer;
 use eventuary_core::{
-    ConsumerGroupId, Event, Namespace, OrganizationId, Payload, StartFrom, Topic,
+    ConsumerGroupId, Error, Event, Namespace, OrganizationId, PartitionAssignment, Payload,
+    StartFrom, Topic, partition_for,
 };
 
 use crate::factory::{Backend, ReaderRequest};
@@ -447,6 +449,182 @@ pub async fn case_independent_checkpoints_within_group(backend: &dyn Backend) {
     );
 }
 
+pub async fn case_runtime_partition_isolates_workers(backend: &dyn Backend) {
+    let org = unique_organization();
+    let writer = backend.writer().await;
+    let count: u32 = 4;
+    let count_nz = NonZeroU32::new(count).unwrap();
+    let event_count: u32 = 80;
+    let mut events: Vec<Event> = Vec::with_capacity(event_count as usize);
+    for i in 0..event_count {
+        let event = make_event(&org, "/x", "thing.happened", &format!("entity-{i}"));
+        writer.write(&event).await.expect("write");
+        events.push(event);
+    }
+
+    let group = ConsumerGroupId::new("partitioned-group").expect("valid group id");
+
+    let mut received_keys: HashSet<String> = HashSet::new();
+    for partition_id in 0..count {
+        let expected = events
+            .iter()
+            .filter(|e| partition_for(e, count_nz) == partition_id)
+            .count();
+        let mut request = ReaderRequest::for_organization(org.clone());
+        request.start_from = StartFrom::Earliest;
+        request.consumer_group_id = Some(group.clone());
+        request.checkpoint_name = "partitioned".to_owned();
+        request.partition = Some(PartitionAssignment::new(count, partition_id).unwrap());
+        let consumed = backend.read_many(request, expected, READ_TIMEOUT).await;
+        assert_eq!(
+            consumed.len(),
+            expected,
+            "runtime_partition_isolates_workers: partition {partition_id} expected {expected} events, got {}",
+            consumed.len(),
+        );
+        for c in consumed {
+            let key = c.event.key().expect("event has key").as_str().to_owned();
+            assert!(
+                received_keys.insert(key.clone()),
+                "runtime_partition_isolates_workers: key {key} delivered to multiple partitions"
+            );
+            assert_eq!(
+                partition_for(&c.event, count_nz),
+                partition_id,
+                "runtime_partition_isolates_workers: event routed to wrong partition"
+            );
+        }
+    }
+
+    assert_eq!(
+        received_keys.len(),
+        events.len(),
+        "runtime_partition_isolates_workers: union must cover every event"
+    );
+}
+
+pub async fn case_runtime_partition_per_key_stickiness(backend: &dyn Backend) {
+    let org = unique_organization();
+    let writer = backend.writer().await;
+    let count: u32 = 4;
+    let count_nz = NonZeroU32::new(count).unwrap();
+    let key = "sticky-entity";
+
+    for i in 0..6 {
+        writer
+            .write(&make_event(&org, "/x", &format!("thing.happened.{i}"), key))
+            .await
+            .expect("write");
+    }
+    let probe = make_event(&org, "/x", "thing.happened.0", key);
+    let expected_partition = partition_for(&probe, count_nz);
+
+    let mut request = ReaderRequest::for_organization(org.clone());
+    request.start_from = StartFrom::Earliest;
+    request.consumer_group_id = Some(ConsumerGroupId::new("sticky-group").expect("valid group id"));
+    request.checkpoint_name = "sticky".to_owned();
+    request.partition = Some(PartitionAssignment::new(count, expected_partition).unwrap());
+    let consumed = backend.read_many(request, 6, READ_TIMEOUT).await;
+    assert_eq!(
+        consumed.len(),
+        6,
+        "runtime_partition_per_key_stickiness: every event for the same key must land on the owning partition",
+    );
+
+    let other_partition = (expected_partition + 1) % count;
+    let mut other_request = ReaderRequest::for_organization(org);
+    other_request.start_from = StartFrom::Earliest;
+    other_request.consumer_group_id =
+        Some(ConsumerGroupId::new("sticky-group").expect("valid group id"));
+    other_request.checkpoint_name = "sticky-other".to_owned();
+    other_request.partition = Some(PartitionAssignment::new(count, other_partition).unwrap());
+    let other_consumed = backend
+        .read_many(other_request, 1, Duration::from_millis(300))
+        .await;
+    assert!(
+        other_consumed.is_empty(),
+        "runtime_partition_per_key_stickiness: non-owning partition must receive nothing"
+    );
+}
+
+pub async fn case_runtime_partition_unsupported_rejects(backend: &dyn Backend) {
+    let _writer = backend.writer().await;
+    let mut request = ReaderRequest::new();
+    request.partition = Some(PartitionAssignment::new(4, 0).unwrap());
+
+    let err = backend
+        .read_result(request)
+        .await
+        .expect_err("runtime partitioning must be rejected by unsupported backends");
+    assert!(
+        matches!(err, Error::Config(_)),
+        "unsupported runtime partitioning must return Error::Config, got {err:?}"
+    );
+}
+
+pub async fn case_runtime_partition_checkpoint_independence(backend: &dyn Backend) {
+    let org = unique_organization();
+    let writer = backend.writer().await;
+    let count: u32 = 2;
+    let count_nz = NonZeroU32::new(count).unwrap();
+
+    let mut keys_by_partition: HashMap<u32, Vec<Event>> = HashMap::new();
+    let mut attempt: u32 = 0;
+    while keys_by_partition.get(&0).map(Vec::len).unwrap_or(0) < 2
+        || keys_by_partition.get(&1).map(Vec::len).unwrap_or(0) < 2
+    {
+        let event = make_event(&org, "/x", "thing.happened", &format!("k{attempt}"));
+        writer.write(&event).await.expect("write");
+        let pid = partition_for(&event, count_nz);
+        keys_by_partition.entry(pid).or_default().push(event);
+        attempt += 1;
+        assert!(
+            attempt < 256,
+            "runtime_partition_checkpoint_independence: could not seed both partitions"
+        );
+    }
+
+    let group = ConsumerGroupId::new("independent-group").expect("valid group id");
+
+    let mut request_a = ReaderRequest::for_organization(org.clone());
+    request_a.start_from = StartFrom::Earliest;
+    request_a.consumer_group_id = Some(group.clone());
+    request_a.checkpoint_name = "independent".to_owned();
+    request_a.partition = Some(PartitionAssignment::new(count, 0).unwrap());
+    let take = keys_by_partition[&0].len();
+    let consumed_a = backend.read_many(request_a, take, READ_TIMEOUT).await;
+    assert_eq!(consumed_a.len(), take);
+    for c in consumed_a {
+        (c.ack)().await.expect("ack partition 0");
+    }
+
+    let mut resume_a = ReaderRequest::for_organization(org.clone());
+    resume_a.start_from = StartFrom::Earliest;
+    resume_a.consumer_group_id = Some(group.clone());
+    resume_a.checkpoint_name = "independent".to_owned();
+    resume_a.partition = Some(PartitionAssignment::new(count, 0).unwrap());
+    let again_a = backend
+        .read_many(resume_a, 1, Duration::from_millis(300))
+        .await;
+    assert!(
+        again_a.is_empty(),
+        "runtime_partition_checkpoint_independence: partition 0 must not redeliver after ack"
+    );
+
+    let mut request_b = ReaderRequest::for_organization(org);
+    request_b.start_from = StartFrom::Earliest;
+    request_b.consumer_group_id = Some(group);
+    request_b.checkpoint_name = "independent".to_owned();
+    request_b.partition = Some(PartitionAssignment::new(count, 1).unwrap());
+    let expected_b = keys_by_partition[&1].len();
+    let consumed_b = backend.read_many(request_b, expected_b, READ_TIMEOUT).await;
+    assert_eq!(
+        consumed_b.len(),
+        expected_b,
+        "runtime_partition_checkpoint_independence: partition 1's checkpoint must be unaffected by partition 0's ack"
+    );
+}
+
 pub async fn run_all(backend: &dyn Backend) {
     let caps = backend.capabilities();
     case_write_read_roundtrip(backend).await;
@@ -471,5 +649,14 @@ pub async fn run_all(backend: &dyn Backend) {
     }
     if caps.supports_independent_checkpoints {
         case_independent_checkpoints_within_group(backend).await;
+    }
+    if caps.supports_runtime_partitioning {
+        case_runtime_partition_isolates_workers(backend).await;
+        case_runtime_partition_per_key_stickiness(backend).await;
+        if caps.supports_consumer_groups {
+            case_runtime_partition_checkpoint_independence(backend).await;
+        }
+    } else {
+        case_runtime_partition_unsupported_rejects(backend).await;
     }
 }

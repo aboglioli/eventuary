@@ -147,6 +147,15 @@ impl Stream for KafkaStream {
     }
 }
 
+fn reject_runtime_partition(subscription: &EventSubscription) -> Result<()> {
+    if subscription.partition.is_some() {
+        return Err(Error::Config(
+            "Kafka backend partitions natively via its consumer group coordinator; remove subscription.partition (runtime filter would double-partition events)".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_organization_filter(
     subscription: &EventSubscription,
     configured: &Option<OrganizationId>,
@@ -169,6 +178,7 @@ impl Reader for KafkaReader {
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         validate_organization_filter(&subscription, &self.config.organization)?;
+        reject_runtime_partition(&subscription)?;
         if let Some(group) = subscription.consumer_group_id.as_ref()
             && group != &self.config.consumer_group_id
         {
@@ -315,6 +325,23 @@ mod tests {
         let configured = Some(org("other"));
 
         let err = validate_organization_filter(&subscription, &configured).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn reject_runtime_partition_accepts_unpartitioned() {
+        let subscription = EventSubscription::for_organization(org("acme"));
+        reject_runtime_partition(&subscription).unwrap();
+    }
+
+    #[test]
+    fn reject_runtime_partition_rejects_partitioned() {
+        use eventuary_core::PartitionAssignment;
+
+        let mut subscription = EventSubscription::for_organization(org("acme"));
+        subscription.partition = Some(PartitionAssignment::new(4, 0).unwrap());
+
+        let err = reject_runtime_partition(&subscription).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }
 }

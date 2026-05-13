@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
-use eventuary_core::BoxWriter;
 use eventuary_core::io::WriterExt;
+use eventuary_core::{BoxWriter, EventSubscription, Result};
 use eventuary_sqlite::{SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig};
 use futures::StreamExt;
 use tempfile::TempDir;
@@ -39,6 +39,22 @@ impl SqliteBackend {
             poll_interval: request.poll_interval,
             batch_size: 10,
         }
+    }
+
+    fn subscription(&self, request: &ReaderRequest) -> EventSubscription {
+        let mut subscription = match request.organization.clone() {
+            Some(organization) => EventSubscription::for_organization(organization),
+            None => EventSubscription::new(),
+        };
+        subscription.checkpoint_name = Some(request.checkpoint_name.clone());
+        subscription.consumer_group_id = request.consumer_group_id.clone();
+        if !request.topics.is_empty() {
+            subscription.topics = Some(request.topics.clone());
+        }
+        subscription.namespace_prefix = request.namespace.clone();
+        subscription.start_from = request.start_from;
+        subscription.partition = request.partition;
+        subscription
     }
 }
 
@@ -76,8 +92,11 @@ impl Backend for SqliteBackend {
     ) -> Pin<Box<dyn Future<Output = Option<ConsumerEvent>> + Send + 'a>> {
         Box::pin(async move {
             let cfg = self.reader_config(&request);
+            let subscription = self.subscription(&request);
             let reader = SqliteReader::new(self.db.conn(), cfg);
-            let mut stream = reader.read().await.ok()?;
+            let mut stream = eventuary_core::io::Reader::read(&reader, subscription)
+                .await
+                .ok()?;
             let next = tokio::time::timeout(timeout, stream.next()).await.ok()??;
             let msg = next.ok()?;
             let (event, acker) = msg.into_parts();
@@ -98,8 +117,9 @@ impl Backend for SqliteBackend {
     ) -> Pin<Box<dyn Future<Output = Vec<ConsumerEvent>> + Send + 'a>> {
         Box::pin(async move {
             let cfg = self.reader_config(&request);
+            let subscription = self.subscription(&request);
             let reader = SqliteReader::new(self.db.conn(), cfg);
-            let mut stream = match reader.read().await {
+            let mut stream = match eventuary_core::io::Reader::read(&reader, subscription).await {
                 Ok(s) => s,
                 Err(_) => return Vec::new(),
             };
@@ -123,6 +143,20 @@ impl Backend for SqliteBackend {
                 });
             }
             received
+        })
+    }
+
+    fn read_result<'a>(
+        &'a self,
+        request: ReaderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let cfg = self.reader_config(&request);
+            let subscription = self.subscription(&request);
+            let reader = SqliteReader::new(self.db.conn(), cfg);
+            eventuary_core::io::Reader::read(&reader, subscription)
+                .await
+                .map(|_| ())
         })
     }
 }

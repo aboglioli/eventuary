@@ -3,7 +3,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use eventuary_core::{
-    BoxWriter, ConsumerGroupId, Event, Namespace, OrganizationId, Result, StartFrom, Topic,
+    BoxWriter, ConsumerGroupId, Event, Namespace, OrganizationId, PartitionAssignment, Result,
+    StartFrom, Topic,
 };
 
 use crate::Capabilities;
@@ -16,6 +17,7 @@ pub struct ReaderRequest {
     pub checkpoint_name: String,
     pub start_from: StartFrom,
     pub poll_interval: Duration,
+    pub partition: Option<PartitionAssignment>,
 }
 
 impl Default for ReaderRequest {
@@ -34,6 +36,7 @@ impl ReaderRequest {
             checkpoint_name: "default".to_owned(),
             start_from: StartFrom::Earliest,
             poll_interval: Duration::from_millis(20),
+            partition: None,
         }
     }
 
@@ -71,4 +74,9 @@ pub trait Backend: Send + Sync {
         count: usize,
         timeout: Duration,
     ) -> Pin<Box<dyn Future<Output = Vec<ConsumerEvent>> + Send + 'a>>;
+
+    fn read_result<'a>(
+        &'a self,
+        request: ReaderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 }

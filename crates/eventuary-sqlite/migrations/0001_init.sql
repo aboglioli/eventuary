@@ -21,8 +21,10 @@ CREATE INDEX IF NOT EXISTS idx_events_org_topic_seq ON events (organization, top
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
 
 CREATE TABLE IF NOT EXISTS consumer_offsets (
-    consumer_group_id TEXT NOT NULL,
-    checkpoint_name TEXT NOT NULL DEFAULT 'default',
-    sequence INTEGER NOT NULL,
-    PRIMARY KEY (consumer_group_id, checkpoint_name)
+    consumer_group_id TEXT    NOT NULL,
+    checkpoint_name   TEXT    NOT NULL DEFAULT 'default',
+    partition         INTEGER NOT NULL DEFAULT 0,
+    partition_count   INTEGER NOT NULL DEFAULT 1,
+    sequence          INTEGER NOT NULL,
+    PRIMARY KEY (consumer_group_id, checkpoint_name, partition, partition_count)
 );

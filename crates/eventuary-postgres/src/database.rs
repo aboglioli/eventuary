@@ -45,14 +45,48 @@ pub fn schema_sql() -> String {
     sql
 }
 
+/// Connection options for [`PgDatabase::connect_with`].
+///
+/// `max_connections` should at least be:
+///
+/// ```text
+/// max_connections >= partition_count + writer_concurrency + 4
+/// ```
+///
+/// Each partitioned worker holds one long-lived connection while polling
+/// the log, so the pool must be sized for the planned fanout. The default
+/// of 20 covers the common 10-partition case with headroom for writers
+/// and ad-hoc queries.
+#[derive(Clone, Debug)]
+pub struct PgConnectOptions {
+    pub max_connections: u32,
+}
+
+impl Default for PgConnectOptions {
+    fn default() -> Self {
+        Self {
+            max_connections: 20,
+        }
+    }
+}
+
 pub struct PgDatabase {
     pool: PgPool,
 }
 
 impl PgDatabase {
+    /// Connects with the default [`PgConnectOptions`]. Equivalent to
+    /// `connect_with(url, PgConnectOptions::default())`.
     pub async fn connect(url: &str) -> Result<Self> {
+        Self::connect_with(url, PgConnectOptions::default()).await
+    }
+
+    /// Connects with caller-supplied options. Use this when the consumer
+    /// fanout (partitioned workers + writers) exceeds the default pool
+    /// size — see [`PgConnectOptions`] for sizing guidance.
+    pub async fn connect_with(url: &str, options: PgConnectOptions) -> Result<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(options.max_connections)
             .connect(url)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -138,6 +172,11 @@ mod tests {
         assert!(sql.contains("parent_id UUID"));
         assert!(sql.contains("event_key TEXT"));
         assert!(sql.contains("checkpoint_name"));
+        assert!(sql.contains("partition         INTEGER NOT NULL DEFAULT 0"));
+        assert!(sql.contains("partition_count   INTEGER NOT NULL DEFAULT 1"));
+        assert!(sql.contains(
+            "PRIMARY KEY (consumer_group_id, checkpoint_name, partition, partition_count)"
+        ));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS schema_migrations"));
         assert!(sql.contains("INSERT INTO schema_migrations (version) VALUES (1)"));
         assert!(sql.contains(migrations()[0].sql.trim()));

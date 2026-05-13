@@ -7,7 +7,7 @@ use eventuary_conformance::{
     AckFn, AckFuture, Backend, Capabilities, ConsumerEvent, ReaderRequest, run_all,
 };
 use eventuary_core::io::WriterExt;
-use eventuary_core::{BoxWriter, EventSubscription, StartFrom};
+use eventuary_core::{BoxWriter, EventSubscription, Result, StartFrom};
 use eventuary_memory::{InmemReader, InmemWriter};
 use futures::StreamExt;
 use tokio::sync::{Mutex, mpsc};
@@ -63,6 +63,7 @@ fn build_subscription(request: &ReaderRequest) -> EventSubscription {
         subscription.topics = Some(request.topics.clone());
     }
     subscription.namespace_prefix = request.namespace.clone();
+    subscription.partition = request.partition;
     subscription
 }
 
@@ -75,6 +76,7 @@ impl Backend for MemoryBackend {
             preserves_total_order: true,
             supports_consumer_groups: false,
             supports_independent_checkpoints: false,
+            supports_runtime_partitioning: false,
         }
     }
 
@@ -169,6 +171,21 @@ impl Backend for MemoryBackend {
                 }
             }
             received
+        })
+    }
+
+    fn read_result<'a>(
+        &'a self,
+        request: ReaderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let reader_handle = self.current_reader().await;
+            let subscription = build_subscription(&request);
+            let mut guard = reader_handle.lock().await;
+            let reader = guard.as_mut().expect("memory reader initialized");
+            eventuary_core::io::Reader::read(reader, subscription)
+                .await
+                .map(|_| ())
         })
     }
 }
