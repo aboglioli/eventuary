@@ -37,12 +37,12 @@ each backend crate as a feature-gated module (`eventuary::memory::InmemReader`,
 
 The workspace also publishes the individual crates separately for advanced
 use cases — for example, writing a custom backend without pulling the
-umbrella, or testing your backend against the shared conformance suite:
+umbrella, or wiring backend conformance tests directly:
 
 | Crate | When to depend directly |
 |-------|------------------------|
 | [`eventuary-core`](crates/eventuary-core) | Building a new backend; want only the event model + IO traits |
-| [`eventuary-conformance`](crates/eventuary-conformance) | Dev-dep for backend authors who want to run the shared conformance suite |
+| [`eventuary-conformance`](crates/eventuary-conformance) | Dev-dep for backend authors; reusable cursor-reader conformance cases are being rebuilt |
 | [`eventuary-memory`](crates/eventuary-memory) etc. | Pinning a backend's version independently of the umbrella |
 
 Typical applications should stick to the umbrella `eventuary` crate.
@@ -137,11 +137,47 @@ let mut stream = reader.read(subscription).await?;
 
 ## Cursor + Checkpoint Composition
 
-Backend readers (e.g. `PgReader`, `SqliteReader`) deliver
-`Message<Acker, Cursor>` from the event log only — they do not persist
-consumer progress. Progress lives in a `CheckpointStore`; partition
-fanout lives in `PartitionedReader`. Composers are generic and live in
-`eventuary-core`:
+Backend readers deliver `Message<Acker, Cursor>`. `Event` remains immutable
+and cursor-free; delivery state lives only in the message envelope.
+
+SQL readers (`PgReader`, `SqliteReader`) are source readers: they read the
+events table and manage in-memory cursor ack/nack. They do not persist
+consumer progress. Durable progress is handled by `CheckpointReader` plus a
+backend `CheckpointStore`.
+
+```rust
+use eventuary::io::checkpoint::{CheckpointScope, StreamId};
+use eventuary::io::readers::{CheckpointReader, CheckpointSubscription};
+use eventuary::sqlite::{
+    SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteReader,
+    SqliteReaderConfig, SqliteSubscription,
+};
+use eventuary::{ConsumerGroupId, Reader, StartFrom};
+
+let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+let store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+let checkpointed = CheckpointReader::new(source, store);
+
+let scope = CheckpointScope::new(
+    ConsumerGroupId::new("orders-projection")?,
+    StreamId::new("orders")?,
+);
+let mut stream = checkpointed
+    .read(CheckpointSubscription::new(
+        SqliteSubscription {
+            start: StartFrom::Earliest,
+            ..SqliteSubscription::default()
+        },
+        scope,
+    ))
+    .await?;
+```
+
+`PartitionedReader` is an in-process lane scheduler. It wraps any reader,
+routes events into logical lanes using deterministic event-key partitioning,
+acks the inner source after accepting a message into a lane, and exposes one
+merged stream. Downstream `ack` clears the lane in-flight slot; downstream
+`nack` requeues the same event at the front of that lane.
 
 ```rust
 use eventuary::io::checkpoint::{CheckpointScope, StreamId};
@@ -153,25 +189,50 @@ use eventuary::sqlite::{
     SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteReader,
     SqliteReaderConfig, SqliteSubscription,
 };
-use eventuary::{ConsumerGroupId, StartFrom};
+use eventuary::{ConsumerGroupId, Reader, StartFrom};
 
-let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
-let partitioned = PartitionedReader::new(source, PartitionedReaderConfig::default());
-let store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
-let checkpointed = CheckpointReader::new(partitioned, store);
-
-let inner = PartitionedSubscription::new(SqliteSubscription {
-    start: StartFrom::Earliest,
-    ..SqliteSubscription::default()
-});
 let scope = CheckpointScope::new(
     ConsumerGroupId::new("orders-projection")?,
     StreamId::new("orders")?,
 );
+let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+let partitioned = PartitionedReader::new(source, PartitionedReaderConfig::default());
+let checkpoint_store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+let checkpointed = CheckpointReader::new(partitioned, checkpoint_store);
+
 let mut stream = checkpointed
-    .read(CheckpointSubscription::new(inner, scope))
+    .read(CheckpointSubscription::new(
+        PartitionedSubscription::new(SqliteSubscription {
+            start: StartFrom::Earliest,
+            ..SqliteSubscription::default()
+        }),
+        scope,
+    ))
     .await?;
 ```
+
+`CheckpointReader` commits checkpoints in contiguous delivered order per
+logical partition. `nack` does not advance the checkpoint. SQL checkpoint
+stores persist the source cursor (`PgCursor` / `SqliteCursor`) and use the
+message cursor's partition metadata as part of the checkpoint key.
+
+## Configurable SQL Relations
+
+Postgres and SQLite can use default table names or configured relation names:
+
+```rust
+use eventuary::postgres::{PgDatabase, PgDatabaseConfig, PgRelationName};
+
+let config = PgDatabaseConfig {
+    events_relation: PgRelationName::new("eventuary.events")?,
+    offsets_relation: PgRelationName::new("eventuary.consumer_offsets")?,
+    ..PgDatabaseConfig::default()
+};
+let db = PgDatabase::connect_with_config(database_url, config).await?;
+```
+
+Relation names are validated and rendered as quoted identifiers, including
+schema-qualified names such as `eventuary.events`.
 
 ## Consumer Loop
 

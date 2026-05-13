@@ -27,7 +27,8 @@ crate** that re-exports everything user-facing:
 3. **Backend crates** that implement those traits over real systems —
    `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
    `eventuary-sqs`, `eventuary-kafka` — plus an `eventuary-conformance`
-   crate with reusable test cases.
+   crate for shared backend conformance types and reusable cases as they
+   are rebuilt for cursor readers.
 
 The top-level `eventuary` crate is an **umbrella facade**: it re-exports
 `eventuary-core` at its root and exposes each backend behind a Cargo
@@ -62,20 +63,20 @@ crates/
 │       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
 │       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
-│       ├── partition.rs    # PartitionKey trait
+│       ├── partition.rs    # PartitionKey, LogicalPartition, CursorPartition, CommitCursor
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
-│       ├── start_from.rs   # StartFrom (Earliest / Latest / Timestamp)
+│       ├── start_from.rs   # StartFrom<C> (Earliest / Latest / Timestamp / After)
 │       ├── serialization.rs # SerializedEvent wire format
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
 │           ├── writer.rs   # Writer trait + DynWriter / BoxWriter / ArcWriter
-│           ├── reader.rs   # Reader trait (assoc Subscription/Acker/Stream)
-│           ├── handler.rs  # Handler + Filter + dyn bridges
-│           ├── message.rs  # Message<A> (event + acker)
+│           ├── reader.rs   # Reader trait (assoc Subscription/Acker/Cursor/Stream)
+│           ├── handler.rs  # Handler + dyn bridges; handlers borrow &Event
+│           ├── message.rs  # Message<A, C> (event + acker + cursor), NoCursor
 │           ├── filters.rs  # Filter trait, EventFilter, AllFilter, TopicFilter, NamespacePrefixFilter
 │           ├── checkpoint.rs # CheckpointStore trait, CheckpointKey/Scope, StreamId
 │           ├── readers/
-│           │   ├── partitioned_reader.rs # PartitionedReader + PartitionedCursor
+│           │   ├── partitioned_reader.rs # PartitionedReader lane scheduler + PartitionedCursor
 │           │   └── checkpoint_reader.rs  # CheckpointReader + CheckpointAcker
 │           ├── acker/
 │           │   ├── noop.rs      # NoopAcker
@@ -86,14 +87,12 @@ crates/
 │               ├── background.rs # BackgroundConsumer + ConsumerHandle
 │               └── retry.rs      # RetryHandler, RetryPolicy, DeadLetterWriter
 │
-├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker
-├── eventuary-sqlite/       # rusqlite (bundled), spawn_blocking, consumer_offsets table
-├── eventuary-postgres/     # sqlx Postgres, consumer_offsets table
-├── eventuary-sqs/          # aws-sdk-sqs, BatchedAcker via SqsFlusher
+├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor
+├── eventuary-sqlite/       # rusqlite source reader/writer + SqliteCheckpointStore
+├── eventuary-postgres/     # sqlx Postgres source reader/writer + PgCheckpointStore
+├── eventuary-sqs/          # aws-sdk-sqs, BatchedAcker via SqsFlusher + NoCursor
 ├── eventuary-kafka/        # rdkafka StreamConsumer, BatchedAcker via KafkaFlusher
-└── eventuary-conformance/  # shared Backend trait + test cases (roundtrip,
-                            #   ack/nack semantics, consumer groups, filters,
-                            #   start_from variants, ordering)
+└── eventuary-conformance/  # direct dev-dep crate for backend conformance scaffolding
 ```
 
 ### Layer Rules
@@ -118,9 +117,11 @@ Key invariants:
   means adding both a `eventuary-<x>` crate and a matching feature in the
   umbrella's `Cargo.toml`.
 
-The conformance suite is exposed only as a **direct sub-crate**
+The conformance crate is exposed only as a **direct sub-crate**
 (`eventuary-conformance`), not re-exported through the umbrella. Backend
 authors add it as a `[dev-dependencies]` entry, alongside `eventuary-core`.
+The reusable case suite is being rebuilt for the cursor-reader API; keep
+backend-specific integration coverage in place while doing that work.
 
 ## Key Patterns
 
@@ -163,7 +164,8 @@ pub trait Writer: Send + Sync {
 pub trait Reader: Send + Sync {
     type Subscription: Send;
     type Acker: Acker;
-    type Stream: Stream<Item = Result<Message<Self::Acker>>> + Send;
+    type Cursor: Send;
+    type Stream: Stream<Item = Result<Message<Self::Acker, Self::Cursor>>> + Send;
     fn read(&self, subscription: Self::Subscription) -> impl Future<Output = Result<Self::Stream>> + Send;
 }
 ```
@@ -174,7 +176,7 @@ For runtime composition / DI, every trait has a `Dyn*` sibling and
 | Static trait | Dyn trait | Boxed alias | Arc alias |
 |--------------|-----------|-------------|-----------|
 | `Writer` | `DynWriter` | `BoxWriter` | `ArcWriter` |
-| `Reader` | `DynReader<S, A>` | `BoxReader<S, A>` | `ArcReader<S, A>` |
+| `Reader` | `DynReader<S, C>` | `BoxReader<S, C>` | `ArcReader<S, C>` |
 | `Handler` | `DynHandler` | `BoxHandler` | `ArcHandler` |
 | `Acker` | `DynAcker` | `BoxAcker` | `ArcAcker` |
 | `Filter` | — | `BoxFilter` | `ArcFilter` |
@@ -185,8 +187,9 @@ Use `WriterExt::into_boxed()` / `into_arced()`, `ReaderExt::into_boxed()` /
 
 `Reader::Subscription` is an associated type so each backend can specialize
 (Kafka has a richer config than memory). `Reader::Cursor` is the matching
-delivery-cursor type — each backend exposes its own (`PgCursor`,
-`SqliteCursor`, `KafkaCursor`, …). Memory and SQS use `NoCursor`.
+delivery-cursor type. SQL source readers expose `PgCursor` / `SqliteCursor`;
+memory, SQS, and Kafka currently deliver `NoCursor` because their native ack
+systems own replay/progress semantics.
 
 ### Subscription Model
 
@@ -261,7 +264,7 @@ preserving the original event plus failure metadata.
   snapshot's `EventId`.
 - `PartitionKey` trait with FNV-1a (u64) implementation on `EventKey`
   for deterministic partition routing (used by Kafka writer for record
-  key → partition selection, and by the runtime partition filter).
+  key → partition selection, and by `PartitionedReader`).
 
 ### Reader Composition (Cursor + Checkpoint + Partitioned)
 
@@ -269,20 +272,29 @@ Backend readers (`PgReader`, `SqliteReader`, etc.) deliver events from a
 single source. Cross-cutting concerns live in generic core wrappers in
 `eventuary-core/src/io/readers/`:
 
-- `PartitionedReader<R>` tags each delivered message with a
-  `LogicalPartition` derived from `partition_for(event, count)`, so
-  downstream consumers can route by lane. The acker is a pass-through.
+- `PartitionedReader<R>` is an in-process lane scheduler. It routes inner
+  messages into `LogicalPartition`s derived from `partition_for(event,
+  count)`, buffers each lane up to `lane_capacity`, acks the inner source
+  after accepting a message into a lane, and exposes one merged stream.
+  Downstream `ack` clears that lane's in-flight slot; downstream `nack`
+  requeues the same event at the front of that lane. Scheduling supports
+  round-robin and queue-depth-weighted modes.
 - `CheckpointReader<R, S>` composes a source reader with a
-  `CheckpointStore`. On `read` it loads the persisted cursor per scope
-  and starts the inner reader with `StartFrom::After(cursor)`. On
-  downstream `ack` it commits the cursor in **contiguous delivered
-  order** per partition (so out-of-order acks do not advance the
-  checkpoint past an unacked predecessor); on `nack` it leaves the
+  `CheckpointStore`. On `read` it loads persisted cursors by
+  `CheckpointScope`, starts the inner reader from the minimum stored
+  cursor with `StartFrom::After(cursor)`, drops already-checkpointed
+  messages per partition, and commits checkpoints only in **contiguous
+  delivered order** per partition. `ack` calls the inner acker first and
+  then commits synchronously so store errors propagate; `nack` leaves the
   checkpoint untouched.
+- `CommitCursor` maps a delivery cursor to the value a checkpoint store
+  persists. Source SQL cursors commit themselves; `PartitionedCursor<C>`
+  strips the partition envelope and commits the inner source cursor while
+  using its `LogicalPartition` in the `CheckpointKey`.
 - `CheckpointStore<C>` is the persistence trait. SQL implementations
   (`PgCheckpointStore`, `SqliteCheckpointStore`) own the
-  `consumer_offsets` table and serialize cursors as JSON, requiring them
-  to encode as a single integer (today's `BIGINT` schema).
+  `consumer_offsets` table and persist today's integer source cursors
+  (`PgCursor` / `SqliteCursor`).
 
 Identity for the checkpoint store is `CheckpointKey { scope: { group,
 stream_id }, partition: Option<LogicalPartition> }`. Unpartitioned
@@ -291,21 +303,13 @@ the default schema columns.
 
 **Backend capability matrix.**
 
-| Backend | source-cursor reader | `CheckpointStore` | `PartitionedReader` composes |
+| Backend | delivery cursor | `CheckpointStore` | Notes |
 |---|---|---|---|
-| `eventuary-postgres` | ✅ `PgReader` | ✅ `PgCheckpointStore` | ✅ |
-| `eventuary-sqlite` | ✅ `SqliteReader` | ✅ `SqliteCheckpointStore` | ✅ |
-| `eventuary-memory` | `NoCursor`, no replay | — | `NoCursor` source cannot be checkpointed |
-| `eventuary-sqs` | `NoCursor` | — | natively partitioned via queue receive |
-| `eventuary-kafka` | `NoCursor` (consumer commits offsets natively) | — | natively partitioned via group coordinator |
-
-**Operator responsibility (pre-coordinator).** Two workers booted with
-the same `(group, checkpoint, partition, partition_count)` tuple will
-both walk the log and double-process events; the `EXCLUDED.sequence >
-consumer_offsets.sequence` guard keeps the checkpoint monotonic but
-nothing prevents the wasted work. Each reader logs the tuple at
-`tracing::info!` on spawn so duplicates are greppable. A PG advisory-
-lock coordinator is a future plan.
+| `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<PgCursor>` | composes with `PartitionedReader` + `CheckpointReader` |
+| `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<SqliteCursor>` | composes with `PartitionedReader` + `CheckpointReader` |
+| `eventuary-memory` | `NoCursor` | — | mpsc source; no replay/checkpoint semantics |
+| `eventuary-sqs` | `NoCursor` | — | queue visibility/delete is the native progress model |
+| `eventuary-kafka` | `NoCursor` | — | consumer group commits are the native progress model |
 
 ### Error Model
 
@@ -348,24 +352,39 @@ behavior directly.
 
 - Bundled rusqlite (`features = ["bundled-full"]`). No external runtime.
 - All DB ops wrapped in `tokio::task::spawn_blocking`.
-- `consumer_offsets(organization, consumer_group_id, stream, sequence)` table.
-- `Either<NoopAcker, OnceAcker<SqliteAcker>>` — `OnceAcker` when a group
-  is set, `NoopAcker` otherwise.
+- `SqliteReader` is a source reader over the configured events relation.
+  It returns `Message<SqliteCursorAcker, SqliteCursor>` and only tracks
+  cursor progress in memory for the active stream.
+- `SqliteCheckpointStore<SqliteCursor>` owns the configured offsets
+  relation and persists checkpoints by `(consumer_group_id, stream_id,
+  partition, partition_count)` semantics.
+- `SqliteDatabaseConfig`, `SqliteReaderConfig`, `SqliteWriterConfig`, and
+  `SqliteCheckpointStoreConfig` all support validated relation names.
 - Polling reader: `batch_size` + `poll_interval`.
 
 ### postgres
 
 - `sqlx` with `runtime-tokio`. `pgvector` not required (that's an orchy concern).
-- Same `consumer_offsets` schema and Either-acker shape as sqlite.
-- Integration tests use `testcontainers` with `postgres:16`.
+- `PgReader` is a source reader over the configured events relation. It
+  returns `Message<PgCursorAcker, PgCursor>` and only tracks cursor
+  progress in memory for the active stream.
+- `PgCheckpointStore<PgCursor>` owns the configured offsets relation and
+  persists checkpoints by `(consumer_group_id, stream_id, partition,
+  partition_count)` semantics.
+- `PgDatabaseConfig`, `PgReaderConfig`, `PgWriterConfig`, and
+  `PgCheckpointStoreConfig` all support validated simple or
+  schema-qualified relation names.
+- Integration tests use `testcontainers` with `postgres:18-alpine`.
 
 ### sqs
 
 - `aws-sdk-sqs` long-polling (`wait_time_seconds`). Max 10 messages per
   receive (SQS limit, enforced in `validate()`).
+- `SqsSubscription` carries queue URL, wait time, visibility timeout, max
+  message count, `EventFilter`, and optional limit.
 - `BatchedAcker<String>` token = receipt handle. `SqsFlusher` -> batch
   `DeleteMessageBatch` (10 per call).
-- Only `StartFrom::Latest` is honored (queue semantics — no seek).
+- Queue semantics: no seek/replay cursor; delivered cursor is `NoCursor`.
 - Localstack via `testcontainers`.
 
 ### kafka
@@ -504,6 +523,12 @@ Worth knowing when changing the codebase:
   backends own only their `consumer_offsets` table via
   `PgCheckpointStore` / `SqliteCheckpointStore`; the checkpoint key is
   `{ scope: { group, stream_id }, partition: Option<LogicalPartition> }`.
+  `CommitCursor` lets wrappers deliver enriched cursors while checkpoint
+  stores persist source-native cursors.
+- **Validated SQL relation names.** PostgreSQL and SQLite configs accept
+  simple names (`events`) or schema-qualified names (`eventuary.events`)
+  where supported. Always render through `PgRelationName` /
+  `SqliteRelationName`; never interpolate unchecked relation strings.
 - **`Snapshot` blanket impl** over `Serialize + DeserializeOwned +
   SnapshotEventId`. Aggregates only need to implement the marker
   `SnapshotEventId` to get JSON snapshotting for free.
