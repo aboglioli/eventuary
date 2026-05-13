@@ -77,10 +77,6 @@ pub fn render_schema_sql(config: &PgDatabaseConfig) -> String {
         if !sql.ends_with('\n') {
             sql.push('\n');
         }
-        sql.push_str(&format!(
-            "INSERT INTO schema_migrations (version) VALUES ({}) ON CONFLICT (version) DO NOTHING;\n",
-            migration.version()
-        ));
     }
     sql
 }
@@ -162,51 +158,19 @@ async fn apply_migrations(pool: &PgPool, config: &PgDatabaseConfig) -> Result<()
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
     }
-    ensure_schema_migrations(pool).await?;
-    let version = current_schema_version(pool).await?;
+    // Every statement in the rendered migration is `CREATE TABLE IF NOT
+    // EXISTS` / `CREATE INDEX IF NOT EXISTS` / `ALTER TABLE ... IF NOT
+    // EXISTS`, so it is safe to apply unconditionally on every connect.
+    // This avoids skipping configured-relation creation when an earlier
+    // process recorded a global migration version under different
+    // relation names.
     for migration in migrations() {
-        let migration_version = migration.version();
-        if migration_version <= version {
-            continue;
-        }
         let sql = render_migration_sql(migration, config);
         sqlx::raw_sql(&sql)
             .execute(pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
-        record_migration(pool, migration_version).await?;
     }
-    Ok(())
-}
-
-async fn ensure_schema_migrations(pool: &PgPool) -> Result<()> {
-    sqlx::raw_sql(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| Error::Store(e.to_string()))?;
-    Ok(())
-}
-
-async fn current_schema_version(pool: &PgPool) -> Result<i64> {
-    let version: Option<i64> = sqlx::query_scalar(
-        "SELECT version::bigint FROM schema_migrations ORDER BY version DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| Error::Store(e.to_string()))?;
-    Ok(version.unwrap_or(0))
-}
-
-async fn record_migration(pool: &PgPool, version: i64) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
-    )
-    .bind(version)
-    .execute(pool)
-    .await
-    .map_err(|e| Error::Store(e.to_string()))?;
     Ok(())
 }
 
@@ -230,8 +194,8 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"consumer_offsets\""));
         assert!(sql.contains("parent_id UUID"));
         assert!(sql.contains("event_key TEXT"));
-        assert!(sql.contains("checkpoint_name"));
-        assert!(sql.contains("INSERT INTO schema_migrations (version) VALUES (1)"));
+        assert!(sql.contains("stream_id"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"events\""));
     }
 
     #[test]

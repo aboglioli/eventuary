@@ -22,16 +22,11 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON {events} (timestamp);
 
 CREATE TABLE IF NOT EXISTS {offsets} (
     consumer_group_id TEXT    NOT NULL,
-    checkpoint_name   TEXT    NOT NULL DEFAULT 'default',
+    stream_id   TEXT    NOT NULL DEFAULT 'default',
     partition         INTEGER NOT NULL DEFAULT 0,
     partition_count   INTEGER NOT NULL DEFAULT 1,
     sequence          BIGINT  NOT NULL,
-    PRIMARY KEY (consumer_group_id, checkpoint_name, partition, partition_count)
-);
-
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    PRIMARY KEY (consumer_group_id, stream_id, partition, partition_count)
 );
 
 ALTER TABLE {events} ADD COLUMN IF NOT EXISTS parent_id UUID;

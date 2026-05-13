@@ -60,7 +60,6 @@ pub fn render_schema_sql(config: &SqliteDatabaseConfig) -> String {
         if !sql.ends_with('\n') {
             sql.push('\n');
         }
-        sql.push_str(&format!("PRAGMA user_version = {};\n", migration.version()));
     }
     sql
 }
@@ -117,24 +116,17 @@ impl SqliteDatabase {
 }
 
 fn apply_migrations(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<()> {
-    let version = current_schema_version(conn)?;
+    // Every statement in the rendered migration is `CREATE TABLE IF NOT
+    // EXISTS` / `CREATE INDEX IF NOT EXISTS`, so applying every migration
+    // on every open is safe and avoids skipping configured-relation
+    // creation when the previous opener wrote `PRAGMA user_version`
+    // against a different relation pair.
     for migration in migrations() {
-        let migration_version = migration.version();
-        if migration_version <= version {
-            continue;
-        }
         let sql = render_migration_sql(migration, config);
         conn.execute_batch(&sql)
             .map_err(|e| Error::Store(e.to_string()))?;
-        conn.pragma_update(None, "user_version", migration_version)
-            .map_err(|e| Error::Store(e.to_string()))?;
     }
     Ok(())
-}
-
-fn current_schema_version(conn: &Connection) -> Result<i64> {
-    conn.pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|e| Error::Store(e.to_string()))
 }
 
 fn migration_version(filename: &str) -> i64 {
@@ -163,10 +155,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
-        let version: i64 = guard
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 1);
     }
 
     #[test]
@@ -183,7 +171,35 @@ mod tests {
         let sql = schema_sql();
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"events\""));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"consumer_offsets\""));
-        assert!(sql.contains("PRAGMA user_version = 1"));
+    }
+
+    #[test]
+    fn opens_idempotently_with_alternate_relations_after_default_relations() {
+        // First, open with default relations so `events` + `consumer_offsets` exist.
+        let db = SqliteDatabase::open_in_memory().unwrap();
+        let conn = db.conn();
+
+        // Reuse the same connection with a custom relation pair. The
+        // alternate tables must be created, not skipped by a global
+        // migration version.
+        let alt = SqliteDatabaseConfig {
+            events_relation: SqliteRelationName::new("alt_events").unwrap(),
+            offsets_relation: SqliteRelationName::new("alt_offsets").unwrap(),
+        };
+        let sql = render_migration_sql(&migrations()[0], &alt);
+        {
+            let guard = conn.lock().unwrap();
+            guard.execute_batch(&sql).unwrap();
+        }
+        let guard = conn.lock().unwrap();
+        let alt_count: i64 = guard
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('alt_events', 'alt_offsets')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alt_count, 2, "alternate relations must be created");
     }
 
     #[test]

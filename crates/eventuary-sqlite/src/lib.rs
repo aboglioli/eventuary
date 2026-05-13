@@ -2,7 +2,7 @@
 //!
 //! Append-only events table with auto-incrementing sequence. Reader streams
 //! events in sequence order and supports consumer groups via a
-//! `consumer_offsets` table scoped by `(consumer_group_id, checkpoint_name,
+//! `consumer_offsets` table scoped by `(consumer_group_id, stream_id,
 //! partition, partition_count)`.
 //!
 //! ack advances the checkpoint, nack leaves it unchanged. SQLite work runs in
