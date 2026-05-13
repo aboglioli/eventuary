@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::partition::{PartitionKey, fnv1a_u64};
+use crate::partition::fnv1a_u64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -27,6 +27,11 @@ impl EventKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Stable partition id in `0..total_partitions` derived from the key bytes.
+    pub fn partition(&self, total_partitions: NonZeroU32) -> u32 {
+        (fnv1a_u64(self.0.as_bytes()) % u64::from(total_partitions.get())) as u32
+    }
 }
 
 impl fmt::Display for EventKey {
@@ -45,12 +50,6 @@ impl TryFrom<String> for EventKey {
 impl From<EventKey> for String {
     fn from(k: EventKey) -> Self {
         k.0
-    }
-}
-
-impl PartitionKey for EventKey {
-    fn partition(&self, total_partitions: NonZeroU32) -> u32 {
-        (fnv1a_u64(self.0.as_bytes()) % u64::from(total_partitions.get())) as u32
     }
 }
 

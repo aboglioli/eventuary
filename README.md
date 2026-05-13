@@ -71,8 +71,8 @@ let event = Event::builder(
 - `Namespace` — slash-rooted hierarchy: `/`, `/billing`, `/billing/invoices`.
 - `OrganizationId` — tenant scope; `_platform` sentinel for cross-tenant.
 - `EventKey` — non-empty flexible identifier (≤1024 chars) used for optional
-  event keys, correlation IDs, and causation IDs. Implements `PartitionKey`
-  via FNV-1a for deterministic partition routing.
+  event keys, correlation IDs, and causation IDs. Exposes a `partition`
+  method using FNV-1a for deterministic partition routing.
 - `Metadata` — validated key/value pairs.
 - `SerializedEvent` — wire format with `to_json_value` / `from_json_value` /
   `to_json_string` / `from_json_str` / `from_json_slice` helpers used by
