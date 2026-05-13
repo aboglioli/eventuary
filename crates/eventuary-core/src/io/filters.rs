@@ -156,12 +156,12 @@ impl EventFilter {
             return false;
         }
         if let Some(topics) = self.topics.as_ref()
-            && !topics.iter().any(|p| p.matches(event.topic()))
+            && !topics.iter().any(|p| p.matches_topic(event.topic()))
         {
             return false;
         }
         if let Some(namespace) = self.namespace.as_ref()
-            && !namespace.matches(event.namespace())
+            && !namespace.matches_namespace(event.namespace())
         {
             return false;
         }
