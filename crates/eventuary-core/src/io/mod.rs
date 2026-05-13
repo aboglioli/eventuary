@@ -15,7 +15,8 @@ pub use consumers::{
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
 };
 pub use filters::{
-    AllFilter, ArcFilter, BoxFilter, Filter, FilterExt, NamespacePrefixFilter, TopicFilter,
+    AllFilter, ArcFilter, BoxFilter, EventFilter, Filter, FilterExt, NamespacePrefixFilter,
+    TopicFilter,
 };
 pub use handler::{ArcHandler, BoxHandler, DynHandler, FilteredHandler, Handler, HandlerExt};
 pub use message::{Message, NoCursor};

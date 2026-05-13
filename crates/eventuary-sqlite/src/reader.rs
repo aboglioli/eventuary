@@ -162,7 +162,7 @@ fn subscription_from_config(config: &SqliteReaderConfig) -> EventSubscription {
         subscription.topics = Some(config.topics.clone());
     }
     subscription.namespace_prefix = config.namespace.clone();
-    subscription.start_from = config.start_from;
+    subscription.start_from = config.start_from.clone();
     subscription
 }
 
@@ -177,7 +177,7 @@ fn apply_subscription(config: &mut SqliteReaderConfig, subscription: &EventSubsc
     if let Some(checkpoint_name) = subscription.checkpoint_name.as_ref() {
         config.checkpoint_name = checkpoint_name.clone();
     }
-    config.start_from = subscription.start_from;
+    config.start_from = subscription.start_from.clone();
 }
 
 impl Reader for SqliteReader {
@@ -348,7 +348,11 @@ fn resolve_initial_position(
             return Ok((s, None));
         }
     }
-    match config.start_from {
+    match config.start_from.clone() {
+        StartFrom::After(_) => Err(Error::Config(
+            "StartFrom::After not supported by legacy SqliteReader; use CheckpointReader"
+                .to_owned(),
+        )),
         StartFrom::Earliest => Ok((0, None)),
         StartFrom::Latest => {
             let sql = match config.organization.as_ref() {

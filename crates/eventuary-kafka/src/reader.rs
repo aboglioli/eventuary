@@ -38,9 +38,9 @@ impl KafkaReader {
             )
             .set(
                 "auto.offset.reset",
-                match config.start_from {
+                match &config.start_from {
                     StartFrom::Earliest => "earliest",
-                    StartFrom::Latest | StartFrom::Timestamp(_) => "latest",
+                    StartFrom::Latest | StartFrom::Timestamp(_) | StartFrom::After(_) => "latest",
                 },
             );
         let consumer: StreamConsumer = cfg.create().map_err(|e| Error::Store(e.to_string()))?;
@@ -50,8 +50,8 @@ impl KafkaReader {
             .subscribe(&topic_refs)
             .map_err(|e| Error::Store(e.to_string()))?;
 
-        if let StartFrom::Timestamp(ts) = config.start_from {
-            apply_timestamp_seek(&consumer, &config, ts)?;
+        if let StartFrom::Timestamp(ts) = &config.start_from {
+            apply_timestamp_seek(&consumer, &config, *ts)?;
         }
 
         Ok(Self {
@@ -72,7 +72,7 @@ impl KafkaReader {
         subscription.consumer_group_id = Some(self.config.consumer_group_id.clone());
         subscription.topics = self.config.event_topics.clone();
         subscription.namespace_prefix = self.config.namespace.clone();
-        subscription.start_from = self.config.start_from;
+        subscription.start_from = self.config.start_from.clone();
         subscription.end_at = self.config.end_at;
         subscription.limit = self.config.limit;
         subscription

@@ -148,7 +148,7 @@ fn subscription_from_config(config: &PgReaderConfig) -> EventSubscription {
         subscription.topics = Some(config.topics.clone());
     }
     subscription.namespace_prefix = config.namespace.clone();
-    subscription.start_from = config.start_from;
+    subscription.start_from = config.start_from.clone();
     subscription
 }
 
@@ -163,7 +163,7 @@ fn apply_subscription(config: &mut PgReaderConfig, subscription: &EventSubscript
     if let Some(checkpoint_name) = subscription.checkpoint_name.as_ref() {
         config.checkpoint_name = checkpoint_name.clone();
     }
-    config.start_from = subscription.start_from;
+    config.start_from = subscription.start_from.clone();
 }
 
 impl Reader for PgReader {
@@ -306,7 +306,10 @@ async fn resolve_initial_position(
             return Ok((r.get::<i64, _>("sequence"), None));
         }
     }
-    match config.start_from {
+    match config.start_from.clone() {
+        StartFrom::After(_) => Err(Error::Config(
+            "StartFrom::After not supported by legacy PgReader; use CheckpointReader".to_owned(),
+        )),
         StartFrom::Earliest => Ok((0, None)),
         StartFrom::Latest => {
             let row = match config.organization.as_ref() {

@@ -1,8 +1,15 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use crate::event::Event;
+use crate::event_key::EventKey;
+use crate::metadata::Metadata;
 use crate::namespace::Namespace;
+use crate::namespace_pattern::NamespacePattern;
+use crate::organization::OrganizationId;
 use crate::topic::Topic;
+use crate::topic_pattern::TopicPattern;
 
 pub trait Filter: Send + Sync {
     fn matches(&self, event: &Event) -> bool;
@@ -72,6 +79,74 @@ impl NamespacePrefixFilter {
 impl Filter for NamespacePrefixFilter {
     fn matches(&self, event: &Event) -> bool {
         event.namespace().starts_with(&self.prefix)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EventFilter {
+    pub organization: Option<OrganizationId>,
+    pub topics: Option<Vec<TopicPattern>>,
+    pub namespace: Option<NamespacePattern>,
+    pub keys: Option<Vec<EventKey>>,
+    pub metadata: Option<Metadata>,
+    pub end_at: Option<DateTime<Utc>>,
+}
+
+impl EventFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn for_organization(organization: OrganizationId) -> Self {
+        Self {
+            organization: Some(organization),
+            ..Self::default()
+        }
+    }
+
+    pub fn matches(&self, event: &Event) -> bool {
+        if let Some(organization) = self.organization.as_ref()
+            && event.organization() != organization
+        {
+            return false;
+        }
+        if let Some(topics) = self.topics.as_ref()
+            && !topics.iter().any(|p| p.matches(event.topic()))
+        {
+            return false;
+        }
+        if let Some(namespace) = self.namespace.as_ref()
+            && !namespace.matches(event.namespace())
+        {
+            return false;
+        }
+        if let Some(keys) = self.keys.as_ref()
+            && !event
+                .key()
+                .is_some_and(|event_key| keys.iter().any(|key| key == event_key))
+        {
+            return false;
+        }
+        if let Some(metadata) = self.metadata.as_ref()
+            && !metadata
+                .as_map()
+                .iter()
+                .all(|(key, value)| event.metadata().get(key) == Some(value.as_str()))
+        {
+            return false;
+        }
+        if let Some(end_at) = self.end_at
+            && event.timestamp() > end_at
+        {
+            return false;
+        }
+        true
+    }
+}
+
+impl Filter for EventFilter {
+    fn matches(&self, event: &Event) -> bool {
+        EventFilter::matches(self, event)
     }
 }
 

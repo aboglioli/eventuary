@@ -42,7 +42,7 @@ impl SqsReader {
             subscription.topics = Some(self.config.topics.clone());
         }
         subscription.namespace_prefix = self.config.namespace.clone();
-        subscription.start_from = self.config.start_from;
+        subscription.start_from = self.config.start_from.clone();
         subscription.end_at = self.config.end_at;
         subscription.limit = self.config.limit;
         subscription

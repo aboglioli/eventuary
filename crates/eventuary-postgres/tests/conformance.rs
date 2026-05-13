@@ -55,7 +55,7 @@ impl PostgresBackend {
             topics: request.topics.clone(),
             consumer_group_id: request.consumer_group_id.clone(),
             checkpoint_name: request.checkpoint_name.clone(),
-            start_from: request.start_from,
+            start_from: request.start_from.clone(),
             poll_interval: request.poll_interval,
             batch_size: 10,
         }
@@ -72,7 +72,7 @@ impl PostgresBackend {
             subscription.topics = Some(request.topics.clone());
         }
         subscription.namespace_prefix = request.namespace.clone();
-        subscription.start_from = request.start_from;
+        subscription.start_from = request.start_from.clone();
         subscription.partition = request.partition;
         subscription
     }
