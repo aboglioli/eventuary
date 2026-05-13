@@ -295,16 +295,15 @@ where
                 let lane_id = partition_for(msg.event(), count_u32) as usize;
                 let mut msg_holder = Some(msg);
                 loop {
-                    let mut lanes = intake_state.lock().await;
-                    let lane = &mut lanes.lanes[lane_id];
+                    let lanes = intake_state.lock().await;
+                    let lane = &lanes.lanes[lane_id];
                     if lane.queue.len() < lane.capacity {
+                        drop(lanes);
                         let msg = msg_holder.take().expect("msg present");
                         let (event, inner_acker, cursor) = msg.into_parts();
-                        lane.queue.push_back(BufferedItem {
-                            event: event.clone(),
-                            cursor,
-                        });
-                        drop(lanes);
+                        // Ack inner source FIRST so a failure terminates
+                        // the stream before the event becomes downstream-
+                        // visible via a lane buffer.
                         if let Err(e) = inner_acker.ack().await {
                             let _ = intake_tx
                                 .send(Err(Error::Store(format!(
@@ -313,6 +312,11 @@ where
                                 .await;
                             return;
                         }
+                        let mut lanes = intake_state.lock().await;
+                        lanes.lanes[lane_id]
+                            .queue
+                            .push_back(BufferedItem { event, cursor });
+                        drop(lanes);
                         intake_notify.notify_waiters();
                         break;
                     }
@@ -669,6 +673,34 @@ mod tests {
             first.is_err(),
             "inner ack failure must surface as stream error"
         );
+    }
+
+    #[tokio::test]
+    async fn partitioned_reader_does_not_deliver_event_whose_inner_ack_failed() {
+        // After inner ack fails, the failed event must never be visible
+        // downstream — the stream must yield exactly the error and then
+        // terminate.
+        let reader = FailingAckReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0"), ev("k1")])),
+        };
+        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(first.is_err(), "expected stream error on inner ack failure");
+        // Stream must terminate now (intake aborted); no event should
+        // ever be delivered.
+        let end = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        match end {
+            Ok(None) => {}
+            Ok(Some(Err(_))) => {}
+            Ok(Some(Ok(_))) => {
+                panic!("event leaked downstream after inner ack failure");
+            }
+            Err(_) => panic!("stream did not terminate after inner ack failure"),
+        }
     }
 
     #[tokio::test]
