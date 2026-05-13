@@ -1,19 +1,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::error::{Error, Result};
-use crate::io::{Filter, Handler, Reader};
+use crate::io::{Handler, Reader};
 
 pub struct BackgroundConsumer<R: Reader, H: Handler> {
     reader: R,
     subscription: R::Subscription,
     handler: Arc<H>,
-    filter: Option<Arc<dyn Filter>>,
     concurrency: usize,
+    batch_size: usize,
     handler_timeout: Option<Duration>,
 }
 
@@ -30,14 +30,14 @@ where
             reader,
             subscription,
             handler: Arc::new(handler),
-            filter: None,
             concurrency,
+            batch_size: concurrency,
             handler_timeout: None,
         }
     }
 
-    pub fn with_filter<F: Filter + 'static>(mut self, filter: F) -> Self {
-        self.filter = Some(Arc::new(filter));
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.max(1);
         self
     }
 
@@ -56,60 +56,76 @@ where
     }
 
     async fn run(self, cancel: CancellationToken, tracker: TaskTracker) -> Result<()> {
-        let stream = self.reader.read(self.subscription).await?;
+        let mut stream = Box::pin(self.reader.read(self.subscription).await?);
         let handler = Arc::clone(&self.handler);
-        let filter = self.filter.as_ref().map(Arc::clone);
         let timeout = self.handler_timeout;
         let concurrency = self.concurrency;
-        let cancel_for_take = cancel.clone();
+        let batch_size = self.batch_size;
 
-        stream
-            .take_until(async move { cancel_for_take.cancelled().await })
-            .for_each_concurrent(concurrency, |msg_result| {
-                let handler = Arc::clone(&handler);
-                let filter = filter.as_ref().map(Arc::clone);
-                let tracker = tracker.clone();
-                async move {
-                    let task = tracker.spawn(async move {
-                        let msg = match msg_result {
-                            Err(e) => {
-                                tracing::error!("reader stream error: {e}");
-                                return;
-                            }
-                            Ok(m) => m,
-                        };
-                        if let Some(f) = &filter
-                            && !f.matches(msg.event())
-                        {
-                            let _ = msg.ack().await;
-                            return;
-                        }
-                        let result = match timeout {
-                            Some(d) => {
-                                match tokio::time::timeout(d, handler.handle(msg.event())).await {
-                                    Ok(r) => r,
-                                    Err(_) => Err(Error::Timeout(format!(
-                                        "handler {} timed out",
-                                        handler.id()
-                                    ))),
+        loop {
+            let first = {
+                let mut s = stream.as_mut();
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    item = s.next() => item,
+                }
+            };
+            let Some(first) = first else {
+                break;
+            };
+
+            let mut batch = Vec::with_capacity(batch_size);
+            batch.push(first);
+            while batch.len() < batch_size {
+                let mut s = stream.as_mut();
+                match s.next().now_or_never() {
+                    Some(Some(item)) => batch.push(item),
+                    Some(None) | None => break,
+                }
+            }
+
+            futures::stream::iter(batch)
+                .for_each_concurrent(concurrency, |msg_result| {
+                    let handler = Arc::clone(&handler);
+                    let tracker = tracker.clone();
+                    async move {
+                        let task = tracker.spawn(async move {
+                            let msg = match msg_result {
+                                Err(e) => {
+                                    tracing::error!("reader stream error: {e}");
+                                    return;
+                                }
+                                Ok(m) => m,
+                            };
+                            let result = match timeout {
+                                Some(d) => {
+                                    match tokio::time::timeout(d, handler.handle(msg.event())).await
+                                    {
+                                        Ok(r) => r,
+                                        Err(_) => Err(Error::Timeout(format!(
+                                            "handler {} timed out",
+                                            handler.id()
+                                        ))),
+                                    }
+                                }
+                                None => handler.handle(msg.event()).await,
+                            };
+                            match result {
+                                Ok(()) => {
+                                    let _ = msg.ack().await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("handler {} error: {e}", handler.id());
+                                    let _ = msg.nack().await;
                                 }
                             }
-                            None => handler.handle(msg.event()).await,
-                        };
-                        match result {
-                            Ok(()) => {
-                                let _ = msg.ack().await;
-                            }
-                            Err(e) => {
-                                tracing::warn!("handler {} error: {e}", handler.id());
-                                let _ = msg.nack().await;
-                            }
-                        }
-                    });
-                    let _ = task.await;
-                }
-            })
-            .await;
+                        });
+                        let _ = task.await;
+                    }
+                })
+                .await;
+        }
+
         tracker.close();
         tracker.wait().await;
         Ok(())
@@ -232,22 +248,8 @@ mod tests {
         .unwrap()
     }
 
-    struct AllowAll;
-    impl Filter for AllowAll {
-        fn matches(&self, _: &Event) -> bool {
-            true
-        }
-    }
-
     fn subscription() -> TestSub {
         TestSub
-    }
-
-    struct AllowNothing;
-    impl Filter for AllowNothing {
-        fn matches(&self, _: &Event) -> bool {
-            false
-        }
     }
 
     #[tokio::test]
@@ -269,25 +271,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filter_skip_does_not_invoke_handler() {
-        let events: Vec<Event> = (0..3).map(make_event).collect();
-        let count = Arc::new(AtomicUsize::new(0));
-        let consumer = BackgroundConsumer::new(
-            VecReader::new(events),
-            subscription(),
-            CountingHandler {
-                id: "h".into(),
-                count: Arc::clone(&count),
-            },
-            1,
-        )
-        .with_filter(AllowNothing);
-        let handle = consumer.spawn();
-        handle.shutdown().await.unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
     async fn handler_error_is_reported_via_nack() {
         let events: Vec<Event> = (0..2).map(make_event).collect();
         let count = Arc::new(AtomicUsize::new(0));
@@ -299,8 +282,7 @@ mod tests {
                 count: Arc::clone(&count),
             },
             1,
-        )
-        .with_filter(AllowAll);
+        );
         let handle = consumer.spawn();
         handle.shutdown().await.unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 2);
@@ -324,5 +306,24 @@ mod tests {
                 .with_handler_timeout(Duration::from_millis(20));
         let handle = consumer.spawn();
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn processes_messages_in_opportunistic_batches() {
+        let events: Vec<Event> = (0..4).map(make_event).collect();
+        let count = Arc::new(AtomicUsize::new(0));
+        let consumer = BackgroundConsumer::new(
+            VecReader::new(events),
+            subscription(),
+            CountingHandler {
+                id: "h".into(),
+                count: Arc::clone(&count),
+            },
+            2,
+        )
+        .with_batch_size(3);
+        let handle = consumer.spawn();
+        handle.shutdown().await.unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 4);
     }
 }
