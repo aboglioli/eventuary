@@ -24,6 +24,7 @@ use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use futures::{Stream, StreamExt};
@@ -262,10 +263,26 @@ where
             Result<Message<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>>,
         >(64);
 
+        let intake_done = Arc::new(AtomicBool::new(false));
         let intake_state = Arc::clone(&state);
         let intake_notify = Arc::clone(&notify);
         let intake_tx = tx.clone();
+        let intake_done_for_task = Arc::clone(&intake_done);
         let intake_handle = tokio::spawn(async move {
+            struct DoneGuard {
+                done: Arc<AtomicBool>,
+                notify: Arc<Notify>,
+            }
+            impl Drop for DoneGuard {
+                fn drop(&mut self) {
+                    self.done.store(true, Ordering::SeqCst);
+                    self.notify.notify_waiters();
+                }
+            }
+            let _done_guard = DoneGuard {
+                done: Arc::clone(&intake_done_for_task),
+                notify: Arc::clone(&intake_notify),
+            };
             let mut inner_stream = Box::pin(inner_stream);
             while let Some(item) = inner_stream.next().await {
                 let msg = match item {
@@ -288,7 +305,14 @@ where
                             cursor,
                         });
                         drop(lanes);
-                        let _ = inner_acker.ack().await;
+                        if let Err(e) = inner_acker.ack().await {
+                            let _ = intake_tx
+                                .send(Err(Error::Store(format!(
+                                    "partitioned reader: inner acker failed: {e}"
+                                ))))
+                                .await;
+                            return;
+                        }
                         intake_notify.notify_waiters();
                         break;
                     }
@@ -416,6 +440,17 @@ where
                     None => {
                         if emit_tx.is_closed() {
                             return;
+                        }
+                        if intake_done.load(Ordering::SeqCst) {
+                            let lanes = emit_state.lock().await;
+                            let drained = lanes
+                                .lanes
+                                .iter()
+                                .all(|l| l.queue.is_empty() && l.in_flight.is_none());
+                            drop(lanes);
+                            if drained {
+                                return;
+                            }
                         }
                         emit_notify.notified().await;
                     }
@@ -561,6 +596,124 @@ mod tests {
             "nacked event was not re-emitted at head of its lane"
         );
         second.ack().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partitioned_reader_terminates_after_inner_stream_ends() {
+        let events: Vec<Event> = (0..4).map(|i| ev(&format!("k{i}"))).collect();
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+        let mut delivered = 0usize;
+        while delivered < 4 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            msg.ack().await.unwrap();
+            delivered += 1;
+        }
+        // After all events delivered and acked, stream must end, not hang.
+        let end = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+        match end {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("expected stream end after inner exhausted, got extra message"),
+            Err(_) => panic!("stream did not terminate after inner exhausted"),
+        }
+    }
+
+    struct FailingAcker;
+    impl Acker for FailingAcker {
+        async fn ack(&self) -> Result<()> {
+            Err(Error::Store("intake ack failure".into()))
+        }
+        async fn nack(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingAckReader {
+        events: std::sync::Mutex<Option<Vec<Event>>>,
+    }
+    impl Reader for FailingAckReader {
+        type Subscription = ();
+        type Acker = FailingAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<FailingAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let events = self.events.lock().unwrap().take().unwrap();
+            let iter = events
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| Ok(Message::new(e, FailingAcker, TestCursor(i as i64 + 1))));
+            Ok(Box::pin(futures::stream::iter(iter)))
+        }
+    }
+
+    #[tokio::test]
+    async fn partitioned_reader_surfaces_inner_ack_error() {
+        let reader = FailingAckReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+        };
+        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            first.is_err(),
+            "inner ack failure must surface as stream error"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_depth_weighted_scheduler_services_hot_lanes_without_starving_cold_lanes() {
+        // 32 events to a hot key + 1 event to a cold key. With burst=8,
+        // hot lane should serve 8 in a row, then the cold lane must get
+        // its turn before hot resumes.
+        let mut events: Vec<Event> = (0..32).map(|_| ev("hot")).collect();
+        events.push(ev("cold"));
+        // shuffle so cold isn't at the end naturally
+        // (intake order doesn't matter for lane assignment — both go to
+        // their own deterministic lane).
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let cfg = PartitionedReaderConfig {
+            partition_count: NonZeroU16::new(4).unwrap(),
+            lane_capacity: NonZeroUsize::new(64).unwrap(),
+            scheduling: LaneScheduling::QueueDepthWeighted {
+                max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
+            },
+        };
+        let p = PartitionedReader::new(reader, cfg);
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+        let mut order: Vec<String> = Vec::new();
+        for _ in 0..33 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            order.push(msg.event().key().unwrap().as_str().to_owned());
+            msg.ack().await.unwrap();
+        }
+        let cold_pos = order
+            .iter()
+            .position(|k| k == "cold")
+            .expect("cold delivered");
+        // cold lane has 1 event, must be served within max_burst_per_lane
+        // (8) deliveries from when both lanes are ready — at the latest
+        // within the first 16 deliveries (one hot burst + cold).
+        assert!(
+            cold_pos < 16,
+            "cold lane starved: cold delivered at position {cold_pos}, order={order:?}"
+        );
     }
 
     #[tokio::test]
