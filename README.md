@@ -108,8 +108,9 @@ eventuary = { version = "0.1.0-alpha.0", features = ["memory"] }
 ```
 
 ```rust
-use eventuary::memory::{InmemReader, InmemWriter};
-use eventuary::{Event, EventSubscription, OrganizationId, Payload, Reader, Writer};
+use eventuary::io::EventFilter;
+use eventuary::memory::{InmemReader, InmemWriter, MemorySubscription};
+use eventuary::{Event, OrganizationId, Payload, Reader, Writer};
 use tokio::sync::mpsc;
 
 let (tx, rx) = mpsc::channel(100);
@@ -127,8 +128,49 @@ let event = Event::builder(
 
 writer.write(&event).await?;
 
-let subscription = EventSubscription::new(OrganizationId::new("acme")?);
+let subscription = MemorySubscription {
+    filter: EventFilter::for_organization(OrganizationId::new("acme")?),
+    limit: None,
+};
 let mut stream = reader.read(subscription).await?;
+```
+
+## Cursor + Checkpoint Composition
+
+Backend readers (e.g. `PgReader`, `SqliteReader`) deliver
+`Message<Acker, Cursor>` from the event log only — they do not persist
+consumer progress. Progress lives in a `CheckpointStore`; partition
+fanout lives in `PartitionedReader`. Composers are generic and live in
+`eventuary-core`:
+
+```rust
+use eventuary::io::checkpoint::{CheckpointScope, StreamId};
+use eventuary::io::readers::{
+    CheckpointReader, CheckpointSubscription, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription,
+};
+use eventuary::sqlite::{
+    SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteReader,
+    SqliteReaderConfig, SqliteSubscription,
+};
+use eventuary::{ConsumerGroupId, StartFrom};
+
+let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+let partitioned = PartitionedReader::new(source, PartitionedReaderConfig::default());
+let store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+let checkpointed = CheckpointReader::new(partitioned, store);
+
+let inner = PartitionedSubscription::new(SqliteSubscription {
+    start: StartFrom::Earliest,
+    ..SqliteSubscription::default()
+});
+let scope = CheckpointScope::new(
+    ConsumerGroupId::new("orders-projection")?,
+    StreamId::new("orders")?,
+);
+let mut stream = checkpointed
+    .read(CheckpointSubscription::new(inner, scope))
+    .await?;
 ```
 
 ## Consumer Loop
@@ -141,8 +183,8 @@ struct LogHandler;
 impl Handler for LogHandler {
     fn id(&self) -> &str { "log-handler" }
 
-    fn handle(&self, event: Event)
-        -> impl std::future::Future<Output = eventuary::Result<()>> + Send
+    fn handle<'a>(&'a self, event: &'a Event)
+        -> impl std::future::Future<Output = eventuary::Result<()>> + Send + 'a
     {
         async move {
             tracing::info!(topic = %event.topic(), "received");
@@ -152,9 +194,9 @@ impl Handler for LogHandler {
 }
 ```
 
-`Handler::handle` receives an owned `Event` — the ack/nack envelope is owned
-by the `Reader`'s `Message<A>` and managed by the consumer driver, not by the
-handler.
+`Handler::handle` receives a borrowed `&Event` — the ack/nack envelope is
+owned by the `Reader`'s `Message<A, C>` and managed by the consumer driver,
+not by the handler.
 
 `BackgroundConsumer` polls a `Reader`, applies an optional `Filter`, drives a
 `Handler` per event, and acks on `Ok(())` / nacks on `Err(_)` or timeout.
