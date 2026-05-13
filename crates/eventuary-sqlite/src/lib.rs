@@ -8,11 +8,13 @@
 //! ack advances the checkpoint, nack leaves it unchanged. SQLite work runs in
 //! `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
+mod checkpoint_store;
 mod database;
 mod reader;
 mod relation;
 mod writer;
 
+pub use checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 pub use database::{
     Migration, SqliteConn, SqliteDatabase, SqliteDatabaseConfig, migrations, render_migration_sql,
     render_schema_sql, schema_sql,

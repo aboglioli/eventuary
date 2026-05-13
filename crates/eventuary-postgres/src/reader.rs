@@ -10,14 +10,18 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::{Acker, EventFilter, Message, NoCursor, Reader};
+use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
+    CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    StartableSubscription, TopicPattern,
 };
 
 use crate::relation::PgRelationName;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct PgCursor {
     pub sequence: i64,
 }
@@ -29,6 +33,12 @@ impl PgCursor {
 
     pub fn sequence(&self) -> i64 {
         self.sequence
+    }
+}
+
+impl CursorPartition for PgCursor {
+    fn partition(&self) -> Option<LogicalPartition> {
+        None
     }
 }
 
@@ -437,6 +447,3 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
     }
     DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z").map(|dt| dt.with_timezone(&Utc))
 }
-
-#[allow(dead_code)]
-type _CursorTypeAssert = NoCursor;

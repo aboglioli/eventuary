@@ -1,15 +1,18 @@
 pub use futures::future::BoxFuture;
 
 pub mod acker;
+pub mod checkpoint;
 pub mod consumers;
 pub mod filters;
 mod handler;
 mod message;
 mod reader;
+pub mod readers;
 mod subscription;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
+pub use checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore, StreamId};
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,

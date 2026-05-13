@@ -1,10 +1,49 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 
 use crate::error::{Error, Result};
 use crate::event::Event;
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
+
+/// Logical partition assignment used by `PartitionedReader` and
+/// `CheckpointReader` for in-process lane scheduling.
+///
+/// `id < count.get()` is enforced at construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct LogicalPartition {
+    id: u16,
+    count: NonZeroU16,
+}
+
+impl LogicalPartition {
+    pub fn new(id: u16, count: NonZeroU16) -> Result<Self> {
+        if id >= count.get() {
+            return Err(Error::Config(format!(
+                "logical partition id {id} out of range for count {count}",
+                count = count.get()
+            )));
+        }
+        Ok(Self { id, count })
+    }
+
+    pub fn id(&self) -> u16 {
+        self.id
+    }
+
+    pub fn count(&self) -> u16 {
+        self.count.get()
+    }
+
+    pub fn count_nz(&self) -> NonZeroU16 {
+        self.count
+    }
+}
+
+/// Cursor extension: report which logical partition a cursor belongs to.
+pub trait CursorPartition {
+    fn partition(&self) -> Option<LogicalPartition>;
+}
 
 /// Hashable contributor for partition routing.
 ///

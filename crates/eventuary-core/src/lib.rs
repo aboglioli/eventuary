@@ -63,7 +63,9 @@ pub use metadata::Metadata;
 pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
-pub use partition::{PartitionAssignment, PartitionKey, partition_for};
+pub use partition::{
+    CursorPartition, LogicalPartition, PartitionAssignment, PartitionKey, partition_for,
+};
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};

@@ -2,8 +2,14 @@ use crate::error::Result;
 use crate::event::Event;
 use crate::io::Acker;
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct NoCursor;
+
+impl crate::partition::CursorPartition for NoCursor {
+    fn partition(&self) -> Option<crate::partition::LogicalPartition> {
+        None
+    }
+}
 
 pub struct Message<A: Acker, C = NoCursor> {
     event: Event,

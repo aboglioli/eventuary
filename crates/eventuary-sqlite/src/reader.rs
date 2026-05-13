@@ -12,13 +12,17 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
+    CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    StartableSubscription, TopicPattern,
 };
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct SqliteCursor {
     pub sequence: i64,
 }
@@ -30,6 +34,12 @@ impl SqliteCursor {
 
     pub fn sequence(&self) -> i64 {
         self.sequence
+    }
+}
+
+impl CursorPartition for SqliteCursor {
+    fn partition(&self) -> Option<LogicalPartition> {
+        None
     }
 }
 
