@@ -14,10 +14,10 @@ pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
 };
-pub use handler::{
-    ArcFilter, ArcHandler, BoxFilter, BoxHandler, DynHandler, Filter, FilterExt, FilteredHandler,
-    Handler, HandlerExt,
+pub use filters::{
+    AllFilter, ArcFilter, BoxFilter, Filter, FilterExt, NamespacePrefixFilter, TopicFilter,
 };
+pub use handler::{ArcHandler, BoxHandler, DynHandler, FilteredHandler, Handler, HandlerExt};
 pub use message::{Message, NoCursor};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use subscription::EventSubscription;

@@ -84,16 +84,17 @@ where
                             let _ = msg.ack().await;
                             return;
                         }
-                        let event = msg.event().clone();
                         let result = match timeout {
-                            Some(d) => match tokio::time::timeout(d, handler.handle(event)).await {
-                                Ok(r) => r,
-                                Err(_) => Err(Error::Timeout(format!(
-                                    "handler {} timed out",
-                                    handler.id()
-                                ))),
-                            },
-                            None => handler.handle(event).await,
+                            Some(d) => {
+                                match tokio::time::timeout(d, handler.handle(msg.event())).await {
+                                    Ok(r) => r,
+                                    Err(_) => Err(Error::Timeout(format!(
+                                        "handler {} timed out",
+                                        handler.id()
+                                    ))),
+                                }
+                            }
+                            None => handler.handle(msg.event()).await,
                         };
                         match result {
                             Ok(()) => {
@@ -198,7 +199,7 @@ mod tests {
         fn id(&self) -> &str {
             &self.id
         }
-        async fn handle(&self, _: Event) -> Result<()> {
+        async fn handle(&self, _: &Event) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -213,7 +214,7 @@ mod tests {
         fn id(&self) -> &str {
             &self.id
         }
-        async fn handle(&self, _: Event) -> Result<()> {
+        async fn handle(&self, _: &Event) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Err(Error::Store("boom".into()))
         }
@@ -310,7 +311,7 @@ mod tests {
             fn id(&self) -> &str {
                 "slow"
             }
-            async fn handle(&self, _: Event) -> Result<()> {
+            async fn handle(&self, _: &Event) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(())
             }
