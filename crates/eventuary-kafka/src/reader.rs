@@ -274,7 +274,11 @@ impl Reader for KafkaReader {
                     continue;
                 }
                 let acker = BatchedAcker::new(token, tx_ack.clone());
-                if tx.send(Ok(Message::new(event, acker))).await.is_err() {
+                if tx
+                    .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 delivered += 1;

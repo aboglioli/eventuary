@@ -177,8 +177,11 @@ mod tests {
                 .unwrap()
                 .take()
                 .expect("read called twice");
-            let stream =
-                futures::stream::iter(events.into_iter().map(|e| Ok(Message::new(e, NoopAcker))));
+            let stream = futures::stream::iter(
+                events
+                    .into_iter()
+                    .map(|e| Ok(Message::new(e, NoopAcker, crate::io::NoCursor))),
+            );
             Ok(Box::pin(stream))
         }
     }

@@ -18,7 +18,7 @@ pub use handler::{
     ArcFilter, ArcHandler, BoxFilter, BoxHandler, DynHandler, Filter, FilterExt, FilteredHandler,
     Handler, HandlerExt,
 };
-pub use message::Message;
+pub use message::{Message, NoCursor};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use subscription::EventSubscription;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};

@@ -42,7 +42,11 @@ impl Stream for InmemStream {
             match rx.poll_recv(cx) {
                 Poll::Ready(Some(event)) if this.subscription.matches(&event) => {
                     this.delivered += 1;
-                    return Poll::Ready(Some(Ok(Message::new(event, NoopAcker))));
+                    return Poll::Ready(Some(Ok(Message::new(
+                        event,
+                        NoopAcker,
+                        eventuary_core::io::NoCursor,
+                    ))));
                 }
                 Poll::Ready(Some(_)) => continue,
                 Poll::Ready(None) => return Poll::Ready(None),

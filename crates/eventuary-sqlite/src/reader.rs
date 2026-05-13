@@ -300,7 +300,11 @@ impl Reader for SqliteReader {
                         })),
                         None => Either::Left(NoopAcker),
                     };
-                    if tx.send(Ok(Message::new(event, acker))).await.is_err() {
+                    if tx
+                        .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     delivered += 1;

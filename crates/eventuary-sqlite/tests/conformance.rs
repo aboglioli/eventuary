@@ -99,7 +99,7 @@ impl Backend for SqliteBackend {
                 .ok()?;
             let next = tokio::time::timeout(timeout, stream.next()).await.ok()??;
             let msg = next.ok()?;
-            let (event, acker) = msg.into_parts();
+            let (event, acker, _) = msg.into_parts();
             let shared = Arc::new(acker);
             Some(ConsumerEvent {
                 event,
@@ -134,7 +134,7 @@ impl Backend for SqliteBackend {
                     Ok(Some(Ok(msg))) => msg,
                     _ => break,
                 };
-                let (event, acker) = next.into_parts();
+                let (event, acker, _) = next.into_parts();
                 let shared = Arc::new(acker);
                 received.push(ConsumerEvent {
                     event,

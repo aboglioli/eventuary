@@ -53,8 +53,8 @@ pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
     BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
     DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter,
-    EventSubscription, Filter, FilterExt, FilteredHandler, Handler, HandlerExt, Message, Reader,
-    ReaderExt, RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt,
+    EventSubscription, Filter, FilterExt, FilteredHandler, Handler, HandlerExt, Message, NoCursor,
+    Reader, ReaderExt, RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt,
     backoff_delay,
 };
 pub use metadata::Metadata;
