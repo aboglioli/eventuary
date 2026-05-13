@@ -17,6 +17,9 @@ pub use database::{
     Migration, SqliteConn, SqliteDatabase, SqliteDatabaseConfig, migrations, render_migration_sql,
     render_schema_sql, schema_sql,
 };
-pub use reader::{SqliteAcker, SqliteAckerVariant, SqliteReader, SqliteReaderConfig, SqliteStream};
+pub use reader::{
+    SqliteCursor, SqliteCursorAcker, SqliteReader, SqliteReaderConfig, SqliteStream,
+    SqliteSubscription,
+};
 pub use relation::SqliteRelationName;
-pub use writer::SqliteEventWriter;
+pub use writer::{SqliteEventWriter, SqliteWriterConfig};
