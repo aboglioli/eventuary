@@ -5,10 +5,10 @@
 //! `StreamConsumer` and emits `Message<BatchedAcker<KafkaOffsetToken>>` whose
 //! token carries `(topic, partition, offset)`.
 //!
-//! Configuration separates `kafka_topics: Vec<String>` (Kafka topic names to
-//! subscribe) from `event_topics: Option<Vec<Topic>>` (post-deserialization
-//! filter on the eventuary topic). `organization` and `namespace` are optional
-//! post-deserialization filters. `StartFrom::{Earliest, Latest, Timestamp}` are honored.
+//! Configuration uses `kafka_topics: Vec<String>` (Kafka topic names to
+//! subscribe). Event-level filtering is not performed by this reader; wrap with
+//! `FilteredReader` if predicate-based filtering on deserialized events is
+//! needed. `StartFrom::{Earliest, Latest, Timestamp}` are honored.
 //!
 //! ack commits the highest offset per partition; nack is a no-op (uncommitted
 //! offsets are redelivered after rebalance/restart/session expiry).

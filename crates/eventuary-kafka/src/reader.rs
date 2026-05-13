@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{EventFilter, Message, Reader};
+use eventuary_core::io::{Message, Reader};
 use eventuary_core::{
     CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
     SerializedEvent, StartFrom,
@@ -61,7 +61,6 @@ pub struct KafkaSubscription {
     pub topics: Vec<String>,
     pub consumer_group_id: ConsumerGroupId,
     pub start_from: StartFrom<KafkaCursor>,
-    pub event_filter: EventFilter,
     pub limit: Option<usize>,
 }
 
@@ -106,26 +105,10 @@ impl KafkaReader {
     }
 
     pub fn default_subscription(&self) -> KafkaSubscription {
-        let mut filter = EventFilter::default();
-        if let Some(org) = self.config.organization.as_ref() {
-            filter.organization = Some(org.clone());
-        }
-        if let Some(topics) = self.config.event_topics.as_ref()
-            && let [topic] = topics.as_slice()
-        {
-            filter.topic = Some(eventuary_core::TopicPattern::exact(topic.clone()));
-        }
-        if let Some(ns) = self.config.namespace.as_ref() {
-            filter.namespace = Some(eventuary_core::NamespacePattern::prefix(ns.clone()));
-        }
-        if let Some(end_at) = self.config.end_at {
-            filter.end_at = Some(end_at);
-        }
         KafkaSubscription {
             topics: self.config.kafka_topics.clone(),
             consumer_group_id: self.config.consumer_group_id.clone(),
             start_from: StartFrom::Latest,
-            event_filter: filter,
             limit: self.config.limit,
         }
     }
@@ -226,7 +209,6 @@ impl Reader for KafkaReader {
         let (tx, rx) = mpsc::channel(self.config.max_poll_records);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
-        let filter = subscription.event_filter.clone();
         let limit = subscription.limit;
 
         let handle = tokio::spawn(async move {
@@ -275,10 +257,6 @@ impl Reader for KafkaReader {
                         continue;
                     }
                 };
-                if !filter.matches(&event) {
-                    let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                    continue;
-                }
                 let cursor = KafkaCursor {
                     topic: token.topic.clone(),
                     partition: token.partition,

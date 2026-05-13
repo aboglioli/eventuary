@@ -1,22 +1,16 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-
 use eventuary_core::io::acker::AckBufferConfig;
-use eventuary_core::{ConsumerGroupId, Error, Namespace, OrganizationId, Result, StartFrom, Topic};
+use eventuary_core::{ConsumerGroupId, Error, Result, StartFrom};
 
 #[derive(Debug, Clone)]
 pub struct KafkaReaderConfig {
     pub brokers: Vec<String>,
     pub kafka_topics: Vec<String>,
     pub consumer_group_id: ConsumerGroupId,
-    pub organization: Option<OrganizationId>,
     pub start_from: StartFrom,
-    pub event_topics: Option<Vec<Topic>>,
-    pub namespace: Option<Namespace>,
     pub session_timeout: Duration,
     pub max_poll_records: usize,
-    pub end_at: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub ack_buffer: AckBufferConfig,
 }
@@ -26,66 +20,22 @@ impl KafkaReaderConfig {
         brokers: Vec<String>,
         kafka_topics: Vec<String>,
         consumer_group_id: ConsumerGroupId,
-        organization: OrganizationId,
     ) -> Result<Self> {
-        Self::validated(Self::streaming(
-            brokers,
-            kafka_topics,
-            consumer_group_id,
-            organization,
-        ))
-    }
-
-    pub fn new_all_organizations(
-        brokers: Vec<String>,
-        kafka_topics: Vec<String>,
-        consumer_group_id: ConsumerGroupId,
-    ) -> Result<Self> {
-        Self::validated(Self::streaming_all_organizations(
-            brokers,
-            kafka_topics,
-            consumer_group_id,
-        ))
+        Self::validated(Self::streaming(brokers, kafka_topics, consumer_group_id))
     }
 
     pub fn streaming(
         brokers: Vec<String>,
         kafka_topics: Vec<String>,
         consumer_group_id: ConsumerGroupId,
-        organization: OrganizationId,
     ) -> Self {
         Self {
             brokers,
             kafka_topics,
             consumer_group_id,
-            organization: Some(organization),
             start_from: StartFrom::Latest,
-            event_topics: None,
-            namespace: None,
             session_timeout: Duration::from_secs(30),
             max_poll_records: 100,
-            end_at: None,
-            limit: None,
-            ack_buffer: AckBufferConfig::default(),
-        }
-    }
-
-    pub fn streaming_all_organizations(
-        brokers: Vec<String>,
-        kafka_topics: Vec<String>,
-        consumer_group_id: ConsumerGroupId,
-    ) -> Self {
-        Self {
-            brokers,
-            kafka_topics,
-            consumer_group_id,
-            organization: None,
-            start_from: StartFrom::Latest,
-            event_topics: None,
-            namespace: None,
-            session_timeout: Duration::from_secs(30),
-            max_poll_records: 100,
-            end_at: None,
             limit: None,
             ack_buffer: AckBufferConfig::default(),
         }
@@ -132,7 +82,6 @@ mod tests {
             vec!["broker:9092".to_owned()],
             vec!["t".to_owned()],
             ConsumerGroupId::new("g").unwrap(),
-            OrganizationId::new("o").unwrap(),
         )
     }
 
@@ -141,32 +90,8 @@ mod tests {
         let c = cfg();
         assert_eq!(c.kafka_topics.len(), 1);
         assert!(matches!(c.start_from, StartFrom::Latest));
-        assert!(c.event_topics.is_none());
-        assert!(c.namespace.is_none());
-    }
-
-    #[test]
-    fn streaming_all_organizations_defaults_to_no_organization_filter() {
-        let c = KafkaReaderConfig::streaming_all_organizations(
-            vec!["broker:9092".to_owned()],
-            vec!["t".to_owned()],
-            ConsumerGroupId::new("g").unwrap(),
-        );
-
-        assert!(c.organization.is_none());
-        c.validate().unwrap();
-    }
-
-    #[test]
-    fn new_all_organizations_returns_validated_config() {
-        let err = KafkaReaderConfig::new_all_organizations(
-            Vec::new(),
-            vec!["t".to_owned()],
-            ConsumerGroupId::new("g").unwrap(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, Error::Config(_)));
+        assert!(c.limit.is_none());
+        assert_eq!(c.max_poll_records, 100);
     }
 
     #[test]
@@ -231,7 +156,6 @@ mod tests {
             Vec::new(),
             vec!["t".to_owned()],
             ConsumerGroupId::new("g").unwrap(),
-            OrganizationId::new("o").unwrap(),
         )
         .unwrap_err();
         assert!(matches!(err, Error::Config(_)));
