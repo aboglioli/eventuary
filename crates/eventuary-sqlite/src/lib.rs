@@ -10,8 +10,13 @@
 
 mod database;
 mod reader;
+mod relation;
 mod writer;
 
-pub use database::{Migration, SqliteConn, SqliteDatabase, migrations, schema_sql};
+pub use database::{
+    Migration, SqliteConn, SqliteDatabase, SqliteDatabaseConfig, migrations, render_migration_sql,
+    render_schema_sql, schema_sql,
+};
 pub use reader::{SqliteAcker, SqliteAckerVariant, SqliteReader, SqliteReaderConfig, SqliteStream};
+pub use relation::SqliteRelationName;
 pub use writer::SqliteEventWriter;

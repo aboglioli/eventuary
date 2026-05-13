@@ -10,8 +10,13 @@
 
 mod database;
 mod reader;
+mod relation;
 mod writer;
 
-pub use database::{Migration, PgConnectOptions, PgDatabase, migrations, schema_sql};
+pub use database::{
+    Migration, PgConnectOptions, PgDatabase, PgDatabaseConfig, migrations, render_migration_sql,
+    render_schema_sql, schema_sql,
+};
 pub use reader::{PgAcker, PgAckerVariant, PgReader, PgReaderConfig, PgStream};
+pub use relation::PgRelationName;
 pub use writer::PgEventWriter;
