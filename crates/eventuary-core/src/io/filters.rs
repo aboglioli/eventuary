@@ -38,9 +38,54 @@ pub trait FilterExt: Filter + Sized + 'static {
     fn into_arced(self) -> ArcFilter {
         Arc::new(self)
     }
+
+    fn and<F: Filter + 'static>(self, other: F) -> AndFilter<Self, F> {
+        AndFilter(self, other)
+    }
+
+    fn or<F: Filter + 'static>(self, other: F) -> OrFilter<Self, F> {
+        OrFilter(self, other)
+    }
+
+    fn not(self) -> NotFilter<Self> {
+        NotFilter(self)
+    }
 }
 
 impl<T: Filter + 'static> FilterExt for T {}
+
+/// Logical AND of two filters; matches when both inner filters match.
+pub struct AndFilter<A: Filter, B: Filter>(pub A, pub B);
+
+impl<A: Filter, B: Filter> Filter for AndFilter<A, B> {
+    fn matches(&self, event: &Event) -> bool {
+        self.0.matches(event) && self.1.matches(event)
+    }
+}
+
+/// Logical OR of two filters; matches when either inner filter matches.
+pub struct OrFilter<A: Filter, B: Filter>(pub A, pub B);
+
+impl<A: Filter, B: Filter> Filter for OrFilter<A, B> {
+    fn matches(&self, event: &Event) -> bool {
+        self.0.matches(event) || self.1.matches(event)
+    }
+}
+
+/// Logical NOT of a filter; matches when the inner filter does not match.
+pub struct NotFilter<F: Filter>(pub F);
+
+impl<F: Filter> Filter for NotFilter<F> {
+    fn matches(&self, event: &Event) -> bool {
+        !self.0.matches(event)
+    }
+}
+
+impl<F: Filter> Filter for Vec<F> {
+    fn matches(&self, event: &Event) -> bool {
+        self.iter().any(|f| f.matches(event))
+    }
+}
 
 pub struct AllFilter;
 
@@ -222,5 +267,105 @@ mod tests {
     fn _assert_filter_dyn_safe() {
         fn _take(_: BoxFilter) {}
         fn _take_arc(_: ArcFilter) {}
+    }
+
+    #[test]
+    fn and_filter_requires_both() {
+        struct MatchA;
+        struct MatchB;
+
+        impl Filter for MatchA {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == "a"
+            }
+        }
+        impl Filter for MatchB {
+            fn matches(&self, e: &Event) -> bool {
+                e.namespace().as_str().starts_with("/x")
+            }
+        }
+
+        let ab = MatchA.and(MatchB);
+        assert!(ab.matches(&ev("a", "/x")));
+        assert!(!ab.matches(&ev("a", "/y")));
+        assert!(!ab.matches(&ev("b", "/x")));
+    }
+
+    #[test]
+    fn or_filter_requires_either() {
+        struct MatchA;
+        struct MatchB;
+
+        impl Filter for MatchA {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == "a"
+            }
+        }
+        impl Filter for MatchB {
+            fn matches(&self, e: &Event) -> bool {
+                e.namespace().as_str().starts_with("/x")
+            }
+        }
+
+        let a_or_b = MatchA.or(MatchB);
+        assert!(a_or_b.matches(&ev("a", "/y")));
+        assert!(a_or_b.matches(&ev("b", "/x")));
+        assert!(!a_or_b.matches(&ev("b", "/y")));
+    }
+
+    #[test]
+    fn not_filter_inverts() {
+        struct MatchA;
+        impl Filter for MatchA {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == "a"
+            }
+        }
+
+        let not_a = MatchA.not();
+        assert!(!not_a.matches(&ev("a", "/x")));
+        assert!(not_a.matches(&ev("b", "/x")));
+    }
+
+    #[test]
+    fn vec_filter_is_or() {
+        struct MatchTopic(&'static str);
+        impl Filter for MatchTopic {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == self.0
+            }
+        }
+
+        let filters: Vec<MatchTopic> = vec![MatchTopic("a"), MatchTopic("b")];
+        assert!(filters.matches(&ev("a", "/x")));
+        assert!(filters.matches(&ev("b", "/x")));
+        assert!(!filters.matches(&ev("c", "/x")));
+    }
+
+    #[test]
+    fn combinators_can_be_nested() {
+        struct OrgMatch;
+        impl Filter for OrgMatch {
+            fn matches(&self, e: &Event) -> bool {
+                e.organization().as_str() == "org"
+            }
+        }
+        struct TopicA;
+        impl Filter for TopicA {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == "a"
+            }
+        }
+        struct TopicB;
+        impl Filter for TopicB {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == "b"
+            }
+        }
+
+        let filter = OrgMatch.and(TopicA.or(TopicB));
+        assert!(filter.matches(&ev("a", "/x")));
+        assert!(filter.matches(&ev("b", "/x")));
+        assert!(!filter.matches(&ev("c", "/x")));
     }
 }
