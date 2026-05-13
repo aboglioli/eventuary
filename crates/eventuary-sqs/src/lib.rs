@@ -17,6 +17,6 @@ mod reader_config;
 mod writer;
 
 pub use flusher::SqsFlusher;
-pub use reader::{SqsReader, SqsStream};
+pub use reader::{SqsReader, SqsStream, SqsSubscription};
 pub use reader_config::SqsReaderConfig;
 pub use writer::SqsWriter;

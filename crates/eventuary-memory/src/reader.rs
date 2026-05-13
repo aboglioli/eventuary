@@ -6,8 +6,20 @@ use futures::Stream;
 use tokio::sync::{Mutex, mpsc};
 
 use eventuary_core::io::acker::NoopAcker;
-use eventuary_core::io::{Message, Reader};
-use eventuary_core::{Error, Event, EventSubscription, Result};
+use eventuary_core::io::{EventFilter, Message, Reader};
+use eventuary_core::{Event, Result};
+
+#[derive(Debug, Clone, Default)]
+pub struct MemorySubscription {
+    pub filter: EventFilter,
+    pub limit: Option<usize>,
+}
+
+impl MemorySubscription {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 pub struct InmemReader {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
@@ -23,7 +35,7 @@ impl InmemReader {
 
 pub struct InmemStream {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
-    subscription: EventSubscription,
+    subscription: MemorySubscription,
     delivered: usize,
 }
 
@@ -40,7 +52,7 @@ impl Stream for InmemStream {
         let mut rx = this.rx.try_lock().expect("inmem stream lock");
         loop {
             match rx.poll_recv(cx) {
-                Poll::Ready(Some(event)) if this.subscription.matches(&event) => {
+                Poll::Ready(Some(event)) if this.subscription.filter.matches(&event) => {
                     this.delivered += 1;
                     return Poll::Ready(Some(Ok(Message::new(
                         event,
@@ -57,17 +69,12 @@ impl Stream for InmemStream {
 }
 
 impl Reader for InmemReader {
-    type Subscription = EventSubscription;
+    type Subscription = MemorySubscription;
     type Acker = NoopAcker;
     type Cursor = eventuary_core::io::NoCursor;
     type Stream = InmemStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        if subscription.partition.is_some() {
-            return Err(Error::Config(
-                "memory backend does not support runtime partition filter; events would be silently dropped from the shared mpsc channel".to_owned(),
-            ));
-        }
         Ok(InmemStream {
             rx: Arc::clone(&self.rx),
             subscription,
@@ -83,8 +90,11 @@ mod tests {
     use eventuary_core::{OrganizationId, Payload};
     use futures::StreamExt;
 
-    fn subscription() -> EventSubscription {
-        EventSubscription::for_organization(OrganizationId::new("org").unwrap())
+    fn subscription() -> MemorySubscription {
+        MemorySubscription {
+            filter: EventFilter::for_organization(OrganizationId::new("org").unwrap()),
+            limit: None,
+        }
     }
 
     fn ev() -> Event {
@@ -129,27 +139,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_rejects_subscription_partition() {
-        use eventuary_core::PartitionAssignment;
-
-        let (_tx, rx) = mpsc::channel(1);
-        let reader = InmemReader::new(rx);
-
-        let mut subscription = subscription();
-        subscription.partition = Some(PartitionAssignment::new(4, 0).unwrap());
-
-        let result = reader.read(subscription).await;
-        let err = match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected Error::Config rejection"),
-        };
-        assert!(matches!(err, eventuary_core::Error::Config(_)));
-    }
-
-    #[tokio::test]
     async fn reader_into_boxed_yields_box_reader() {
         let (tx, rx) = mpsc::channel(1);
-        let reader: BoxReader<EventSubscription, eventuary_core::io::NoCursor> =
+        let reader: BoxReader<MemorySubscription, eventuary_core::io::NoCursor> =
             InmemReader::new(rx).into_boxed();
 
         tx.send(ev()).await.unwrap();
