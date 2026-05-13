@@ -1,110 +1,129 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use either::Either;
 use futures::Stream;
 use sqlx::{PgPool, Row};
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::acker::{NoopAcker, OnceAcker};
-use eventuary_core::io::{Acker, Message, Reader};
+use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    ConsumerGroupId, Error, EventSubscription, Namespace, OrganizationId, Result, SerializedEvent,
-    StartFrom, Topic,
+    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    StartableSubscription, TopicPattern,
 };
 
-const DEFAULT_CHECKPOINT_NAME: &str = "default";
+use crate::relation::PgRelationName;
 
-#[derive(Clone)]
+#[derive(
+    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct PgCursor {
+    pub sequence: i64,
+}
+
+impl PgCursor {
+    pub fn new(sequence: i64) -> Self {
+        Self { sequence }
+    }
+
+    pub fn sequence(&self) -> i64 {
+        self.sequence
+    }
+}
+
+impl CursorPartition for PgCursor {
+    fn partition(&self) -> Option<LogicalPartition> {
+        None
+    }
+}
+
+impl CommitCursor for PgCursor {
+    type Commit = PgCursor;
+    fn commit_cursor(&self) -> Self::Commit {
+        *self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PgSubscription {
+    pub start: StartFrom<PgCursor>,
+    pub filter: EventFilter,
+    pub batch_size: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+impl Default for PgSubscription {
+    fn default() -> Self {
+        Self {
+            start: StartFrom::Latest,
+            filter: EventFilter::default(),
+            batch_size: None,
+            limit: None,
+        }
+    }
+}
+
+impl StartableSubscription<PgCursor> for PgSubscription {
+    fn with_start(mut self, start: StartFrom<PgCursor>) -> Self {
+        self.start = start;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct PgReaderConfig {
-    pub organization: Option<OrganizationId>,
-    pub namespace: Option<Namespace>,
-    pub topics: Vec<Topic>,
-    pub consumer_group_id: Option<ConsumerGroupId>,
-    pub checkpoint_name: String,
-    pub start_from: StartFrom,
+    pub events_relation: PgRelationName,
     pub poll_interval: Duration,
-    pub batch_size: usize,
+    pub default_batch_size: usize,
 }
 
 impl Default for PgReaderConfig {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PgReaderConfig {
-    pub fn new() -> Self {
         Self {
-            organization: None,
-            namespace: None,
-            topics: Vec::new(),
-            consumer_group_id: None,
-            checkpoint_name: DEFAULT_CHECKPOINT_NAME.to_owned(),
-            start_from: StartFrom::Latest,
+            events_relation: PgRelationName::new("events").expect("default events relation"),
             poll_interval: Duration::from_millis(100),
-            batch_size: 100,
-        }
-    }
-
-    pub fn for_organization(organization: OrganizationId) -> Self {
-        Self {
-            organization: Some(organization),
-            ..Self::new()
+            default_batch_size: 100,
         }
     }
 }
 
-/// ack advances the consumer group's checkpoint to this event's sequence;
-/// nack leaves the checkpoint unchanged. Backwards moves are guarded by
-/// `WHERE EXCLUDED.sequence > consumer_offsets.sequence`.
-///
-/// The (`partition`, `partition_count`) pair scopes the checkpoint row to a
-/// specific partition assignment. Unpartitioned consumers use `(0, 1)`,
-/// matching the column defaults, so they transparently share one row.
+/// Source-side acker. Holds shared cursor state so an unacked message is
+/// re-emitted on the next stream poll instead of being dropped.
 #[derive(Clone)]
-pub struct PgAcker {
-    pool: PgPool,
-    consumer_group_id: ConsumerGroupId,
-    checkpoint_name: String,
-    partition: i32,
-    partition_count: i32,
+pub struct PgCursorAcker {
+    state: Arc<Mutex<CursorState>>,
     sequence: i64,
 }
 
-impl Acker for PgAcker {
+struct CursorState {
+    last_acked: i64,
+    pending_nack: bool,
+}
+
+impl Acker for PgCursorAcker {
     async fn ack(&self) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO consumer_offsets \
-               (consumer_group_id, checkpoint_name, partition, partition_count, sequence) \
-             VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (consumer_group_id, checkpoint_name, partition, partition_count) \
-             DO UPDATE SET sequence = EXCLUDED.sequence \
-             WHERE EXCLUDED.sequence > consumer_offsets.sequence",
-        )
-        .bind(self.consumer_group_id.as_str())
-        .bind(&self.checkpoint_name)
-        .bind(self.partition)
-        .bind(self.partition_count)
-        .bind(self.sequence)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| Error::Store(e.to_string()))?;
+        let mut state = self.state.lock().await;
+        if self.sequence > state.last_acked {
+            state.last_acked = self.sequence;
+        }
+        state.pending_nack = false;
         Ok(())
     }
 
     async fn nack(&self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        state.pending_nack = true;
         Ok(())
     }
 }
 
-pub type PgAckerVariant = Either<NoopAcker, OnceAcker<PgAcker>>;
-
 pub struct PgStream {
-    rx: mpsc::Receiver<Result<Message<PgAckerVariant>>>,
+    rx: mpsc::Receiver<Result<Message<PgCursorAcker, PgCursor>>>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -117,7 +136,7 @@ impl Drop for PgStream {
 }
 
 impl Stream for PgStream {
-    type Item = Result<Message<PgAckerVariant>>;
+    type Item = Result<Message<PgCursorAcker, PgCursor>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
@@ -133,103 +152,71 @@ impl PgReader {
     pub fn new(pool: PgPool, config: PgReaderConfig) -> Self {
         Self { pool, config }
     }
-
-    pub async fn read(&self) -> Result<PgStream> {
-        eventuary_core::io::Reader::read(self, subscription_from_config(&self.config)).await
-    }
-}
-
-fn subscription_from_config(config: &PgReaderConfig) -> EventSubscription {
-    let mut subscription = EventSubscription::new();
-    subscription.organization = config.organization.clone();
-    subscription.checkpoint_name = Some(config.checkpoint_name.clone());
-    subscription.consumer_group_id = config.consumer_group_id.clone();
-    if !config.topics.is_empty() {
-        subscription.topics = Some(config.topics.clone());
-    }
-    subscription.namespace_prefix = config.namespace.clone();
-    subscription.start_from = config.start_from;
-    subscription
-}
-
-fn apply_subscription(config: &mut PgReaderConfig, subscription: &EventSubscription) {
-    config.organization = subscription.organization.clone();
-    config.namespace = subscription.namespace_prefix.clone();
-    config.topics = subscription.topics.clone().unwrap_or_default();
-    config.consumer_group_id = subscription
-        .consumer_group_id
-        .clone()
-        .or_else(|| config.consumer_group_id.clone());
-    if let Some(checkpoint_name) = subscription.checkpoint_name.as_ref() {
-        config.checkpoint_name = checkpoint_name.clone();
-    }
-    config.start_from = subscription.start_from;
 }
 
 impl Reader for PgReader {
-    type Subscription = EventSubscription;
-    type Acker = PgAckerVariant;
+    type Subscription = PgSubscription;
+    type Acker = PgCursorAcker;
+    type Cursor = PgCursor;
     type Stream = PgStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let pool = self.pool.clone();
-        let mut config = self.config.clone();
-        apply_subscription(&mut config, &subscription);
-        if subscription.partition.is_some() && config.consumer_group_id.is_none() {
-            return Err(Error::Config(
-                "subscription.partition requires consumer_group_id; partition checkpoints have no identity without a group".to_owned(),
-            ));
-        }
-        let (partition_id, partition_count) = match subscription.partition {
-            Some(a) => (a.id() as i32, a.count() as i32),
-            None => (0, 1),
-        };
-        tracing::info!(
-            consumer_group_id = config.consumer_group_id.as_ref().map(|g| g.as_str()),
-            checkpoint_name = %config.checkpoint_name,
-            partition = partition_id,
-            partition_count = partition_count,
-            "postgres reader spawned",
-        );
+        let config = self.config.clone();
         let (tx, rx) = mpsc::channel(64);
+        let events_relation = config.events_relation.render();
+        let poll_interval = config.poll_interval;
+        let batch_size = subscription
+            .batch_size
+            .unwrap_or(config.default_batch_size)
+            .clamp(1, 1000);
+        let filter = subscription.filter.clone();
+        let limit = subscription.limit;
+
+        let (mut after_seq, lower_bound_ts) =
+            match resolve_initial_position(&pool, &events_relation, &subscription).await {
+                Ok(pos) => pos,
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return Ok(PgStream { rx, handle: None });
+                }
+            };
+
+        let state = Arc::new(Mutex::new(CursorState {
+            last_acked: after_seq,
+            pending_nack: false,
+        }));
 
         let handle = tokio::spawn(async move {
-            let (mut after_seq, lower_bound_ts) =
-                match resolve_initial_position(&pool, &config, partition_id, partition_count).await
-                {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
-                };
-
             let mut delivered = 0usize;
+            let mut buffer: VecDeque<(SerializedEvent, i64)> = VecDeque::new();
             loop {
-                let take = config.batch_size.clamp(1, 1000);
-                let batch = match fetch_batch(&pool, &config, after_seq, take, lower_bound_ts).await
-                {
-                    Ok(b) => b,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        return;
+                if buffer.is_empty() {
+                    let fetched = match fetch_batch(
+                        &pool,
+                        &events_relation,
+                        after_seq,
+                        batch_size,
+                        lower_bound_ts,
+                        &filter,
+                    )
+                    .await
+                    {
+                        Ok(b) => b,
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    };
+                    if fetched.is_empty() {
+                        tokio::time::sleep(poll_interval).await;
+                        continue;
                     }
-                };
-
-                tracing::trace!(
-                    after_seq,
-                    fetched = batch.len(),
-                    partition = partition_id,
-                    partition_count = partition_count,
-                    "postgres poll",
-                );
-
-                if batch.is_empty() {
-                    tokio::time::sleep(config.poll_interval).await;
-                    continue;
+                    buffer.extend(fetched);
                 }
 
-                for (serialized, sequence) in batch {
+                while let Some((serialized, sequence)) = buffer.front() {
+                    let sequence = *sequence;
                     let event = match serialized.to_event() {
                         Ok(e) => e,
                         Err(e) => {
@@ -241,30 +228,49 @@ impl Reader for PgReader {
                             return;
                         }
                     };
-                    after_seq = sequence;
-                    if !subscription.matches(&event) {
+                    if !filter.matches(&event) {
+                        buffer.pop_front();
+                        after_seq = sequence;
                         continue;
                     }
-                    if let Some(limit) = subscription.limit
-                        && delivered >= limit
+                    if let Some(l) = limit
+                        && delivered >= l
                     {
                         return;
                     }
-                    let acker: PgAckerVariant = match config.consumer_group_id.as_ref() {
-                        Some(group) => Either::Right(OnceAcker::new(PgAcker {
-                            pool: pool.clone(),
-                            consumer_group_id: group.clone(),
-                            checkpoint_name: config.checkpoint_name.clone(),
-                            partition: partition_id,
-                            partition_count,
-                            sequence,
-                        })),
-                        None => Either::Left(NoopAcker),
+                    let acker = PgCursorAcker {
+                        state: Arc::clone(&state),
+                        sequence,
                     };
-                    if tx.send(Ok(Message::new(event, acker))).await.is_err() {
+                    let cursor = PgCursor { sequence };
+                    if tx
+                        .send(Ok(Message::new(event, acker, cursor)))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     delivered += 1;
+
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        let guard = state.lock().await;
+                        if guard.last_acked >= sequence {
+                            after_seq = sequence;
+                            drop(guard);
+                            buffer.pop_front();
+                            break;
+                        }
+                        if guard.pending_nack {
+                            drop(guard);
+                            let mut g = state.lock().await;
+                            g.pending_nack = false;
+                            break;
+                        }
+                        if tx.is_closed() {
+                            return;
+                        }
+                    }
                 }
             }
         });
@@ -278,67 +284,49 @@ impl Reader for PgReader {
 
 async fn resolve_initial_position(
     pool: &PgPool,
-    config: &PgReaderConfig,
-    partition: i32,
-    partition_count: i32,
+    events_relation: &str,
+    subscription: &PgSubscription,
 ) -> Result<(i64, Option<DateTime<Utc>>)> {
-    if let Some(group) = config.consumer_group_id.as_ref() {
-        let row = sqlx::query(
-            "SELECT sequence FROM consumer_offsets \
-             WHERE consumer_group_id = $1 \
-               AND checkpoint_name   = $2 \
-               AND partition         = $3 \
-               AND partition_count   = $4",
-        )
-        .bind(group.as_str())
-        .bind(&config.checkpoint_name)
-        .bind(partition)
-        .bind(partition_count)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| Error::Store(e.to_string()))?;
-        if let Some(r) = row {
-            return Ok((r.get::<i64, _>("sequence"), None));
-        }
-    }
-    match config.start_from {
+    match subscription.start.clone() {
+        StartFrom::After(cursor) => Ok((cursor.sequence, None)),
         StartFrom::Earliest => Ok((0, None)),
         StartFrom::Latest => {
-            let row = match config.organization.as_ref() {
-                Some(org) => sqlx::query(
-                    "SELECT COALESCE(MAX(sequence), 0) AS s FROM events WHERE organization = $1",
-                )
-                .bind(org.as_str())
+            let sql = match subscription.filter.organization.as_ref() {
+                Some(_) => format!(
+                    "SELECT COALESCE(MAX(sequence), 0) AS s FROM {events_relation} WHERE organization = $1",
+                ),
+                None => format!("SELECT COALESCE(MAX(sequence), 0) AS s FROM {events_relation}"),
+            };
+            let mut q = sqlx::query(&sql);
+            if let Some(org) = subscription.filter.organization.as_ref() {
+                q = q.bind(org.as_str());
+            }
+            let row = q
                 .fetch_one(pool)
                 .await
-                .map_err(|e| Error::Store(e.to_string()))?,
-                None => sqlx::query("SELECT COALESCE(MAX(sequence), 0) AS s FROM events")
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|e| Error::Store(e.to_string()))?,
-            };
+                .map_err(|e| Error::Store(e.to_string()))?;
             Ok((row.get::<i64, _>("s"), None))
         }
         StartFrom::Timestamp(ts) => {
-            let row = match config.organization.as_ref() {
-                Some(org) => sqlx::query(
-                    "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM events \
-                         WHERE organization = $1 AND timestamp >= $2::timestamptz",
-                )
-                .bind(org.as_str())
-                .bind(ts.to_rfc3339())
-                .fetch_one(pool)
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?,
-                None => sqlx::query(
-                    "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM events \
-                         WHERE timestamp >= $1::timestamptz",
-                )
-                .bind(ts.to_rfc3339())
-                .fetch_one(pool)
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?,
+            let sql = match subscription.filter.organization.as_ref() {
+                Some(_) => format!(
+                    "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM {events_relation} \
+                     WHERE organization = $1 AND timestamp >= $2::timestamptz",
+                ),
+                None => format!(
+                    "SELECT COALESCE(MIN(sequence), 1) - 1 AS s FROM {events_relation} \
+                     WHERE timestamp >= $1::timestamptz",
+                ),
             };
+            let mut q = sqlx::query(&sql);
+            if let Some(org) = subscription.filter.organization.as_ref() {
+                q = q.bind(org.as_str());
+            }
+            q = q.bind(ts.to_rfc3339());
+            let row = q
+                .fetch_one(pool)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?;
             Ok((row.get::<i64, _>("s").max(0), Some(ts)))
         }
     }
@@ -346,35 +334,49 @@ async fn resolve_initial_position(
 
 async fn fetch_batch(
     pool: &PgPool,
-    config: &PgReaderConfig,
+    events_relation: &str,
     after_seq: i64,
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
+    filter: &EventFilter,
 ) -> Result<Vec<(SerializedEvent, i64)>> {
-    let mut sql = String::from(
+    let mut sql = format!(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
          timestamp::text AS timestamp_text, version, parent_id::text AS parent_id_text, \
          correlation_id, causation_id \
-         FROM events WHERE sequence > $1",
+         FROM {events_relation} WHERE sequence > $1",
     );
     let mut bind_index = 2usize;
 
-    if config.organization.is_some() {
+    if filter.organization.is_some() {
         sql.push_str(&format!(" AND organization = ${bind_index}"));
         bind_index += 1;
     }
 
-    let topics_filter = !config.topics.is_empty();
+    let exact_topics: Vec<String> = filter
+        .topics
+        .as_ref()
+        .map(|patterns| {
+            patterns
+                .iter()
+                .map(|p| match p {
+                    TopicPattern::Exact(t) => t.as_str().to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let topics_filter = !exact_topics.is_empty();
     if topics_filter {
         sql.push_str(&format!(" AND topic = ANY(${bind_index})"));
         bind_index += 1;
     }
-    let ns_filter = config
-        .namespace
-        .as_ref()
-        .filter(|n| !n.is_root())
-        .map(|n| n.as_str().to_owned());
+    let ns_filter = filter.namespace.as_ref().and_then(|p| match p {
+        eventuary_core::NamespacePattern::Prefix(ns) if !ns.is_root() => {
+            Some(ns.as_str().to_owned())
+        }
+        _ => None,
+    });
     if ns_filter.is_some() {
         sql.push_str(&format!(
             " AND (namespace = ${bind_index} OR namespace LIKE ${bind_index} || '/%')"
@@ -389,16 +391,11 @@ async fn fetch_batch(
 
     let mut q = sqlx::query(&sql).bind(after_seq);
 
-    if let Some(org) = &config.organization {
+    if let Some(org) = &filter.organization {
         q = q.bind(org.as_str());
     }
     if topics_filter {
-        let topics: Vec<String> = config
-            .topics
-            .iter()
-            .map(|t| t.as_str().to_owned())
-            .collect();
-        q = q.bind(topics);
+        q = q.bind(exact_topics);
     }
     if let Some(prefix) = ns_filter {
         q = q.bind(prefix);

@@ -21,6 +21,7 @@ impl<R, H> BackgroundConsumer<R, H>
 where
     R: Reader + Send + 'static,
     R::Stream: 'static,
+    R::Cursor: Send + Sync + 'static,
     H: Handler + 'static,
 {
     pub fn new(reader: R, subscription: R::Subscription, handler: H, concurrency: usize) -> Self {
@@ -83,16 +84,17 @@ where
                             let _ = msg.ack().await;
                             return;
                         }
-                        let event = msg.event().clone();
                         let result = match timeout {
-                            Some(d) => match tokio::time::timeout(d, handler.handle(event)).await {
-                                Ok(r) => r,
-                                Err(_) => Err(Error::Timeout(format!(
-                                    "handler {} timed out",
-                                    handler.id()
-                                ))),
-                            },
-                            None => handler.handle(event).await,
+                            Some(d) => {
+                                match tokio::time::timeout(d, handler.handle(msg.event())).await {
+                                    Ok(r) => r,
+                                    Err(_) => Err(Error::Timeout(format!(
+                                        "handler {} timed out",
+                                        handler.id()
+                                    ))),
+                                }
+                            }
+                            None => handler.handle(msg.event()).await,
                         };
                         match result {
                             Ok(()) => {
@@ -151,7 +153,9 @@ mod tests {
     use crate::io::Message;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
-    use crate::{EventSubscription, OrganizationId};
+
+    #[derive(Debug, Clone, Default)]
+    struct TestSub;
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -166,9 +170,11 @@ mod tests {
     }
 
     impl Reader for VecReader {
-        type Subscription = EventSubscription;
+        type Subscription = TestSub;
         type Acker = NoopAcker;
-        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker>>> + Send>>;
+        type Cursor = crate::io::NoCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, crate::io::NoCursor>>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
             let events = self
@@ -177,8 +183,11 @@ mod tests {
                 .unwrap()
                 .take()
                 .expect("read called twice");
-            let stream =
-                futures::stream::iter(events.into_iter().map(|e| Ok(Message::new(e, NoopAcker))));
+            let stream = futures::stream::iter(
+                events
+                    .into_iter()
+                    .map(|e| Ok(Message::new(e, NoopAcker, crate::io::NoCursor))),
+            );
             Ok(Box::pin(stream))
         }
     }
@@ -192,7 +201,7 @@ mod tests {
         fn id(&self) -> &str {
             &self.id
         }
-        async fn handle(&self, _: Event) -> Result<()> {
+        async fn handle(&self, _: &Event) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -207,7 +216,7 @@ mod tests {
         fn id(&self) -> &str {
             &self.id
         }
-        async fn handle(&self, _: Event) -> Result<()> {
+        async fn handle(&self, _: &Event) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             Err(Error::Store("boom".into()))
         }
@@ -230,8 +239,8 @@ mod tests {
         }
     }
 
-    fn subscription() -> EventSubscription {
-        EventSubscription::for_organization(OrganizationId::new("org").unwrap())
+    fn subscription() -> TestSub {
+        TestSub
     }
 
     struct AllowNothing;
@@ -304,7 +313,7 @@ mod tests {
             fn id(&self) -> &str {
                 "slow"
             }
-            async fn handle(&self, _: Event) -> Result<()> {
+            async fn handle(&self, _: &Event) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(())
             }

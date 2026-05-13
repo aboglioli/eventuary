@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU16, NonZeroU32};
 
 use crate::error::{Error, Result};
 use crate::event::Event;
@@ -6,69 +6,60 @@ use crate::event::Event;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
+/// Logical partition assignment used by `PartitionedReader` and
+/// `CheckpointReader` for in-process lane scheduling.
+///
+/// `id < count.get()` is enforced at construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct LogicalPartition {
+    id: u16,
+    count: NonZeroU16,
+}
+
+impl LogicalPartition {
+    pub fn new(id: u16, count: NonZeroU16) -> Result<Self> {
+        if id >= count.get() {
+            return Err(Error::Config(format!(
+                "logical partition id {id} out of range for count {count}",
+                count = count.get()
+            )));
+        }
+        Ok(Self { id, count })
+    }
+
+    pub fn id(&self) -> u16 {
+        self.id
+    }
+
+    pub fn count(&self) -> u16 {
+        self.count.get()
+    }
+
+    pub fn count_nz(&self) -> NonZeroU16 {
+        self.count
+    }
+}
+
+/// Cursor extension: report which logical partition a cursor belongs to.
+pub trait CursorPartition {
+    fn partition(&self) -> Option<LogicalPartition>;
+}
+
+/// Cursor extension: map the delivery cursor to the value that should be
+/// persisted by a `CheckpointStore`. For most source cursors this is the
+/// identity; partition wrappers strip the partition envelope so the store
+/// commits only the underlying source cursor.
+pub trait CommitCursor: Clone + Send + Sync + 'static {
+    type Commit: Clone + Ord + Send + Sync + 'static;
+    fn commit_cursor(&self) -> Self::Commit;
+}
+
 /// Hashable contributor for partition routing.
 ///
 /// Implementations should hash a stable byte representation of the value
 /// (e.g. an event key) into a partition id in `0..total_partitions`.
 pub trait PartitionKey {
     fn partition(&self, total_partitions: NonZeroU32) -> u32;
-}
-
-/// Runtime partition assignment for a reader.
-///
-/// `count` is the total number of partitions in the assignment scheme;
-/// `id` is the partition this assignment owns. The unpartitioned case is
-/// represented by `Option::None` at the call site — not by `count == 1`.
-///
-/// Two workers using assignments with the same `count` and different `id`
-/// receive disjoint slices of the event log when paired with
-/// [`partition_for`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct PartitionAssignment {
-    count: NonZeroU32,
-    id: u32,
-}
-
-impl PartitionAssignment {
-    /// Creates a new partition assignment.
-    ///
-    /// Rejects `count < 2` (use `Option::None` for the unpartitioned case),
-    /// `count > i32::MAX` (the SQL checkpoint columns are `INTEGER`/`i32`
-    /// in both backends), and `id >= count` (out of range).
-    pub fn new(count: u32, id: u32) -> Result<Self> {
-        if count < 2 {
-            return Err(Error::Config(
-                "partition_count must be > 1; use Option::None for unpartitioned".to_owned(),
-            ));
-        }
-        if count > i32::MAX as u32 {
-            return Err(Error::Config(format!(
-                "partition_count {count} exceeds i32::MAX; SQL checkpoint columns are 32-bit signed integers"
-            )));
-        }
-        let count_nz = NonZeroU32::new(count).expect("count > 1");
-        if id >= count {
-            return Err(Error::Config(format!(
-                "partition id {id} out of range for count {count}"
-            )));
-        }
-        Ok(Self {
-            count: count_nz,
-            id,
-        })
-    }
-
-    pub fn count(&self) -> u32 {
-        self.count.get()
-    }
-
-    pub fn count_nz(&self) -> NonZeroU32 {
-        self.count
-    }
-
-    pub fn id(&self) -> u32 {
-        self.id
-    }
 }
 
 /// Canonical event → partition mapping.
@@ -120,38 +111,18 @@ mod tests {
     }
 
     #[test]
-    fn assignment_rejects_count_below_two() {
-        let err = PartitionAssignment::new(1, 0).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-        let err = PartitionAssignment::new(0, 0).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn assignment_rejects_count_above_i32_max() {
-        let err = PartitionAssignment::new(i32::MAX as u32 + 1, 0).unwrap_err();
+    fn logical_partition_rejects_id_out_of_range() {
+        let count = NonZeroU16::new(4).unwrap();
+        let err = LogicalPartition::new(4, count).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]
-    fn assignment_accepts_count_at_i32_max() {
-        PartitionAssignment::new(i32::MAX as u32, 0).expect("i32::MAX is the upper bound");
-    }
-
-    #[test]
-    fn assignment_rejects_id_out_of_range() {
-        let err = PartitionAssignment::new(4, 4).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-        let err = PartitionAssignment::new(4, 99).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn assignment_accessors_reflect_construction() {
-        let a = PartitionAssignment::new(8, 3).unwrap();
-        assert_eq!(a.count(), 8);
-        assert_eq!(a.id(), 3);
-        assert_eq!(a.count_nz().get(), 8);
+    fn logical_partition_accessors_reflect_construction() {
+        let count = NonZeroU16::new(8).unwrap();
+        let p = LogicalPartition::new(3, count).unwrap();
+        assert_eq!(p.id(), 3);
+        assert_eq!(p.count(), 8);
     }
 
     #[test]

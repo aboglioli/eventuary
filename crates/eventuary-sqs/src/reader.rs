@@ -9,13 +9,21 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{Message, Reader};
-use eventuary_core::{
-    Error, EventSubscription, OrganizationId, Result, SerializedEvent, StartFrom,
-};
+use eventuary_core::io::{EventFilter, Message, Reader};
+use eventuary_core::{Result, SerializedEvent};
 
 use crate::flusher::SqsFlusher;
 use crate::reader_config::SqsReaderConfig;
+
+#[derive(Debug, Clone)]
+pub struct SqsSubscription {
+    pub queue_url: String,
+    pub wait_time: Duration,
+    pub visibility_timeout: Duration,
+    pub max_messages: i32,
+    pub event_filter: EventFilter,
+    pub limit: Option<usize>,
+}
 
 pub struct SqsReader {
     client: Client,
@@ -28,30 +36,33 @@ impl SqsReader {
         Ok(Self { client, config })
     }
 
-    /// Build an [`EventSubscription`] seeded from this reader's config: the
-    /// configured tenant, optional consumer group, topic filter, namespace
-    /// prefix, and SQS-compatible `start_from` (always `Latest`). Use it as
-    /// a starting point and tweak before passing to [`Reader::read`].
-    pub fn default_subscription(&self) -> EventSubscription {
-        let mut subscription = match &self.config.organization {
-            Some(org) => EventSubscription::for_organization(org.clone()),
-            None => EventSubscription::new(),
-        };
-        subscription.consumer_group_id = self.config.consumer_group_id.clone();
-        if !self.config.topics.is_empty() {
-            subscription.topics = Some(self.config.topics.clone());
+    pub fn default_subscription(&self) -> SqsSubscription {
+        let mut filter = EventFilter::default();
+        if let Some(org) = self.config.organization.as_ref() {
+            filter.organization = Some(org.clone());
         }
-        subscription.namespace_prefix = self.config.namespace.clone();
-        subscription.start_from = self.config.start_from;
-        subscription.end_at = self.config.end_at;
-        subscription.limit = self.config.limit;
-        subscription
+        if !self.config.topics.is_empty() {
+            filter.topics = Some(
+                self.config
+                    .topics
+                    .iter()
+                    .map(|t| eventuary_core::TopicPattern::exact(t.clone()))
+                    .collect(),
+            );
+        }
+        if let Some(ns) = self.config.namespace.as_ref() {
+            filter.namespace = Some(eventuary_core::NamespacePattern::prefix(ns.clone()));
+        }
+        SqsSubscription {
+            queue_url: self.config.queue_url.clone(),
+            wait_time: self.config.wait_time,
+            visibility_timeout: self.config.visibility_timeout,
+            max_messages: self.config.max_messages,
+            event_filter: filter,
+            limit: self.config.limit,
+        }
     }
 
-    /// Convenience entry point that reads with [`default_subscription`].
-    /// Equivalent to `Reader::read(self, self.default_subscription())`.
-    ///
-    /// [`default_subscription`]: SqsReader::default_subscription
     pub async fn read(&self) -> Result<SqsStream> {
         eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
@@ -84,56 +95,20 @@ impl Stream for SqsStream {
     }
 }
 
-fn reject_runtime_partition(subscription: &EventSubscription) -> Result<()> {
-    if subscription.partition.is_some() {
-        return Err(Error::Config(
-            "SQS backend does not support runtime partition filter; workers compete on receive and the filter would force each worker to discard most messages".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_organization_filter(
-    subscription: &EventSubscription,
-    configured: &Option<OrganizationId>,
-) -> Result<()> {
-    if let (Some(sub_org), Some(cfg_org)) = (&subscription.organization, configured)
-        && sub_org != cfg_org
-    {
-        return Err(Error::Config(format!(
-            "subscription organization `{:?}` does not match reader tenant `{:?}`",
-            subscription.organization, configured
-        )));
-    }
-    Ok(())
-}
-
 impl Reader for SqsReader {
-    type Subscription = EventSubscription;
+    type Subscription = SqsSubscription;
     type Acker = BatchedAcker<String>;
+    type Cursor = eventuary_core::io::NoCursor;
     type Stream = SqsStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        validate_organization_filter(&subscription, &self.config.organization)?;
-        reject_runtime_partition(&subscription)?;
-        if !matches!(subscription.start_from, StartFrom::Latest) {
-            return Err(Error::Config(
-                "SQS reader only supports StartFrom::Latest; queue semantics deliver pending messages and cannot seek".to_owned(),
-            ));
-        }
-        if let Some(group) = subscription.consumer_group_id.as_ref()
-            && self.config.consumer_group_id.as_ref() != Some(group)
-        {
-            return Err(Error::Config(
-                "subscription consumer_group_id does not match reader; SQS uses the queue URL as consumer identity".to_owned(),
-            ));
-        }
-
         let client = self.client.clone();
-        let queue_url = self.config.queue_url.clone();
-        let max_messages = self.config.max_messages;
-        let wait_time = self.config.wait_time;
-        let visibility_timeout = self.config.visibility_timeout;
+        let queue_url = subscription.queue_url.clone();
+        let max_messages = subscription.max_messages;
+        let wait_time = subscription.wait_time;
+        let visibility_timeout = subscription.visibility_timeout;
+        let filter = subscription.event_filter.clone();
+        let limit = subscription.limit;
 
         let flusher = SqsFlusher::new(client.clone(), queue_url.clone());
         let ack_buffer = AckBuffer::spawn(flusher, self.config.ack_buffer.clone());
@@ -170,48 +145,44 @@ impl Reader for SqsReader {
                 for m in messages {
                     let receipt = match m.receipt_handle.clone() {
                         Some(r) => r,
-                        None => {
-                            tracing::warn!(
-                                "sqs message missing receipt handle; cannot ack or delete, dropping"
-                            );
-                            continue;
-                        }
+                        None => continue,
                     };
                     let body = match m.body.as_deref() {
                         Some(b) => b,
                         None => {
-                            tracing::warn!("sqs message missing body; skip-acking");
                             let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                             continue;
                         }
                     };
                     let serialized = match SerializedEvent::from_json_str(body) {
                         Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "malformed sqs body; skip-acking poison message");
+                        Err(_) => {
                             let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                             continue;
                         }
                     };
                     let event = match serialized.to_event() {
                         Ok(e) => e,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "sqs to_event failed; skip-acking poison message");
+                        Err(_) => {
                             let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                             continue;
                         }
                     };
-                    if !subscription.matches(&event) {
+                    if !filter.matches(&event) {
                         let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                         continue;
                     }
                     let acker = BatchedAcker::new(receipt, tx_ack.clone());
-                    if tx.send(Ok(Message::new(event, acker))).await.is_err() {
+                    if tx
+                        .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     delivered += 1;
-                    if let Some(limit) = subscription.limit
-                        && delivered >= limit
+                    if let Some(l) = limit
+                        && delivered >= l
                     {
                         return;
                     }
@@ -225,56 +196,5 @@ impl Reader for SqsReader {
             handle: Some(handle),
             ack_buffer,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use eventuary_core::OrganizationId;
-
-    fn org(value: &str) -> OrganizationId {
-        OrganizationId::new(value).unwrap()
-    }
-
-    #[test]
-    fn organization_filter_allows_all_subscription_with_configured_organization() {
-        let subscription = EventSubscription::new();
-        let configured = Some(org("acme"));
-
-        validate_organization_filter(&subscription, &configured).unwrap();
-    }
-
-    #[test]
-    fn organization_filter_allows_scoped_subscription_with_all_organizations_config() {
-        let subscription = EventSubscription::for_organization(org("acme"));
-
-        validate_organization_filter(&subscription, &None).unwrap();
-    }
-
-    #[test]
-    fn organization_filter_rejects_different_scoped_organizations() {
-        let subscription = EventSubscription::for_organization(org("acme"));
-        let configured = Some(org("other"));
-
-        let err = validate_organization_filter(&subscription, &configured).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn reject_runtime_partition_accepts_unpartitioned() {
-        let subscription = EventSubscription::for_organization(org("acme"));
-        reject_runtime_partition(&subscription).unwrap();
-    }
-
-    #[test]
-    fn reject_runtime_partition_rejects_partitioned() {
-        use eventuary_core::PartitionAssignment;
-
-        let mut subscription = EventSubscription::for_organization(org("acme"));
-        subscription.partition = Some(PartitionAssignment::new(4, 0).unwrap());
-
-        let err = reject_runtime_partition(&subscription).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
     }
 }

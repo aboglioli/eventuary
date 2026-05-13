@@ -36,6 +36,7 @@ mod event_key;
 pub mod io;
 mod metadata;
 mod namespace;
+mod namespace_pattern;
 mod organization;
 mod partition;
 mod payload;
@@ -43,6 +44,7 @@ mod serialization;
 mod snapshot;
 mod start_from;
 mod topic;
+mod topic_pattern;
 
 pub use collector::EventCollector;
 pub use consumer_group_id::ConsumerGroupId;
@@ -52,17 +54,18 @@ pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
     BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
-    DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter,
-    EventSubscription, Filter, FilterExt, FilteredHandler, Handler, HandlerExt, Message, Reader,
-    ReaderExt, RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt,
-    backoff_delay,
+    DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
+    FilterExt, FilteredHandler, Handler, HandlerExt, Message, NoCursor, Reader, ReaderExt,
+    RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt, backoff_delay,
 };
 pub use metadata::Metadata;
 pub use namespace::Namespace;
+pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
-pub use partition::{PartitionAssignment, PartitionKey, partition_for};
+pub use partition::{CommitCursor, CursorPartition, LogicalPartition, PartitionKey, partition_for};
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};
-pub use start_from::StartFrom;
+pub use start_from::{StartFrom, StartableSubscription};
 pub use topic::Topic;
+pub use topic_pattern::TopicPattern;

@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE IF NOT EXISTS {events} (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
     organization TEXT NOT NULL,
@@ -15,16 +15,16 @@ CREATE TABLE IF NOT EXISTS events (
     causation_id TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_org_seq ON events (organization, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_org_ns_seq ON events (organization, namespace, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_org_topic_seq ON events (organization, topic, sequence);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events (timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_org_seq ON {events} (organization, sequence);
+CREATE INDEX IF NOT EXISTS idx_events_org_ns_seq ON {events} (organization, namespace, sequence);
+CREATE INDEX IF NOT EXISTS idx_events_org_topic_seq ON {events} (organization, topic, sequence);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON {events} (timestamp);
 
-CREATE TABLE IF NOT EXISTS consumer_offsets (
+CREATE TABLE IF NOT EXISTS {offsets} (
     consumer_group_id TEXT    NOT NULL,
-    checkpoint_name   TEXT    NOT NULL DEFAULT 'default',
+    stream_id   TEXT    NOT NULL DEFAULT 'default',
     partition         INTEGER NOT NULL DEFAULT 0,
     partition_count   INTEGER NOT NULL DEFAULT 1,
     sequence          INTEGER NOT NULL,
-    PRIMARY KEY (consumer_group_id, checkpoint_name, partition, partition_count)
+    PRIMARY KEY (consumer_group_id, stream_id, partition, partition_count)
 );

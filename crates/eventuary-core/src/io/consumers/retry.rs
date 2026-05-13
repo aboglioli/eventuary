@@ -127,11 +127,11 @@ impl<H: Handler, P: RetryPolicy, W: Writer> Handler for RetryHandler<H, P, W> {
         self.inner.id()
     }
 
-    async fn handle(&self, event: Event) -> Result<()> {
+    async fn handle(&self, event: &Event) -> Result<()> {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let result = self.inner.handle(event.clone()).await;
+            let result = self.inner.handle(event).await;
             let error = match result {
                 Ok(()) => return Ok(()),
                 Err(e) => e,
@@ -145,7 +145,7 @@ impl<H: Handler, P: RetryPolicy, W: Writer> Handler for RetryHandler<H, P, W> {
                     if attempt >= self.config.max_attempts {
                         let reason = error.to_string();
                         self.dead_letter
-                            .send(&event, self.inner.id(), attempt, &reason)
+                            .send(event, self.inner.id(), attempt, &reason)
                             .await?;
                         return Ok(());
                     }
@@ -154,7 +154,7 @@ impl<H: Handler, P: RetryPolicy, W: Writer> Handler for RetryHandler<H, P, W> {
                 }
                 RetryAction::DeadLetter(reason) => {
                     self.dead_letter
-                        .send(&event, self.inner.id(), attempt, &reason)
+                        .send(event, self.inner.id(), attempt, &reason)
                         .await?;
                     return Ok(());
                 }
@@ -217,7 +217,7 @@ mod tests {
             &self.id
         }
 
-        async fn handle(&self, _: Event) -> Result<()> {
+        async fn handle(&self, _: &Event) -> Result<()> {
             let count = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if (count as u32) <= self.fail_until {
                 return Err(Error::Store(format!("attempt {count} failed")));
@@ -272,7 +272,7 @@ mod tests {
             DeadLetterWriter::new(writer),
         );
 
-        retry.handle(make_event()).await.unwrap();
+        retry.handle(&make_event()).await.unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert!(written.lock().unwrap().is_empty());
     }
@@ -299,7 +299,7 @@ mod tests {
             DeadLetterWriter::new(writer),
         );
 
-        retry.handle(make_event()).await.unwrap();
+        retry.handle(&make_event()).await.unwrap();
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         let captured = written.lock().unwrap();
         assert_eq!(captured.len(), 1);
@@ -330,7 +330,7 @@ mod tests {
             DeadLetterWriter::new(writer),
         );
 
-        retry.handle(original).await.unwrap();
+        retry.handle(&original).await.unwrap();
         let captured = written.lock().unwrap();
         let dead_letter = &captured[0];
         let value: serde_json::Value = dead_letter.payload().to_json().unwrap();

@@ -7,5 +7,5 @@
 mod reader;
 mod writer;
 
-pub use reader::InmemReader;
+pub use reader::{InmemReader, MemorySubscription};
 pub use writer::InmemWriter;

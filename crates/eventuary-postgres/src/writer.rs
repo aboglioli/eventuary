@@ -3,13 +3,38 @@ use sqlx::PgPool;
 use eventuary_core::io::Writer;
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
+use crate::relation::PgRelationName;
+
+#[derive(Debug, Clone)]
+pub struct PgWriterConfig {
+    pub events_relation: PgRelationName,
+}
+
+impl Default for PgWriterConfig {
+    fn default() -> Self {
+        Self {
+            events_relation: PgRelationName::new("events").expect("default events relation"),
+        }
+    }
+}
+
 pub struct PgEventWriter {
     pool: PgPool,
+    insert_sql: String,
 }
 
 impl PgEventWriter {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self::new_with_config(pool, PgWriterConfig::default())
+    }
+
+    pub fn new_with_config(pool: PgPool, config: PgWriterConfig) -> Self {
+        let insert_sql = format!(
+            "INSERT INTO {events} (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id) \
+             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, $11::uuid, $12, $13)",
+            events = config.events_relation.render(),
+        );
+        Self { pool, insert_sql }
     }
 }
 
@@ -17,26 +42,23 @@ impl Writer for PgEventWriter {
     async fn write(&self, event: &Event) -> Result<()> {
         let row = EventRow::from_event(event)?;
 
-        sqlx::query(
-            "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id) \
-             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, $11::uuid, $12, $13)",
-        )
-        .bind(&row.id)
-        .bind(&row.organization)
-        .bind(&row.namespace)
-        .bind(&row.topic)
-        .bind(&row.key)
-        .bind(&row.payload)
-        .bind(&row.content_type)
-        .bind(&row.metadata)
-        .bind(&row.timestamp)
-        .bind(row.version)
-        .bind(&row.parent_id)
-        .bind(&row.correlation_id)
-        .bind(&row.causation_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| Error::Store(e.to_string()))?;
+        sqlx::query(&self.insert_sql)
+            .bind(&row.id)
+            .bind(&row.organization)
+            .bind(&row.namespace)
+            .bind(&row.topic)
+            .bind(&row.key)
+            .bind(&row.payload)
+            .bind(&row.content_type)
+            .bind(&row.metadata)
+            .bind(&row.timestamp)
+            .bind(row.version)
+            .bind(&row.parent_id)
+            .bind(&row.correlation_id)
+            .bind(&row.causation_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Store(e.to_string()))?;
 
         Ok(())
     }
@@ -52,26 +74,23 @@ impl Writer for PgEventWriter {
             .map_err(|e| Error::Store(e.to_string()))?;
         for event in events {
             let row = EventRow::from_event(event)?;
-            sqlx::query(
-                "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id) \
-                 VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, $11::uuid, $12, $13)",
-            )
-            .bind(&row.id)
-            .bind(&row.organization)
-            .bind(&row.namespace)
-            .bind(&row.topic)
-            .bind(&row.key)
-            .bind(&row.payload)
-            .bind(&row.content_type)
-            .bind(&row.metadata)
-            .bind(&row.timestamp)
-            .bind(row.version)
-            .bind(&row.parent_id)
-            .bind(&row.correlation_id)
-            .bind(&row.causation_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            sqlx::query(&self.insert_sql)
+                .bind(&row.id)
+                .bind(&row.organization)
+                .bind(&row.namespace)
+                .bind(&row.topic)
+                .bind(&row.key)
+                .bind(&row.payload)
+                .bind(&row.content_type)
+                .bind(&row.metadata)
+                .bind(&row.timestamp)
+                .bind(row.version)
+                .bind(&row.parent_id)
+                .bind(&row.correlation_id)
+                .bind(&row.causation_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?;
         }
         tx.commit().await.map_err(|e| Error::Store(e.to_string()))?;
         Ok(())

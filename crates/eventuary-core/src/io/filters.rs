@@ -1,7 +1,46 @@
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+
 use crate::event::Event;
-use crate::io::Filter;
+use crate::event_key::EventKey;
+use crate::metadata::Metadata;
 use crate::namespace::Namespace;
+use crate::namespace_pattern::NamespacePattern;
+use crate::organization::OrganizationId;
 use crate::topic::Topic;
+use crate::topic_pattern::TopicPattern;
+
+pub trait Filter: Send + Sync {
+    fn matches(&self, event: &Event) -> bool;
+}
+
+impl<T: Filter + ?Sized> Filter for Arc<T> {
+    fn matches(&self, event: &Event) -> bool {
+        (**self).matches(event)
+    }
+}
+
+impl<T: Filter + ?Sized> Filter for Box<T> {
+    fn matches(&self, event: &Event) -> bool {
+        (**self).matches(event)
+    }
+}
+
+pub type BoxFilter = Box<dyn Filter>;
+pub type ArcFilter = Arc<dyn Filter>;
+
+pub trait FilterExt: Filter + Sized + 'static {
+    fn into_boxed(self) -> BoxFilter {
+        Box::new(self)
+    }
+
+    fn into_arced(self) -> ArcFilter {
+        Arc::new(self)
+    }
+}
+
+impl<T: Filter + 'static> FilterExt for T {}
 
 pub struct AllFilter;
 
@@ -43,6 +82,74 @@ impl Filter for NamespacePrefixFilter {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct EventFilter {
+    pub organization: Option<OrganizationId>,
+    pub topics: Option<Vec<TopicPattern>>,
+    pub namespace: Option<NamespacePattern>,
+    pub keys: Option<Vec<EventKey>>,
+    pub metadata: Option<Metadata>,
+    pub end_at: Option<DateTime<Utc>>,
+}
+
+impl EventFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn for_organization(organization: OrganizationId) -> Self {
+        Self {
+            organization: Some(organization),
+            ..Self::default()
+        }
+    }
+
+    pub fn matches(&self, event: &Event) -> bool {
+        if let Some(organization) = self.organization.as_ref()
+            && event.organization() != organization
+        {
+            return false;
+        }
+        if let Some(topics) = self.topics.as_ref()
+            && !topics.iter().any(|p| p.matches(event.topic()))
+        {
+            return false;
+        }
+        if let Some(namespace) = self.namespace.as_ref()
+            && !namespace.matches(event.namespace())
+        {
+            return false;
+        }
+        if let Some(keys) = self.keys.as_ref()
+            && !event
+                .key()
+                .is_some_and(|event_key| keys.iter().any(|key| key == event_key))
+        {
+            return false;
+        }
+        if let Some(metadata) = self.metadata.as_ref()
+            && !metadata
+                .as_map()
+                .iter()
+                .all(|(key, value)| event.metadata().get(key) == Some(value.as_str()))
+        {
+            return false;
+        }
+        if let Some(end_at) = self.end_at
+            && event.timestamp() > end_at
+        {
+            return false;
+        }
+        true
+    }
+}
+
+impl Filter for EventFilter {
+    fn matches(&self, event: &Event) -> bool {
+        EventFilter::matches(self, event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +158,20 @@ mod tests {
 
     fn ev(topic: &str, namespace: &str) -> Event {
         Event::create("org", namespace, topic, Payload::from_string("p")).unwrap()
+    }
+
+    struct AllowAll;
+    impl Filter for AllowAll {
+        fn matches(&self, _: &Event) -> bool {
+            true
+        }
+    }
+
+    struct AllowNothing;
+    impl Filter for AllowNothing {
+        fn matches(&self, _: &Event) -> bool {
+            false
+        }
     }
 
     #[test]
@@ -71,5 +192,35 @@ mod tests {
         assert!(f.matches(&ev("a.b", "/backend")));
         assert!(f.matches(&ev("a.b", "/backend/auth")));
         assert!(!f.matches(&ev("a.b", "/frontend")));
+    }
+
+    #[test]
+    fn filter_into_boxed_yields_dyn_filter() {
+        let f: BoxFilter = AllowAll.into_boxed();
+        assert!(f.matches(&ev("a.b", "/x")));
+        let f: BoxFilter = AllowNothing.into_boxed();
+        assert!(!f.matches(&ev("a.b", "/x")));
+    }
+
+    #[test]
+    fn filter_into_arced_yields_shared_filter() {
+        let f: ArcFilter = AllowAll.into_arced();
+        let clone = Arc::clone(&f);
+        assert!(f.matches(&ev("a.b", "/x")));
+        assert!(clone.matches(&ev("a.b", "/x")));
+    }
+
+    #[test]
+    fn filter_box_blanket_passes_as_generic_filter() {
+        fn take<F: Filter>(f: F, e: &Event) -> bool {
+            f.matches(e)
+        }
+        let boxed: BoxFilter = AllowAll.into_boxed();
+        assert!(take(boxed, &ev("a.b", "/x")));
+    }
+
+    fn _assert_filter_dyn_safe() {
+        fn _take(_: BoxFilter) {}
+        fn _take_arc(_: ArcFilter) {}
     }
 }

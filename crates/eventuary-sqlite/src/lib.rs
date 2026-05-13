@@ -2,16 +2,26 @@
 //!
 //! Append-only events table with auto-incrementing sequence. Reader streams
 //! events in sequence order and supports consumer groups via a
-//! `consumer_offsets` table scoped by `(consumer_group_id, checkpoint_name,
+//! `consumer_offsets` table scoped by `(consumer_group_id, stream_id,
 //! partition, partition_count)`.
 //!
 //! ack advances the checkpoint, nack leaves it unchanged. SQLite work runs in
 //! `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
+mod checkpoint_store;
 mod database;
 mod reader;
+mod relation;
 mod writer;
 
-pub use database::{Migration, SqliteConn, SqliteDatabase, migrations, schema_sql};
-pub use reader::{SqliteAcker, SqliteAckerVariant, SqliteReader, SqliteReaderConfig, SqliteStream};
-pub use writer::SqliteEventWriter;
+pub use checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
+pub use database::{
+    Migration, SqliteConn, SqliteDatabase, SqliteDatabaseConfig, migrations, render_migration_sql,
+    render_schema_sql, schema_sql,
+};
+pub use reader::{
+    SqliteCursor, SqliteCursorAcker, SqliteReader, SqliteReaderConfig, SqliteStream,
+    SqliteSubscription,
+};
+pub use relation::SqliteRelationName;
+pub use writer::{SqliteEventWriter, SqliteWriterConfig};

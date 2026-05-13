@@ -37,12 +37,12 @@ each backend crate as a feature-gated module (`eventuary::memory::InmemReader`,
 
 The workspace also publishes the individual crates separately for advanced
 use cases — for example, writing a custom backend without pulling the
-umbrella, or testing your backend against the shared conformance suite:
+umbrella, or wiring backend conformance tests directly:
 
 | Crate | When to depend directly |
 |-------|------------------------|
 | [`eventuary-core`](crates/eventuary-core) | Building a new backend; want only the event model + IO traits |
-| [`eventuary-conformance`](crates/eventuary-conformance) | Dev-dep for backend authors who want to run the shared conformance suite |
+| [`eventuary-conformance`](crates/eventuary-conformance) | Dev-dep for backend authors; reusable cursor-reader conformance cases are being rebuilt |
 | [`eventuary-memory`](crates/eventuary-memory) etc. | Pinning a backend's version independently of the umbrella |
 
 Typical applications should stick to the umbrella `eventuary` crate.
@@ -108,8 +108,9 @@ eventuary = { version = "0.1.0-alpha.0", features = ["memory"] }
 ```
 
 ```rust
-use eventuary::memory::{InmemReader, InmemWriter};
-use eventuary::{Event, EventSubscription, OrganizationId, Payload, Reader, Writer};
+use eventuary::io::EventFilter;
+use eventuary::memory::{InmemReader, InmemWriter, MemorySubscription};
+use eventuary::{Event, OrganizationId, Payload, Reader, Writer};
 use tokio::sync::mpsc;
 
 let (tx, rx) = mpsc::channel(100);
@@ -127,9 +128,111 @@ let event = Event::builder(
 
 writer.write(&event).await?;
 
-let subscription = EventSubscription::new(OrganizationId::new("acme")?);
+let subscription = MemorySubscription {
+    filter: EventFilter::for_organization(OrganizationId::new("acme")?),
+    limit: None,
+};
 let mut stream = reader.read(subscription).await?;
 ```
+
+## Cursor + Checkpoint Composition
+
+Backend readers deliver `Message<Acker, Cursor>`. `Event` remains immutable
+and cursor-free; delivery state lives only in the message envelope.
+
+SQL readers (`PgReader`, `SqliteReader`) are source readers: they read the
+events table and manage in-memory cursor ack/nack. They do not persist
+consumer progress. Durable progress is handled by `CheckpointReader` plus a
+backend `CheckpointStore`.
+
+```rust
+use eventuary::io::checkpoint::{CheckpointScope, StreamId};
+use eventuary::io::readers::{CheckpointReader, CheckpointSubscription};
+use eventuary::sqlite::{
+    SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteReader,
+    SqliteReaderConfig, SqliteSubscription,
+};
+use eventuary::{ConsumerGroupId, Reader, StartFrom};
+
+let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+let store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+let checkpointed = CheckpointReader::new(source, store);
+
+let scope = CheckpointScope::new(
+    ConsumerGroupId::new("orders-projection")?,
+    StreamId::new("orders")?,
+);
+let mut stream = checkpointed
+    .read(CheckpointSubscription::new(
+        SqliteSubscription {
+            start: StartFrom::Earliest,
+            ..SqliteSubscription::default()
+        },
+        scope,
+    ))
+    .await?;
+```
+
+`PartitionedReader` is an in-process lane scheduler. It wraps any reader,
+routes events into logical lanes using deterministic event-key partitioning,
+acks the inner source after accepting a message into a lane, and exposes one
+merged stream. Downstream `ack` clears the lane in-flight slot; downstream
+`nack` requeues the same event at the front of that lane.
+
+```rust
+use eventuary::io::checkpoint::{CheckpointScope, StreamId};
+use eventuary::io::readers::{
+    CheckpointReader, CheckpointSubscription, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription,
+};
+use eventuary::sqlite::{
+    SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteReader,
+    SqliteReaderConfig, SqliteSubscription,
+};
+use eventuary::{ConsumerGroupId, Reader, StartFrom};
+
+let scope = CheckpointScope::new(
+    ConsumerGroupId::new("orders-projection")?,
+    StreamId::new("orders")?,
+);
+let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+let partitioned = PartitionedReader::new(source, PartitionedReaderConfig::default());
+let checkpoint_store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+let checkpointed = CheckpointReader::new(partitioned, checkpoint_store);
+
+let mut stream = checkpointed
+    .read(CheckpointSubscription::new(
+        PartitionedSubscription::new(SqliteSubscription {
+            start: StartFrom::Earliest,
+            ..SqliteSubscription::default()
+        }),
+        scope,
+    ))
+    .await?;
+```
+
+`CheckpointReader` commits checkpoints in contiguous delivered order per
+logical partition. `nack` does not advance the checkpoint. SQL checkpoint
+stores persist the source cursor (`PgCursor` / `SqliteCursor`) and use the
+message cursor's partition metadata as part of the checkpoint key.
+
+## Configurable SQL Relations
+
+Postgres and SQLite can use default table names or configured relation names:
+
+```rust
+use eventuary::postgres::{PgDatabase, PgDatabaseConfig, PgRelationName};
+
+let config = PgDatabaseConfig {
+    events_relation: PgRelationName::new("eventuary.events")?,
+    offsets_relation: PgRelationName::new("eventuary.consumer_offsets")?,
+    ..PgDatabaseConfig::default()
+};
+let db = PgDatabase::connect_with_config(database_url, config).await?;
+```
+
+Relation names are validated and rendered as quoted identifiers, including
+schema-qualified names such as `eventuary.events`.
 
 ## Consumer Loop
 
@@ -141,8 +244,8 @@ struct LogHandler;
 impl Handler for LogHandler {
     fn id(&self) -> &str { "log-handler" }
 
-    fn handle(&self, event: Event)
-        -> impl std::future::Future<Output = eventuary::Result<()>> + Send
+    fn handle<'a>(&'a self, event: &'a Event)
+        -> impl std::future::Future<Output = eventuary::Result<()>> + Send + 'a
     {
         async move {
             tracing::info!(topic = %event.topic(), "received");
@@ -152,9 +255,9 @@ impl Handler for LogHandler {
 }
 ```
 
-`Handler::handle` receives an owned `Event` — the ack/nack envelope is owned
-by the `Reader`'s `Message<A>` and managed by the consumer driver, not by the
-handler.
+`Handler::handle` receives a borrowed `&Event` — the ack/nack envelope is
+owned by the `Reader`'s `Message<A, C>` and managed by the consumer driver,
+not by the handler.
 
 `BackgroundConsumer` polls a `Reader`, applies an optional `Filter`, drives a
 `Handler` per event, and acks on `Ok(())` / nacks on `Err(_)` or timeout.

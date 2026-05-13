@@ -12,13 +12,58 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{Message, Reader};
+use eventuary_core::io::{EventFilter, Message, Reader};
 use eventuary_core::{
-    Error, Event, EventSubscription, OrganizationId, Result, SerializedEvent, StartFrom,
+    CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
+    SerializedEvent, StartFrom,
 };
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
 use crate::reader_config::KafkaReaderConfig;
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct KafkaCursor {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+}
+
+impl PartialOrd for KafkaCursor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KafkaCursor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.topic
+            .cmp(&other.topic)
+            .then(self.partition.cmp(&other.partition))
+            .then(self.offset.cmp(&other.offset))
+    }
+}
+
+impl CursorPartition for KafkaCursor {
+    fn partition(&self) -> Option<LogicalPartition> {
+        None
+    }
+}
+
+impl CommitCursor for KafkaCursor {
+    type Commit = KafkaCursor;
+    fn commit_cursor(&self) -> Self::Commit {
+        self.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KafkaSubscription {
+    pub topics: Vec<String>,
+    pub consumer_group_id: ConsumerGroupId,
+    pub start_from: StartFrom<KafkaCursor>,
+    pub event_filter: EventFilter,
+    pub limit: Option<usize>,
+}
 
 pub struct KafkaReader {
     consumer: Arc<StreamConsumer>,
@@ -38,9 +83,9 @@ impl KafkaReader {
             )
             .set(
                 "auto.offset.reset",
-                match config.start_from {
+                match &config.start_from {
                     StartFrom::Earliest => "earliest",
-                    StartFrom::Latest | StartFrom::Timestamp(_) => "latest",
+                    StartFrom::Latest | StartFrom::Timestamp(_) | StartFrom::After(_) => "latest",
                 },
             );
         let consumer: StreamConsumer = cfg.create().map_err(|e| Error::Store(e.to_string()))?;
@@ -50,8 +95,8 @@ impl KafkaReader {
             .subscribe(&topic_refs)
             .map_err(|e| Error::Store(e.to_string()))?;
 
-        if let StartFrom::Timestamp(ts) = config.start_from {
-            apply_timestamp_seek(&consumer, &config, ts)?;
+        if let StartFrom::Timestamp(ts) = &config.start_from {
+            apply_timestamp_seek(&consumer, &config, *ts)?;
         }
 
         Ok(Self {
@@ -60,28 +105,34 @@ impl KafkaReader {
         })
     }
 
-    /// Build an [`EventSubscription`] seeded from this reader's config: the
-    /// configured tenant, consumer group, event-topic filter, namespace
-    /// prefix, `start_from`, `end_at`, and `limit`. Use it as a starting
-    /// point and tweak before passing to [`Reader::read`].
-    pub fn default_subscription(&self) -> EventSubscription {
-        let mut subscription = match &self.config.organization {
-            Some(org) => EventSubscription::for_organization(org.clone()),
-            None => EventSubscription::new(),
-        };
-        subscription.consumer_group_id = Some(self.config.consumer_group_id.clone());
-        subscription.topics = self.config.event_topics.clone();
-        subscription.namespace_prefix = self.config.namespace.clone();
-        subscription.start_from = self.config.start_from;
-        subscription.end_at = self.config.end_at;
-        subscription.limit = self.config.limit;
-        subscription
+    pub fn default_subscription(&self) -> KafkaSubscription {
+        let mut filter = EventFilter::default();
+        if let Some(org) = self.config.organization.as_ref() {
+            filter.organization = Some(org.clone());
+        }
+        if let Some(topics) = self.config.event_topics.as_ref() {
+            filter.topics = Some(
+                topics
+                    .iter()
+                    .map(|t| eventuary_core::TopicPattern::exact(t.clone()))
+                    .collect(),
+            );
+        }
+        if let Some(ns) = self.config.namespace.as_ref() {
+            filter.namespace = Some(eventuary_core::NamespacePattern::prefix(ns.clone()));
+        }
+        if let Some(end_at) = self.config.end_at {
+            filter.end_at = Some(end_at);
+        }
+        KafkaSubscription {
+            topics: self.config.kafka_topics.clone(),
+            consumer_group_id: self.config.consumer_group_id.clone(),
+            start_from: StartFrom::Latest,
+            event_filter: filter,
+            limit: self.config.limit,
+        }
     }
 
-    /// Convenience entry point that reads with [`default_subscription`].
-    /// Equivalent to `Reader::read(self, self.default_subscription())`.
-    ///
-    /// [`default_subscription`]: KafkaReader::default_subscription
     pub async fn read(&self) -> Result<KafkaStream> {
         eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
@@ -121,7 +172,7 @@ fn apply_timestamp_seek(
 }
 
 pub struct KafkaStream {
-    rx: mpsc::Receiver<Result<Message<BatchedAcker<KafkaOffsetToken>>>>,
+    rx: mpsc::Receiver<Result<Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>>>,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
     ack_buffer: Arc<AckBuffer<KafkaFlusher>>,
@@ -141,54 +192,30 @@ impl Drop for KafkaStream {
 }
 
 impl Stream for KafkaStream {
-    type Item = Result<Message<BatchedAcker<KafkaOffsetToken>>>;
+    type Item = Result<Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
-fn reject_runtime_partition(subscription: &EventSubscription) -> Result<()> {
-    if subscription.partition.is_some() {
-        return Err(Error::Config(
-            "Kafka backend partitions natively via its consumer group coordinator; remove subscription.partition (runtime filter would double-partition events)".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_organization_filter(
-    subscription: &EventSubscription,
-    configured: &Option<OrganizationId>,
-) -> Result<()> {
-    if let (Some(sub_org), Some(cfg_org)) = (&subscription.organization, configured)
-        && sub_org != cfg_org
-    {
-        return Err(Error::Config(format!(
-            "subscription organization `{:?}` does not match reader tenant `{:?}`",
-            subscription.organization, configured
-        )));
-    }
-    Ok(())
-}
-
 impl Reader for KafkaReader {
-    type Subscription = EventSubscription;
+    type Subscription = KafkaSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
+    type Cursor = KafkaCursor;
     type Stream = KafkaStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        validate_organization_filter(&subscription, &self.config.organization)?;
-        reject_runtime_partition(&subscription)?;
-        if let Some(group) = subscription.consumer_group_id.as_ref()
-            && group != &self.config.consumer_group_id
-        {
+        if subscription.consumer_group_id != self.config.consumer_group_id {
             return Err(Error::Config(format!(
                 "subscription consumer_group_id `{}` does not match reader group `{}` (Kafka group is bound at construction)",
-                group.as_str(),
+                subscription.consumer_group_id.as_str(),
                 self.config.consumer_group_id.as_str()
             )));
         }
-        if subscription.start_from != self.config.start_from {
+        if !matches!(subscription.start_from, StartFrom::Latest)
+            && (matches!(&self.config.start_from, StartFrom::Latest)
+                != matches!(subscription.start_from, StartFrom::Latest))
+        {
             return Err(Error::Config(
                 "subscription start_from cannot override reader; Kafka group offset is bound at construction".to_owned(),
             ));
@@ -202,6 +229,8 @@ impl Reader for KafkaReader {
         let (tx, rx) = mpsc::channel(self.config.max_poll_records);
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
+        let filter = subscription.event_filter.clone();
+        let limit = subscription.limit;
 
         let handle = tokio::spawn(async move {
             let mut delivered = 0usize;
@@ -231,54 +260,43 @@ impl Reader for KafkaReader {
                 let body = match msg.payload() {
                     Some(p) => p,
                     None => {
-                        tracing::warn!(
-                            topic = %token.topic,
-                            partition = token.partition,
-                            offset = token.offset,
-                            "kafka record missing payload; skip-acking"
-                        );
                         let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                         continue;
                     }
                 };
                 let serialized: SerializedEvent = match serde_json::from_slice(body) {
                     Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(
-                            topic = %token.topic,
-                            partition = token.partition,
-                            offset = token.offset,
-                            error = %e,
-                            "kafka body parse error; skip-acking poison record"
-                        );
+                    Err(_) => {
                         let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                         continue;
                     }
                 };
                 let event: Event = match serialized.to_event() {
                     Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!(
-                            topic = %token.topic,
-                            partition = token.partition,
-                            offset = token.offset,
-                            error = %e,
-                            "kafka to_event error; skip-acking poison record"
-                        );
+                    Err(_) => {
                         let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                         continue;
                     }
                 };
-                if !subscription.matches(&event) {
+                if !filter.matches(&event) {
                     let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                     continue;
                 }
+                let cursor = KafkaCursor {
+                    topic: token.topic.clone(),
+                    partition: token.partition,
+                    offset: token.offset,
+                };
                 let acker = BatchedAcker::new(token, tx_ack.clone());
-                if tx.send(Ok(Message::new(event, acker))).await.is_err() {
+                if tx
+                    .send(Ok(Message::new(event, acker, cursor)))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
                 delivered += 1;
-                if let Some(l) = subscription.limit
+                if let Some(l) = limit
                     && delivered >= l
                 {
                     return;
@@ -292,56 +310,5 @@ impl Reader for KafkaReader {
             handle: Some(handle),
             ack_buffer,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use eventuary_core::OrganizationId;
-
-    fn org(value: &str) -> OrganizationId {
-        OrganizationId::new(value).unwrap()
-    }
-
-    #[test]
-    fn organization_filter_allows_all_subscription_with_configured_organization() {
-        let subscription = EventSubscription::new();
-        let configured = Some(org("acme"));
-
-        validate_organization_filter(&subscription, &configured).unwrap();
-    }
-
-    #[test]
-    fn organization_filter_allows_scoped_subscription_with_all_organizations_config() {
-        let subscription = EventSubscription::for_organization(org("acme"));
-
-        validate_organization_filter(&subscription, &None).unwrap();
-    }
-
-    #[test]
-    fn organization_filter_rejects_different_scoped_organizations() {
-        let subscription = EventSubscription::for_organization(org("acme"));
-        let configured = Some(org("other"));
-
-        let err = validate_organization_filter(&subscription, &configured).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn reject_runtime_partition_accepts_unpartitioned() {
-        let subscription = EventSubscription::for_organization(org("acme"));
-        reject_runtime_partition(&subscription).unwrap();
-    }
-
-    #[test]
-    fn reject_runtime_partition_rejects_partitioned() {
-        use eventuary_core::PartitionAssignment;
-
-        let mut subscription = EventSubscription::for_organization(org("acme"));
-        subscription.partition = Some(PartitionAssignment::new(4, 0).unwrap());
-
-        let err = reject_runtime_partition(&subscription).unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
     }
 }
