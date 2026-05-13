@@ -23,7 +23,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-eventuary-conformance = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 

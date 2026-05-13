@@ -1093,7 +1093,6 @@ dependencies = [
 name = "eventuary-memory"
 version = "0.1.0-alpha.0"
 dependencies = [
- "eventuary-conformance",
  "eventuary-core",
  "futures",
  "tokio",
@@ -1105,7 +1104,6 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "chrono",
  "either",
- "eventuary-conformance",
  "eventuary-core",
  "futures",
  "serde",
@@ -1123,7 +1121,6 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "chrono",
  "either",
- "eventuary-conformance",
  "eventuary-core",
  "futures",
  "rusqlite",

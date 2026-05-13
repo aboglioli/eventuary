@@ -15,7 +15,6 @@ futures.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-eventuary-conformance = { workspace = true }
 futures.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
