@@ -142,15 +142,17 @@ mod tests {
     use crate::io::NoCursor;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
-    use crate::{EventSubscription, OrganizationId};
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(i64);
 
+    #[derive(Debug, Clone, Default)]
+    struct TestSub;
+
     struct UnitReader;
 
     impl Reader for UnitReader {
-        type Subscription = EventSubscription;
+        type Subscription = TestSub;
         type Acker = NoopAcker;
         type Cursor = TestCursor;
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
@@ -165,55 +167,35 @@ mod tests {
 
     #[tokio::test]
     async fn boxed_reader_preserves_cursor_type() {
-        let reader: BoxReader<EventSubscription, TestCursor> = UnitReader.into_boxed();
-        let mut stream = reader
-            .read(EventSubscription::for_organization(
-                OrganizationId::new("org").unwrap(),
-            ))
-            .await
-            .unwrap();
+        let reader: BoxReader<TestSub, TestCursor> = UnitReader.into_boxed();
+        let mut stream = reader.read(TestSub).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         assert_eq!(*msg.cursor(), TestCursor(1));
     }
 
     #[tokio::test]
     async fn into_boxed_yields_dyn_safe_reader() {
-        let reader: BoxReader<EventSubscription, TestCursor> = UnitReader.into_boxed();
-        let mut stream = reader
-            .read(EventSubscription::for_organization(
-                OrganizationId::new("org").unwrap(),
-            ))
-            .await
-            .unwrap();
+        let reader: BoxReader<TestSub, TestCursor> = UnitReader.into_boxed();
+        let mut stream = reader.read(TestSub).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         msg.ack().await.unwrap();
     }
 
     #[tokio::test]
     async fn into_arced_yields_shared_reader() {
-        let reader: ArcReader<EventSubscription, TestCursor> = UnitReader.into_arced();
+        let reader: ArcReader<TestSub, TestCursor> = UnitReader.into_arced();
         let clone = Arc::clone(&reader);
-        let mut stream = clone
-            .read(EventSubscription::for_organization(
-                OrganizationId::new("org").unwrap(),
-            ))
-            .await
-            .unwrap();
+        let mut stream = clone.read(TestSub).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         msg.ack().await.unwrap();
     }
 
     #[tokio::test]
     async fn vec_of_boxed_readers_dispatches_each() {
-        let readers: Vec<BoxReader<EventSubscription, TestCursor>> =
+        let readers: Vec<BoxReader<TestSub, TestCursor>> =
             vec![UnitReader.into_boxed(), UnitReader.into_boxed()];
         for r in &readers {
-            let mut stream = r
-                .read(EventSubscription::for_organization(
-                    OrganizationId::new("org").unwrap(),
-                ))
-                .await
-                .unwrap();
+            let mut stream = r.read(TestSub).await.unwrap();
             let msg = stream.next().await.unwrap().unwrap();
             msg.ack().await.unwrap();
         }
@@ -221,11 +203,11 @@ mod tests {
 
     fn _assert_box_passes_as_generic_reader() {
         fn _take<R: Reader>(_: R) {}
-        let r: BoxReader<EventSubscription, TestCursor> = UnitReader.into_boxed();
+        let r: BoxReader<TestSub, TestCursor> = UnitReader.into_boxed();
         _take(r);
     }
 
     fn _assert_reader_dyn_safe() {
-        fn _take(_: BoxReader<EventSubscription, NoCursor>) {}
+        fn _take(_: BoxReader<TestSub, NoCursor>) {}
     }
 }

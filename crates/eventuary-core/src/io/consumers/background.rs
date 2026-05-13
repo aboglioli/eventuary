@@ -153,7 +153,9 @@ mod tests {
     use crate::io::Message;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
-    use crate::{EventSubscription, OrganizationId};
+
+    #[derive(Debug, Clone, Default)]
+    struct TestSub;
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -168,7 +170,7 @@ mod tests {
     }
 
     impl Reader for VecReader {
-        type Subscription = EventSubscription;
+        type Subscription = TestSub;
         type Acker = NoopAcker;
         type Cursor = crate::io::NoCursor;
         type Stream =
@@ -237,8 +239,8 @@ mod tests {
         }
     }
 
-    fn subscription() -> EventSubscription {
-        EventSubscription::for_organization(OrganizationId::new("org").unwrap())
+    fn subscription() -> TestSub {
+        TestSub
     }
 
     struct AllowNothing;

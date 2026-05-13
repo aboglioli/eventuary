@@ -189,8 +189,8 @@ where
         };
 
         let inner_stream = self.inner.read(inner_subscription).await?;
-        let state: Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<R::Cursor>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        type State<C> = Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<C>>>>;
+        let state: State<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) =
             mpsc::channel::<Result<Message<CheckpointAcker<R::Acker, R::Cursor>, R::Cursor>>>(64);
         let (commit_tx, mut commit_rx) = mpsc::channel::<(CheckpointKey, R::Cursor)>(64);

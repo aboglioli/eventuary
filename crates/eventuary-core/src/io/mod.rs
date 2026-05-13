@@ -8,7 +8,6 @@ mod handler;
 mod message;
 mod reader;
 pub mod readers;
-mod subscription;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
@@ -24,5 +23,4 @@ pub use filters::{
 pub use handler::{ArcHandler, BoxHandler, DynHandler, FilteredHandler, Handler, HandlerExt};
 pub use message::{Message, NoCursor};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
-pub use subscription::EventSubscription;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};

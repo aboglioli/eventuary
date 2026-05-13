@@ -376,8 +376,8 @@ async fn fetch_batch(
         .map(|patterns| {
             patterns
                 .iter()
-                .filter_map(|p| match p {
-                    TopicPattern::Exact(t) => Some(t.as_str().to_owned()),
+                .map(|p| match p {
+                    TopicPattern::Exact(t) => t.as_str().to_owned(),
                 })
                 .collect()
         })
