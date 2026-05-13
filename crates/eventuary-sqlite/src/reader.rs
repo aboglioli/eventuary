@@ -183,6 +183,7 @@ fn apply_subscription(config: &mut SqliteReaderConfig, subscription: &EventSubsc
 impl Reader for SqliteReader {
     type Subscription = EventSubscription;
     type Acker = SqliteAckerVariant;
+    type Cursor = eventuary_core::io::NoCursor;
     type Stream = SqliteStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {

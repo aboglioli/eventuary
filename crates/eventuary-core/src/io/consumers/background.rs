@@ -21,6 +21,7 @@ impl<R, H> BackgroundConsumer<R, H>
 where
     R: Reader + Send + 'static,
     R::Stream: 'static,
+    R::Cursor: Send + Sync + 'static,
     H: Handler + 'static,
 {
     pub fn new(reader: R, subscription: R::Subscription, handler: H, concurrency: usize) -> Self {
@@ -168,7 +169,9 @@ mod tests {
     impl Reader for VecReader {
         type Subscription = EventSubscription;
         type Acker = NoopAcker;
-        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker>>> + Send>>;
+        type Cursor = crate::io::NoCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, crate::io::NoCursor>>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
             let events = self

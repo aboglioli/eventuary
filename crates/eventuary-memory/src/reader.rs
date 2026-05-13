@@ -59,6 +59,7 @@ impl Stream for InmemStream {
 impl Reader for InmemReader {
     type Subscription = EventSubscription;
     type Acker = NoopAcker;
+    type Cursor = eventuary_core::io::NoCursor;
     type Stream = InmemStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
@@ -148,7 +149,8 @@ mod tests {
     #[tokio::test]
     async fn reader_into_boxed_yields_box_reader() {
         let (tx, rx) = mpsc::channel(1);
-        let reader: BoxReader = InmemReader::new(rx).into_boxed();
+        let reader: BoxReader<EventSubscription, eventuary_core::io::NoCursor> =
+            InmemReader::new(rx).into_boxed();
 
         tx.send(ev()).await.unwrap();
 

@@ -111,6 +111,7 @@ fn validate_organization_filter(
 impl Reader for SqsReader {
     type Subscription = EventSubscription;
     type Acker = BatchedAcker<String>;
+    type Cursor = eventuary_core::io::NoCursor;
     type Stream = SqsStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {

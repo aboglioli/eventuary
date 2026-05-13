@@ -169,6 +169,7 @@ fn apply_subscription(config: &mut PgReaderConfig, subscription: &EventSubscript
 impl Reader for PgReader {
     type Subscription = EventSubscription;
     type Acker = PgAckerVariant;
+    type Cursor = eventuary_core::io::NoCursor;
     type Stream = PgStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {

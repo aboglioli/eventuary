@@ -174,6 +174,7 @@ fn validate_organization_filter(
 impl Reader for KafkaReader {
     type Subscription = EventSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
+    type Cursor = eventuary_core::io::NoCursor;
     type Stream = KafkaStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
