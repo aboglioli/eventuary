@@ -230,23 +230,12 @@ where
                         .map(|s| s.pending_count())
                         .unwrap_or(0);
                     if pending_now >= max_pending {
-                        let all_jammed = state_guard
-                            .values()
-                            .all(|s| s.pending_count() >= max_pending);
-                        if all_jammed {
-                            let _ = tx
-                                .send(Err(Error::Store(format!(
-                                    "checkpoint reader: all partitions hit max_pending_per_key ({max_pending})"
-                                ))))
-                                .await;
-                            return;
-                        }
-                        tracing::warn!(
-                            partition = ?cursor_partition,
-                            pending = pending_now,
-                            max = max_pending,
-                            "checkpoint reader partition at max_pending_per_key, continuing other lanes"
-                        );
+                        let _ = tx
+                            .send(Err(Error::Store(format!(
+                                "checkpoint reader: max_pending_per_key ({max_pending}) reached for partition {cursor_partition:?}"
+                            ))))
+                            .await;
+                        return;
                     }
                     let entry = state_guard
                         .entry(cursor_partition)
@@ -278,7 +267,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::PendingState;
+    use super::*;
+    use crate::ConsumerGroupId;
+    use crate::event::Event;
+    use crate::io::Message;
+    use crate::io::acker::NoopAcker;
+    use crate::io::checkpoint::StreamId;
+    use crate::payload::Payload;
+    use crate::start_from::StartFrom;
+    use futures::Stream;
+    use std::pin::Pin;
+    use tokio::sync::Mutex as TokioMutex;
 
     #[test]
     fn pending_state_advances_contiguously_in_order() {
@@ -315,5 +314,123 @@ mod tests {
         assert_eq!(s.complete(i0), Some(10));
         assert_eq!(s.complete(i1), Some(20));
         assert_eq!(s.pending_count(), 1);
+    }
+
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    struct TestCursor(i64);
+
+    impl CursorPartition for TestCursor {
+        fn partition(&self) -> Option<LogicalPartition> {
+            None
+        }
+    }
+    impl CommitCursor for TestCursor {
+        type Commit = TestCursor;
+        fn commit_cursor(&self) -> Self::Commit {
+            *self
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct TestSub;
+    impl StartableSubscription<TestCursor> for TestSub {
+        fn with_start(self, _: StartFrom<TestCursor>) -> Self {
+            self
+        }
+    }
+
+    struct VecReader {
+        events: std::sync::Mutex<Option<Vec<Event>>>,
+    }
+
+    impl Reader for VecReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: TestSub) -> Result<Self::Stream> {
+            let events = self.events.lock().unwrap().take().unwrap();
+            let iter = events
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as i64 + 1))));
+            Ok(Box::pin(futures::stream::iter(iter)))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct MemStore {
+        rows: std::sync::Arc<TokioMutex<Vec<(CheckpointKey, TestCursor)>>>,
+    }
+    impl CheckpointStore<TestCursor> for MemStore {
+        async fn load(&self, _: &CheckpointKey) -> Result<Option<TestCursor>> {
+            Ok(None)
+        }
+        async fn load_scope(
+            &self,
+            _: &CheckpointScope,
+        ) -> Result<Vec<(Option<LogicalPartition>, TestCursor)>> {
+            Ok(vec![])
+        }
+        async fn commit(&self, key: &CheckpointKey, cursor: TestCursor) -> Result<()> {
+            self.rows.lock().await.push((key.clone(), cursor));
+            Ok(())
+        }
+    }
+
+    fn ev(key: &str) -> Event {
+        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key(key)
+            .unwrap()
+            .build()
+            .expect("valid event")
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_errors_when_per_key_max_pending_exceeded() {
+        use futures::StreamExt;
+        let events: Vec<Event> = (0..5).map(|i| ev(&format!("k{i}"))).collect();
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let store = MemStore::default();
+        let cr = CheckpointReader::with_config(
+            reader,
+            store,
+            CheckpointReaderConfig {
+                max_pending_per_key: 2,
+            },
+        );
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+        let mut stream = cr
+            .read(CheckpointSubscription::new(TestSub, scope))
+            .await
+            .unwrap();
+        // Pull messages without acking — all 5 share partition=None, so
+        // pending grows. After max_pending_per_key=2 is exceeded, the
+        // stream must yield an error.
+        let mut held = Vec::new();
+        let mut saw_error = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await {
+                Ok(Some(Ok(m))) => held.push(m),
+                Ok(Some(Err(_))) => {
+                    saw_error = true;
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_error,
+            "expected stream error after per-key max_pending exceeded, held {} messages",
+            held.len()
+        );
     }
 }
