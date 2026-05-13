@@ -6,19 +6,12 @@ use futures::Stream;
 use tokio::sync::{Mutex, mpsc};
 
 use eventuary_core::io::acker::NoopAcker;
-use eventuary_core::io::{EventFilter, Message, Reader};
+use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Event, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemorySubscription {
-    pub filter: EventFilter,
     pub limit: Option<usize>,
-}
-
-impl MemorySubscription {
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 pub struct InmemReader {
@@ -50,20 +43,13 @@ impl Stream for InmemStream {
             return Poll::Ready(None);
         }
         let mut rx = this.rx.try_lock().expect("inmem stream lock");
-        loop {
-            match rx.poll_recv(cx) {
-                Poll::Ready(Some(event)) if this.subscription.filter.matches(&event) => {
-                    this.delivered += 1;
-                    return Poll::Ready(Some(Ok(Message::new(
-                        event,
-                        NoopAcker,
-                        eventuary_core::io::NoCursor,
-                    ))));
-                }
-                Poll::Ready(Some(_)) => continue,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
+        match rx.poll_recv(cx) {
+            Poll::Ready(Some(event)) => {
+                this.delivered += 1;
+                Poll::Ready(Some(Ok(Message::new(event, NoopAcker, NoCursor))))
             }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -71,7 +57,7 @@ impl Stream for InmemStream {
 impl Reader for InmemReader {
     type Subscription = MemorySubscription;
     type Acker = NoopAcker;
-    type Cursor = eventuary_core::io::NoCursor;
+    type Cursor = NoCursor;
     type Stream = InmemStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
@@ -86,15 +72,12 @@ impl Reader for InmemReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eventuary_core::Payload;
     use eventuary_core::io::{BoxReader, ReaderExt};
-    use eventuary_core::{OrganizationId, Payload};
     use futures::StreamExt;
 
     fn subscription() -> MemorySubscription {
-        MemorySubscription {
-            filter: EventFilter::for_organization(OrganizationId::new("org").unwrap()),
-            limit: None,
-        }
+        MemorySubscription { limit: None }
     }
 
     fn ev() -> Event {
@@ -141,8 +124,7 @@ mod tests {
     #[tokio::test]
     async fn reader_into_boxed_yields_box_reader() {
         let (tx, rx) = mpsc::channel(1);
-        let reader: BoxReader<MemorySubscription, eventuary_core::io::NoCursor> =
-            InmemReader::new(rx).into_boxed();
+        let reader: BoxReader<MemorySubscription, NoCursor> = InmemReader::new(rx).into_boxed();
 
         tx.send(ev()).await.unwrap();
 
@@ -150,5 +132,59 @@ mod tests {
         let msg = stream.next().await.unwrap().unwrap();
         assert_eq!(msg.event().topic().as_str(), "thing.happened");
         msg.ack().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_does_not_filter_by_event_predicate() {
+        let (tx, rx) = mpsc::channel(2);
+        let reader = InmemReader::new(rx);
+
+        let mut stream = reader.read(subscription()).await.unwrap();
+
+        let a = Event::builder("org-a", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("k")
+            .unwrap()
+            .build()
+            .expect("valid event");
+        let b = Event::builder("org-b", "/y", "other.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("k")
+            .unwrap()
+            .build()
+            .expect("valid event");
+
+        tx.send(a).await.unwrap();
+        tx.send(b).await.unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg1.event().organization().as_str(), "org-a");
+        msg1.ack().await.unwrap();
+
+        let msg2 = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg2.event().organization().as_str(), "org-b");
+        msg2.ack().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_honors_limit() {
+        let (tx, rx) = mpsc::channel(3);
+        let reader = InmemReader::new(rx);
+
+        let mut stream = reader
+            .read(MemorySubscription { limit: Some(2) })
+            .await
+            .unwrap();
+
+        tx.send(ev()).await.unwrap();
+        tx.send(ev()).await.unwrap();
+        tx.send(ev()).await.unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        let msg2 = stream.next().await.unwrap().unwrap();
+        msg2.ack().await.unwrap();
+
+        assert!(stream.next().await.is_none());
     }
 }

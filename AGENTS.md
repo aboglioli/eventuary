@@ -55,7 +55,7 @@ crates/
 ├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
 │   └── src/
 │       ├── event.rs        # Event aggregate, EventId, RestoreEvent
-│       ├── event_key.rs    # EventKey + PartitionKey impl (FNV-1a)
+│       ├── event_key.rs    # EventKey + inherent partition() (FNV-1a)
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
@@ -63,7 +63,7 @@ crates/
 │       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
 │       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
-│       ├── partition.rs    # PartitionKey, LogicalPartition, CursorPartition, CommitCursor
+│       ├── partition.rs    # LogicalPartition, CursorPartition, CommitCursor, partition_for, fnv1a_u64
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
 │       ├── start_from.rs   # StartFrom<C> (Earliest / Latest / Timestamp / After)
 │       ├── serialization.rs # SerializedEvent wire format
@@ -262,9 +262,9 @@ preserving the original event plus failure metadata.
   `Serialize + DeserializeOwned + SnapshotEventId`. Use to persist
   aggregate state alongside the event log and resume rebuild from the
   snapshot's `EventId`.
-- `PartitionKey` trait with FNV-1a (u64) implementation on `EventKey`
-  for deterministic partition routing (used by Kafka writer for record
-  key → partition selection, and by `PartitionedReader`).
+- `EventKey::partition` (FNV-1a u64) for deterministic partition routing
+  (used by Kafka writer for record key → partition selection, and by
+  `PartitionedReader`).
 
 ### Reader Composition (Cursor + Checkpoint + Partitioned)
 
@@ -513,9 +513,9 @@ Worth knowing when changing the codebase:
 - **`AckBuffer + BatchFlusher`** pattern for Kafka/SQS, parameterized on a
   token type per backend. Background flusher task batches by count and
   interval, drives the protocol-specific commit.
-- **`PartitionKey` trait + FNV-1a on `EventKey`.** Deterministic and
-  stable across machines and language ports; same key always routes to
-  the same partition.
+- **FNV-1a partition hash on `EventKey`.** Deterministic and stable
+  across machines and language ports; same key always routes to the
+  same partition.
 - **Reader composition over universal subscription.** Source readers do
   one job (deliver from the log with their native cursor). Lane fanout
   is `PartitionedReader<R>` in core; durable consumer progress is

@@ -1,9 +1,7 @@
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-
 use eventuary_core::io::acker::AckBufferConfig;
-use eventuary_core::{ConsumerGroupId, Error, Namespace, OrganizationId, Result, StartFrom, Topic};
+use eventuary_core::{ConsumerGroupId, Error, Result, StartFrom};
 
 const SQS_MAX_MESSAGES_LIMIT: i32 = 10;
 const SQS_MAX_WAIT_TIME: Duration = Duration::from_secs(20);
@@ -12,26 +10,19 @@ const SQS_MAX_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(43_200);
 #[derive(Debug, Clone)]
 pub struct SqsReaderConfig {
     pub queue_url: String,
-    pub organization: Option<OrganizationId>,
-    pub namespace: Option<Namespace>,
-    pub topics: Vec<Topic>,
     pub max_messages: i32,
     pub visibility_timeout: Duration,
     pub wait_time: Duration,
     pub ack_buffer: AckBufferConfig,
     pub start_from: StartFrom,
-    pub end_at: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
     pub consumer_group_id: Option<ConsumerGroupId>,
 }
 
 impl SqsReaderConfig {
-    pub fn defaults_for(queue_url: impl Into<String>, organization: OrganizationId) -> Self {
+    pub fn defaults_for(queue_url: impl Into<String>) -> Self {
         Self {
             queue_url: queue_url.into(),
-            organization: Some(organization),
-            namespace: None,
-            topics: Vec::new(),
             max_messages: 10,
             visibility_timeout: Duration::from_secs(30),
             wait_time: Duration::from_secs(20),
@@ -40,27 +31,6 @@ impl SqsReaderConfig {
                 flush_interval: Duration::from_secs(1),
             },
             start_from: StartFrom::Latest,
-            end_at: None,
-            limit: None,
-            consumer_group_id: None,
-        }
-    }
-
-    pub fn defaults_for_all_organizations(queue_url: impl Into<String>) -> Self {
-        Self {
-            queue_url: queue_url.into(),
-            organization: None,
-            namespace: None,
-            topics: Vec::new(),
-            max_messages: 10,
-            visibility_timeout: Duration::from_secs(30),
-            wait_time: Duration::from_secs(20),
-            ack_buffer: AckBufferConfig {
-                max_pending: 10,
-                flush_interval: Duration::from_secs(1),
-            },
-            start_from: StartFrom::Latest,
-            end_at: None,
             limit: None,
             consumer_group_id: None,
         }
@@ -90,9 +60,6 @@ impl SqsReaderConfig {
                 "SQS only supports StartFrom::Latest".to_owned(),
             ));
         }
-        if self.end_at.is_some() {
-            return Err(Error::Config("SQS does not support end_at".to_owned()));
-        }
         if self.limit.is_some() {
             return Err(Error::Config("SQS does not support limit".to_owned()));
         }
@@ -117,25 +84,13 @@ mod tests {
         }
     }
 
-    fn org() -> OrganizationId {
-        OrganizationId::new("o").unwrap()
-    }
-
     fn base() -> SqsReaderConfig {
-        SqsReaderConfig::defaults_for("q", org())
+        SqsReaderConfig::defaults_for("q")
     }
 
     #[test]
     fn defaults_ok() {
         base().validate().unwrap();
-    }
-
-    #[test]
-    fn all_organization_defaults_do_not_filter_by_organization() {
-        let config = SqsReaderConfig::defaults_for_all_organizations("q");
-
-        assert!(config.organization.is_none());
-        config.validate().unwrap();
     }
 
     #[test]
@@ -190,14 +145,6 @@ mod tests {
     fn rejects_timestamp_start() {
         let mut c = base();
         c.start_from = StartFrom::Timestamp(chrono::Utc::now());
-        let err = c.validate().unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn rejects_end_at() {
-        let mut c = base();
-        c.end_at = Some(chrono::Utc::now());
         let err = c.validate().unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }

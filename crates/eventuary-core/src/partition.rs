@@ -54,14 +54,6 @@ pub trait CommitCursor: Clone + Send + Sync + 'static {
     fn commit_cursor(&self) -> Self::Commit;
 }
 
-/// Hashable contributor for partition routing.
-///
-/// Implementations should hash a stable byte representation of the value
-/// (e.g. an event key) into a partition id in `0..total_partitions`.
-pub trait PartitionKey {
-    fn partition(&self, total_partitions: NonZeroU32) -> u32;
-}
-
 /// Canonical event → partition mapping.
 ///
 /// Uses [`Event::key`] when present so events for the same logical entity
@@ -80,10 +72,10 @@ pub fn partition_for(event: &Event, count: NonZeroU32) -> u32 {
     (fnv1a_u64(bytes) % u64::from(count.get())) as u32
 }
 
-/// FNV-1a 64-bit hash. Shared between [`PartitionKey`] implementors and
-/// the keyless fallback in [`partition_for`] so a single hash function
-/// drives every partition decision.
-pub(crate) fn fnv1a_u64(bytes: &[u8]) -> u64 {
+/// FNV-1a 64-bit hash. Drives every partition decision so a single hash
+/// function is shared between [`EventKey::partition`] and the keyless
+/// fallback in [`partition_for`].
+pub fn fnv1a_u64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })

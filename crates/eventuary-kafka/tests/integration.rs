@@ -11,7 +11,7 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 use eventuary_core::io::Writer;
 use eventuary_core::io::acker::AckBufferConfig;
-use eventuary_core::{ConsumerGroupId, Error, Event, OrganizationId, Payload, StartFrom, Topic};
+use eventuary_core::{ConsumerGroupId, Error, Event, Payload, StartFrom};
 
 use eventuary_kafka::{KafkaReader, KafkaReaderConfig, KafkaWriter};
 
@@ -94,7 +94,6 @@ async fn write_read_roundtrip() {
             vec![brokers.clone()],
             vec!["topic-rr".to_owned()],
             ConsumerGroupId::new("g-rr").unwrap(),
-            OrganizationId::new("orgk").unwrap(),
         )
     };
     let reader = KafkaReader::new(cfg).unwrap();
@@ -137,7 +136,6 @@ async fn ack_commits_offset() {
             vec![brokers.clone()],
             vec!["topic-ack".to_owned()],
             group.clone(),
-            OrganizationId::new("orgk").unwrap(),
         )
     };
     let reader = KafkaReader::new(cfg).unwrap();
@@ -156,12 +154,7 @@ async fn ack_commits_offset() {
 
     let cfg2 = KafkaReaderConfig {
         start_from: StartFrom::Earliest,
-        ..KafkaReaderConfig::streaming(
-            vec![brokers.clone()],
-            vec!["topic-ack".to_owned()],
-            group,
-            OrganizationId::new("orgk").unwrap(),
-        )
+        ..KafkaReaderConfig::streaming(vec![brokers.clone()], vec!["topic-ack".to_owned()], group)
     };
     let reader2 = KafkaReader::new(cfg2).unwrap();
     let mut stream2 = reader2.read().await.unwrap();
@@ -221,7 +214,6 @@ async fn consumer_group_resume() {
             vec![brokers.clone()],
             vec!["topic-resume".to_owned()],
             group.clone(),
-            OrganizationId::new("orgk").unwrap(),
         )
     };
 
@@ -275,73 +267,18 @@ async fn consumer_group_resume() {
 }
 
 #[tokio::test]
-async fn event_topic_filter_if_supported() {
-    let (_c, brokers) = start_kafka().await;
-    create_topic(&brokers, "topic-filt", 1).await;
-    let writer = KafkaWriter::new(std::slice::from_ref(&brokers), "topic-filt").unwrap();
-    writer
-        .write(&make_event("orgk", "/x", "task.created", "want"))
-        .await
-        .unwrap();
-    writer
-        .write(&make_event("orgk", "/x", "task.deleted", "skip"))
-        .await
-        .unwrap();
-    writer
-        .write(&make_event("orgk", "/x", "task.created", "want2"))
-        .await
-        .unwrap();
-
-    let cfg = KafkaReaderConfig {
-        start_from: StartFrom::Earliest,
-        event_topics: Some(vec![Topic::new("task.created").unwrap()]),
-        ..KafkaReaderConfig::streaming(
-            vec![brokers.clone()],
-            vec!["topic-filt".to_owned()],
-            ConsumerGroupId::new("g-filt").unwrap(),
-            OrganizationId::new("orgk").unwrap(),
-        )
-    };
-    let reader = KafkaReader::new(cfg).unwrap();
-    let mut stream = reader.read().await.unwrap();
-    let mut keys: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while keys.len() < 2 && std::time::Instant::now() < deadline {
-        if let Ok(Some(Ok(msg))) = tokio::time::timeout(Duration::from_secs(5), stream.next()).await
-        {
-            keys.push(
-                msg.event()
-                    .key()
-                    .expect("event has key")
-                    .as_str()
-                    .to_owned(),
-            );
-            msg.ack().await.unwrap();
-        }
-    }
-    assert_eq!(keys, vec!["want".to_owned(), "want2".to_owned()]);
-}
-
-#[tokio::test]
 async fn invalid_config_rejected() {
     let group = ConsumerGroupId::new("g").unwrap();
-    let org = OrganizationId::new("o").unwrap();
 
-    let err = KafkaReaderConfig::new(Vec::new(), vec!["t".to_owned()], group.clone(), org.clone())
-        .unwrap_err();
+    let err = KafkaReaderConfig::new(Vec::new(), vec!["t".to_owned()], group.clone()).unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 
-    let err = KafkaReaderConfig::new(
-        vec!["b:9092".to_owned()],
-        Vec::new(),
-        group.clone(),
-        org.clone(),
-    )
-    .unwrap_err();
+    let err =
+        KafkaReaderConfig::new(vec!["b:9092".to_owned()], Vec::new(), group.clone()).unwrap_err();
     assert!(matches!(err, Error::Config(_)));
 
     let mut bad =
-        KafkaReaderConfig::streaming(vec!["b:9092".to_owned()], vec!["t".to_owned()], group, org);
+        KafkaReaderConfig::streaming(vec!["b:9092".to_owned()], vec!["t".to_owned()], group);
     bad.max_poll_records = 0;
     let err = bad.validate().unwrap_err();
     assert!(matches!(err, Error::Config(_)));

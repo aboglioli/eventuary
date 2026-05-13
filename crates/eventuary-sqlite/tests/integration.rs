@@ -260,9 +260,7 @@ async fn topic_filter() {
         .unwrap();
 
     let mut filter = EventFilter::for_organization(OrganizationId::new("acme").unwrap());
-    filter.topics = Some(vec![TopicPattern::exact(
-        Topic::new("task.created").unwrap(),
-    )]);
+    filter.topic = Some(TopicPattern::exact(Topic::new("task.created").unwrap()));
     let subscription = SqliteSubscription {
         start: StartFrom::Earliest,
         filter,

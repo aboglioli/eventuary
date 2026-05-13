@@ -354,21 +354,11 @@ async fn fetch_batch(
         bind_index += 1;
     }
 
-    let exact_topics: Vec<String> = filter
-        .topics
-        .as_ref()
-        .map(|patterns| {
-            patterns
-                .iter()
-                .map(|p| match p {
-                    TopicPattern::Exact(t) => t.as_str().to_owned(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let topics_filter = !exact_topics.is_empty();
-    if topics_filter {
-        sql.push_str(&format!(" AND topic = ANY(${bind_index})"));
+    let exact_topic: Option<String> = filter.topic.as_ref().map(|p| match p {
+        TopicPattern::Exact(t) => t.as_str().to_owned(),
+    });
+    if exact_topic.is_some() {
+        sql.push_str(&format!(" AND topic = ${bind_index}"));
         bind_index += 1;
     }
     let ns_filter = filter.namespace.as_ref().and_then(|p| match p {
@@ -394,8 +384,8 @@ async fn fetch_batch(
     if let Some(org) = &filter.organization {
         q = q.bind(org.as_str());
     }
-    if topics_filter {
-        q = q.bind(exact_topics);
+    if let Some(topic) = exact_topic {
+        q = q.bind(topic);
     }
     if let Some(prefix) = ns_filter {
         q = q.bind(prefix);

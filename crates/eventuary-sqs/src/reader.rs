@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{EventFilter, Message, Reader};
+use eventuary_core::io::{Message, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
 use crate::flusher::SqsFlusher;
@@ -21,7 +21,6 @@ pub struct SqsSubscription {
     pub wait_time: Duration,
     pub visibility_timeout: Duration,
     pub max_messages: i32,
-    pub event_filter: EventFilter,
     pub limit: Option<usize>,
 }
 
@@ -37,28 +36,11 @@ impl SqsReader {
     }
 
     pub fn default_subscription(&self) -> SqsSubscription {
-        let mut filter = EventFilter::default();
-        if let Some(org) = self.config.organization.as_ref() {
-            filter.organization = Some(org.clone());
-        }
-        if !self.config.topics.is_empty() {
-            filter.topics = Some(
-                self.config
-                    .topics
-                    .iter()
-                    .map(|t| eventuary_core::TopicPattern::exact(t.clone()))
-                    .collect(),
-            );
-        }
-        if let Some(ns) = self.config.namespace.as_ref() {
-            filter.namespace = Some(eventuary_core::NamespacePattern::prefix(ns.clone()));
-        }
         SqsSubscription {
             queue_url: self.config.queue_url.clone(),
             wait_time: self.config.wait_time,
             visibility_timeout: self.config.visibility_timeout,
             max_messages: self.config.max_messages,
-            event_filter: filter,
             limit: self.config.limit,
         }
     }
@@ -107,7 +89,6 @@ impl Reader for SqsReader {
         let max_messages = subscription.max_messages;
         let wait_time = subscription.wait_time;
         let visibility_timeout = subscription.visibility_timeout;
-        let filter = subscription.event_filter.clone();
         let limit = subscription.limit;
 
         let flusher = SqsFlusher::new(client.clone(), queue_url.clone());
@@ -168,10 +149,6 @@ impl Reader for SqsReader {
                             continue;
                         }
                     };
-                    if !filter.matches(&event) {
-                        let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
-                        continue;
-                    }
                     let acker = BatchedAcker::new(receipt, tx_ack.clone());
                     if tx
                         .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))

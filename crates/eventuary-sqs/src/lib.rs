@@ -4,9 +4,9 @@
 //! sends them via `SendMessageBatch`. `SqsReader` long-polls `ReceiveMessage`
 //! and emits `Message<BatchedAcker<String>>` whose token is the receipt handle.
 //!
-//! SQS does not support historical replay: `StartFrom::{Earliest, Timestamp}`,
-//! `end_at`, and `limit` are rejected at config time with `Error::Config`.
-//! Organization filtering is optional; filtered records are acked and skipped.
+//! SQS does not support historical replay: `StartFrom::{Earliest, Timestamp}`
+//! and `limit` are rejected at config time with `Error::Config`. Poison
+//! records (missing body, undecodable event) are acked and skipped.
 //!
 //! ack issues `DeleteMessageBatch`; nack issues `ChangeMessageVisibilityBatch`
 //! with timeout zero. Both inspect per-entry failures.
