@@ -11,6 +11,13 @@ impl crate::partition::CursorPartition for NoCursor {
     }
 }
 
+impl crate::partition::CommitCursor for NoCursor {
+    type Commit = NoCursor;
+    fn commit_cursor(&self) -> Self::Commit {
+        NoCursor
+    }
+}
+
 pub struct Message<A: Acker, C = NoCursor> {
     event: Event,
     acker: A,

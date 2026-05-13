@@ -1,14 +1,23 @@
 //! CheckpointReader: composes an inner reader and a checkpoint store.
 //!
-//! On `read`, loads the persisted cursor for the requested scope and
-//! configures the inner reader to start from `StartFrom::After(cursor)`.
-//! Downstream messages get a `CheckpointAcker` that commits the cursor on
-//! `ack` (contiguous delivered order per key), no-op on `nack`.
+//! On `read`, loads the persisted cursor per partition for the requested
+//! scope and configures the inner reader to start from
+//! `StartFrom::After(min(stored_cursors))`. Records each delivered cursor
+//! in contiguous delivered order per partition. On downstream `ack`,
+//! calls the inner ack first, then commits the cursor to the store
+//! **synchronously** — store commit errors propagate to the caller and
+//! to consumers of the stream.
+//!
+//! The acker holds the cursor type the store persists: `Commit`. The
+//! delivery cursor is `R::Cursor`; `CommitCursor::commit_cursor()`
+//! produces the value the store sees. For partitioned composition
+//! (`PartitionedReader<R>`) the delivery cursor is
+//! `PartitionedCursor<R::Cursor>` and its `commit_cursor()` strips the
+//! partition envelope.
 
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use futures::{Stream, StreamExt};
 use tokio::sync::Mutex;
@@ -17,7 +26,7 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::io::checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore};
 use crate::io::{Acker, Message, Reader};
-use crate::partition::{CursorPartition, LogicalPartition};
+use crate::partition::{CommitCursor, CursorPartition, LogicalPartition};
 use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
@@ -81,33 +90,38 @@ impl<C: Clone> PendingState<C> {
     }
 }
 
-pub struct CheckpointAcker<A: Acker, C> {
+type PendingMap<C> = Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<C>>>>;
+
+pub struct CheckpointAcker<A: Acker, C, S: CheckpointStore<C>> {
     inner: A,
     scope: CheckpointScope,
     partition: Option<LogicalPartition>,
     index: usize,
-    state: Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<C>>>>,
-    commit_tx: mpsc::Sender<(CheckpointKey, C)>,
+    state: PendingMap<C>,
+    store: S,
 }
 
-impl<A, C> Acker for CheckpointAcker<A, C>
+impl<A, C, S> Acker for CheckpointAcker<A, C, S>
 where
     A: Acker + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
 {
     async fn ack(&self) -> Result<()> {
         self.inner.ack().await?;
-        let mut state = self.state.lock().await;
-        let entry = state
-            .entry(self.partition)
-            .or_insert_with(PendingState::new);
-        if let Some(cursor) = entry.complete(self.index) {
-            drop(state);
+        let advanced = {
+            let mut state = self.state.lock().await;
+            let entry = state
+                .entry(self.partition)
+                .or_insert_with(PendingState::new);
+            entry.complete(self.index)
+        };
+        if let Some(cursor) = advanced {
             let key = CheckpointKey {
                 scope: self.scope.clone(),
                 partition: self.partition,
             };
-            let _ = self.commit_tx.send((key, cursor)).await;
+            self.store.commit(&key, cursor).await?;
         }
         Ok(())
     }
@@ -117,26 +131,8 @@ where
     }
 }
 
-pub struct CheckpointStream<A: Acker + 'static, C: Clone + Send + Sync + 'static> {
-    rx: mpsc::Receiver<Result<Message<CheckpointAcker<A, C>, C>>>,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl<A: Acker + 'static, C: Clone + Send + Sync + 'static> Drop for CheckpointStream<A, C> {
-    fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
-    }
-}
-
-impl<A: Acker + 'static, C: Clone + Send + Sync + 'static> Stream for CheckpointStream<A, C> {
-    type Item = Result<Message<CheckpointAcker<A, C>, C>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
+pub type CheckpointStream<A, C, S> =
+    Pin<Box<dyn Stream<Item = Result<Message<CheckpointAcker<A, C, S>, C>>> + Send>>;
 
 pub struct CheckpointReader<R, S> {
     inner: R,
@@ -165,23 +161,25 @@ impl<R, S> CheckpointReader<R, S> {
 impl<R, S> Reader for CheckpointReader<R, S>
 where
     R: Reader + Send + Sync + 'static,
-    R::Subscription: StartableSubscription<R::Cursor>,
-    R::Cursor: Clone + Ord + CursorPartition + Send + Sync + 'static,
+    R::Cursor: CommitCursor + CursorPartition + Send + Sync + 'static,
+    <R::Cursor as CommitCursor>::Commit: Send + Sync + 'static,
+    R::Subscription: StartableSubscription<<R::Cursor as CommitCursor>::Commit>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
-    S: CheckpointStore<R::Cursor>,
+    S: CheckpointStore<<R::Cursor as CommitCursor>::Commit>,
 {
     type Subscription = CheckpointSubscription<R::Subscription>;
-    type Acker = CheckpointAcker<R::Acker, R::Cursor>;
-    type Cursor = R::Cursor;
-    type Stream = CheckpointStream<R::Acker, R::Cursor>;
+    type Acker = CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S>;
+    type Cursor = <R::Cursor as CommitCursor>::Commit;
+    type Stream = CheckpointStream<R::Acker, <R::Cursor as CommitCursor>::Commit, S>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let scope = subscription.scope.clone();
         let store = self.store.clone();
         let stored = store.load_scope(&scope).await?;
-        let known: HashMap<Option<LogicalPartition>, R::Cursor> = stored.into_iter().collect();
-        let min_cursor: Option<R::Cursor> = known.values().min().cloned();
+        let known: HashMap<Option<LogicalPartition>, <R::Cursor as CommitCursor>::Commit> =
+            stored.into_iter().collect();
+        let min_cursor: Option<<R::Cursor as CommitCursor>::Commit> = known.values().min().cloned();
 
         let inner_subscription = match min_cursor {
             Some(cursor) => subscription.inner.with_start(StartFrom::After(cursor)),
@@ -189,25 +187,24 @@ where
         };
 
         let inner_stream = self.inner.read(inner_subscription).await?;
-        type State<C> = Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<C>>>>;
-        let state: State<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, rx) =
-            mpsc::channel::<Result<Message<CheckpointAcker<R::Acker, R::Cursor>, R::Cursor>>>(64);
-        let (commit_tx, mut commit_rx) = mpsc::channel::<(CheckpointKey, R::Cursor)>(64);
+        let state: PendingMap<<R::Cursor as CommitCursor>::Commit> =
+            Arc::new(Mutex::new(HashMap::new()));
         let max_pending = self.config.max_pending_per_key;
-
-        let commit_store = store.clone();
-        let commit_task = tokio::spawn(async move {
-            while let Some((key, cursor)) = commit_rx.recv().await {
-                if let Err(e) = commit_store.commit(&key, cursor).await {
-                    tracing::warn!("checkpoint commit failed: {e}");
-                }
-            }
-        });
+        let (tx, rx) = mpsc::channel::<
+            Result<
+                Message<
+                    CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S>,
+                    <R::Cursor as CommitCursor>::Commit,
+                >,
+            >,
+        >(64);
+        let known = Arc::new(known);
 
         let state_for_stream = Arc::clone(&state);
         let scope_for_stream = scope.clone();
-        let stream_handle = tokio::spawn(async move {
+        let known_for_stream = Arc::clone(&known);
+        let store_for_stream = store.clone();
+        let handle = tokio::spawn(async move {
             let mut inner_stream = Box::pin(inner_stream);
             while let Some(item) = inner_stream.next().await {
                 let msg = match item {
@@ -218,14 +215,14 @@ where
                     }
                 };
                 let cursor_partition = msg.cursor().partition();
-                let cursor = msg.cursor().clone();
-                if let Some(stored_cursor) = known.get(&cursor_partition)
-                    && cursor <= *stored_cursor
+                let commit = msg.cursor().commit_cursor();
+                if let Some(stored_cursor) = known_for_stream.get(&cursor_partition)
+                    && commit <= *stored_cursor
                 {
                     let _ = msg.ack().await;
                     continue;
                 }
-                let (event, inner_acker, inner_cursor) = msg.into_parts();
+                let (event, inner_acker, _cursor) = msg.into_parts();
                 let index = {
                     let mut state_guard = state_for_stream.lock().await;
                     let pending_now = state_guard
@@ -238,51 +235,85 @@ where
                             .all(|s| s.pending_count() >= max_pending);
                         if all_jammed {
                             let _ = tx
-                                .send(Err(Error::Store(
-                                    "checkpoint reader: all partitions hit max_pending_per_key"
-                                        .to_owned(),
-                                )))
+                                .send(Err(Error::Store(format!(
+                                    "checkpoint reader: all partitions hit max_pending_per_key ({max_pending})"
+                                ))))
                                 .await;
                             return;
-                        } else {
-                            tracing::warn!(
-                                "checkpoint reader partition pending limit reached, waiting"
-                            );
                         }
+                        tracing::warn!(
+                            partition = ?cursor_partition,
+                            pending = pending_now,
+                            max = max_pending,
+                            "checkpoint reader partition at max_pending_per_key, continuing other lanes"
+                        );
                     }
                     let entry = state_guard
                         .entry(cursor_partition)
                         .or_insert_with(PendingState::new);
-                    entry.record(inner_cursor.clone())
+                    entry.record(commit.clone())
                 };
-                let acker = CheckpointAcker {
-                    inner: inner_acker,
-                    scope: scope_for_stream.clone(),
-                    partition: cursor_partition,
-                    index,
-                    state: Arc::clone(&state_for_stream),
-                    commit_tx: commit_tx.clone(),
-                };
-                let out = Message::new(event, acker, inner_cursor);
+                let acker: CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S> =
+                    CheckpointAcker {
+                        inner: inner_acker,
+                        scope: scope_for_stream.clone(),
+                        partition: cursor_partition,
+                        index,
+                        state: Arc::clone(&state_for_stream),
+                        store: store_for_stream.clone(),
+                    };
+                let out = Message::new(event, acker, commit);
                 if tx.send(Ok(out)).await.is_err() {
                     return;
                 }
             }
         });
 
-        let handle = tokio::spawn(async move {
-            let _ = stream_handle.await;
-            let _ = commit_task.await;
+        let stream = futures::stream::unfold((rx, Some(handle)), |(mut rx, handle)| async move {
+            rx.recv().await.map(|item| (item, (rx, handle)))
         });
-
-        Ok(CheckpointStream {
-            rx,
-            handle: Some(handle),
-        })
+        Ok(Box::pin(stream))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // Tests live in Task 11 composition tests (eventuary-sqlite + eventuary-postgres).
+    use super::PendingState;
+
+    #[test]
+    fn pending_state_advances_contiguously_in_order() {
+        let mut s: PendingState<i64> = PendingState::new();
+        let i0 = s.record(10);
+        let i1 = s.record(20);
+        assert_eq!(s.complete(i0), Some(10));
+        assert_eq!(s.complete(i1), Some(20));
+        assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn pending_state_does_not_advance_past_unacked_predecessor() {
+        let mut s: PendingState<i64> = PendingState::new();
+        let i0 = s.record(10);
+        let i1 = s.record(20);
+        let i2 = s.record(30);
+        assert_eq!(s.complete(i1), None, "i0 unacked, can't advance");
+        assert_eq!(s.complete(i2), None, "i0 still unacked");
+        assert_eq!(
+            s.complete(i0),
+            Some(30),
+            "completes whole prefix to highest"
+        );
+        assert_eq!(s.pending_count(), 0);
+    }
+
+    #[test]
+    fn pending_state_returns_highest_in_prefix() {
+        let mut s: PendingState<i64> = PendingState::new();
+        let i0 = s.record(10);
+        let i1 = s.record(20);
+        let _i2 = s.record(30);
+        assert_eq!(s.complete(i0), Some(10));
+        assert_eq!(s.complete(i1), Some(20));
+        assert_eq!(s.pending_count(), 1);
+    }
 }

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
     StartableSubscription, TopicPattern,
 };
 
@@ -42,6 +42,13 @@ impl CursorPartition for PgCursor {
     }
 }
 
+impl CommitCursor for PgCursor {
+    type Commit = PgCursor;
+    fn commit_cursor(&self) -> Self::Commit {
+        *self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PgSubscription {
     pub start: StartFrom<PgCursor>,
@@ -62,10 +69,6 @@ impl Default for PgSubscription {
 }
 
 impl StartableSubscription<PgCursor> for PgSubscription {
-    fn start(&self) -> &StartFrom<PgCursor> {
-        &self.start
-    }
-
     fn with_start(mut self, start: StartFrom<PgCursor>) -> Self {
         self.start = start;
         self

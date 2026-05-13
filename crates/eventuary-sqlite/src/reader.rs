@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
     StartableSubscription, TopicPattern,
 };
 
@@ -43,6 +43,13 @@ impl CursorPartition for SqliteCursor {
     }
 }
 
+impl CommitCursor for SqliteCursor {
+    type Commit = SqliteCursor;
+    fn commit_cursor(&self) -> Self::Commit {
+        *self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteSubscription {
     pub start: StartFrom<SqliteCursor>,
@@ -63,10 +70,6 @@ impl Default for SqliteSubscription {
 }
 
 impl StartableSubscription<SqliteCursor> for SqliteSubscription {
-    fn start(&self) -> &StartFrom<SqliteCursor> {
-        &self.start
-    }
-
     fn with_start(mut self, start: StartFrom<SqliteCursor>) -> Self {
         self.start = start;
         self

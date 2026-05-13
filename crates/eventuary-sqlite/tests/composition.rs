@@ -3,6 +3,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::time::timeout;
 
+use eventuary_core::io::CheckpointStore;
 use eventuary_core::io::checkpoint::{CheckpointScope, StreamId};
 use eventuary_core::io::readers::{
     CheckpointReader, CheckpointSubscription, PartitionedReader, PartitionedReaderConfig,
@@ -58,7 +59,10 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
             .unwrap();
     }
 
-    let store = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+        db.conn(),
+        SqliteCheckpointStoreConfig::default(),
+    );
     let source = SqliteReader::new(db.conn(), fast_config());
     let checkpointed = CheckpointReader::new(source, store);
 
@@ -82,11 +86,11 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
     m1.ack().await.unwrap();
     drop(stream);
 
-    // brief settle so commit task drains
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
     let source2 = SqliteReader::new(db.conn(), fast_config());
-    let store2 = SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+        db.conn(),
+        SqliteCheckpointStoreConfig::default(),
+    );
     let checkpointed2 = CheckpointReader::new(source2, store2);
     let mut stream2 = checkpointed2
         .read(CheckpointSubscription::new(sub_for("acme"), scope()))
@@ -99,6 +103,100 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
         .unwrap();
     assert_eq!(next.event().key().unwrap().as_str(), "k2");
 }
+
+#[tokio::test]
+async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    let writer = SqliteEventWriter::new(db.conn());
+    for i in 0..6 {
+        writer
+            .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let source = SqliteReader::new(db.conn(), fast_config());
+    let partitioned = PartitionedReader::new(
+        source,
+        PartitionedReaderConfig {
+            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            ..PartitionedReaderConfig::default()
+        },
+    );
+    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+        db.conn(),
+        SqliteCheckpointStoreConfig::default(),
+    );
+    let checkpointed = CheckpointReader::new(partitioned, store);
+
+    let inner = PartitionedSubscription::new(sub_for("acme"));
+    let mut stream = checkpointed
+        .read(CheckpointSubscription::new(inner, scope()))
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        let msg = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        msg.ack().await.unwrap();
+    }
+    drop(stream);
+
+    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+        db.conn(),
+        SqliteCheckpointStoreConfig::default(),
+    );
+    let rows = store2.load_scope(&scope()).await.unwrap();
+    assert!(!rows.is_empty(), "expected per-lane checkpoints persisted");
+    for (partition, _cursor) in &rows {
+        assert!(partition.is_some(), "partitioned cursor must be tagged");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_reader_no_advance_on_nack() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    let writer = SqliteEventWriter::new(db.conn());
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "k0"))
+        .await
+        .unwrap();
+
+    let source = SqliteReader::new(db.conn(), fast_config());
+    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+        db.conn(),
+        SqliteCheckpointStoreConfig::default(),
+    );
+    let checkpointed = CheckpointReader::new(source, store);
+
+    let mut stream = checkpointed
+        .read(CheckpointSubscription::new(sub_for("acme"), scope()))
+        .await
+        .unwrap();
+    let m0 = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    m0.nack().await.unwrap();
+    drop(stream);
+
+    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+        db.conn(),
+        SqliteCheckpointStoreConfig::default(),
+    );
+    let rows = store2.load_scope(&scope()).await.unwrap();
+    assert!(rows.is_empty(), "nack must not commit checkpoint");
+}
+
+// Contiguous-delivered-order ack semantics are unit-tested in
+// `eventuary-core` against `PendingState` directly. An end-to-end test
+// against a real source reader would require multiple in-flight messages
+// per partition, but the current readers (source-cursor SQL readers and
+// the lane scheduler) hold at most one in-flight per lane, so the
+// scenario cannot be constructed without a synthetic test reader.
 
 #[tokio::test]
 async fn partitioned_reader_tags_partition_on_cursor() {

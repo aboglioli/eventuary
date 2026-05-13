@@ -11,8 +11,10 @@ pub enum StartFrom<C = NoCursor> {
     After(C),
 }
 
+/// Marker for subscriptions that can be told to resume from a cursor.
+/// `CheckpointReader` calls `with_start(StartFrom::After(cursor))` on the
+/// inner subscription when it has a stored checkpoint.
 pub trait StartableSubscription<C>: Clone + Send + 'static {
-    fn start(&self) -> &StartFrom<C>;
     fn with_start(self, start: StartFrom<C>) -> Self;
 }
 

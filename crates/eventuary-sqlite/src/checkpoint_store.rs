@@ -96,7 +96,7 @@ where
             let sql = format!(
                 "SELECT sequence FROM {relation} \
                  WHERE consumer_group_id = ?1 \
-                   AND checkpoint_name   = ?2 \
+                   AND stream_id   = ?2 \
                    AND partition         = ?3 \
                    AND partition_count   = ?4"
             );
@@ -133,7 +133,7 @@ where
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             let sql = format!(
                 "SELECT partition, partition_count, sequence FROM {relation} \
-                 WHERE consumer_group_id = ?1 AND checkpoint_name = ?2"
+                 WHERE consumer_group_id = ?1 AND stream_id = ?2"
             );
             let mut stmt = guard
                 .prepare(&sql)
@@ -168,9 +168,9 @@ where
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             let sql = format!(
-                "INSERT INTO {relation} (consumer_group_id, checkpoint_name, partition, partition_count, sequence) \
+                "INSERT INTO {relation} (consumer_group_id, stream_id, partition, partition_count, sequence) \
                  VALUES (?1, ?2, ?3, ?4, ?5) \
-                 ON CONFLICT (consumer_group_id, checkpoint_name, partition, partition_count) \
+                 ON CONFLICT (consumer_group_id, stream_id, partition, partition_count) \
                  DO UPDATE SET sequence = excluded.sequence \
                  WHERE excluded.sequence > {relation}.sequence"
             );

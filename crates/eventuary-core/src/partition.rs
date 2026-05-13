@@ -45,6 +45,15 @@ pub trait CursorPartition {
     fn partition(&self) -> Option<LogicalPartition>;
 }
 
+/// Cursor extension: map the delivery cursor to the value that should be
+/// persisted by a `CheckpointStore`. For most source cursors this is the
+/// identity; partition wrappers strip the partition envelope so the store
+/// commits only the underlying source cursor.
+pub trait CommitCursor: Clone + Send + Sync + 'static {
+    type Commit: Clone + Ord + Send + Sync + 'static;
+    fn commit_cursor(&self) -> Self::Commit;
+}
+
 /// Hashable contributor for partition routing.
 ///
 /// Implementations should hash a stable byte representation of the value
