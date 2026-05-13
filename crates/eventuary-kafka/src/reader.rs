@@ -13,16 +13,47 @@ use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
 use eventuary_core::io::{EventFilter, Message, Reader};
-use eventuary_core::{ConsumerGroupId, Error, Event, Result, SerializedEvent, StartFrom};
+use eventuary_core::{
+    CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
+    SerializedEvent, StartFrom,
+};
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
 use crate::reader_config::KafkaReaderConfig;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct KafkaCursor {
-    // Kafka native: topic, partition, offset. Kept simple to keep `Copy`.
+    pub topic: String,
     pub partition: i32,
     pub offset: i64,
+}
+
+impl PartialOrd for KafkaCursor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for KafkaCursor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.topic
+            .cmp(&other.topic)
+            .then(self.partition.cmp(&other.partition))
+            .then(self.offset.cmp(&other.offset))
+    }
+}
+
+impl CursorPartition for KafkaCursor {
+    fn partition(&self) -> Option<LogicalPartition> {
+        None
+    }
+}
+
+impl CommitCursor for KafkaCursor {
+    type Commit = KafkaCursor;
+    fn commit_cursor(&self) -> Self::Commit {
+        self.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +172,7 @@ fn apply_timestamp_seek(
 }
 
 pub struct KafkaStream {
-    rx: mpsc::Receiver<Result<Message<BatchedAcker<KafkaOffsetToken>>>>,
+    rx: mpsc::Receiver<Result<Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>>>,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
     ack_buffer: Arc<AckBuffer<KafkaFlusher>>,
@@ -161,7 +192,7 @@ impl Drop for KafkaStream {
 }
 
 impl Stream for KafkaStream {
-    type Item = Result<Message<BatchedAcker<KafkaOffsetToken>>>;
+    type Item = Result<Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
@@ -170,7 +201,7 @@ impl Stream for KafkaStream {
 impl Reader for KafkaReader {
     type Subscription = KafkaSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
-    type Cursor = eventuary_core::io::NoCursor;
+    type Cursor = KafkaCursor;
     type Stream = KafkaStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
@@ -251,9 +282,14 @@ impl Reader for KafkaReader {
                     let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                     continue;
                 }
+                let cursor = KafkaCursor {
+                    topic: token.topic.clone(),
+                    partition: token.partition,
+                    offset: token.offset,
+                };
                 let acker = BatchedAcker::new(token, tx_ack.clone());
                 if tx
-                    .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))
+                    .send(Ok(Message::new(event, acker, cursor)))
                     .await
                     .is_err()
                 {
