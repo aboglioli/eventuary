@@ -1,10 +1,10 @@
 //! Conformance test suite for eventuary backends.
 //!
-//! Being rewired as part of the cursor reader refactor: backend adapters
-//! provide a per-backend subscription factory rather than a universal
-//! `EventSubscription`. Capability flags remain available; the case suite
-//! is being rebuilt to compose `PartitionedReader` and `CheckpointReader`
-//! over each backend's source-cursor reader.
+//! Capability flags ([`Capabilities`]) describe which cursor-reader
+//! composition features a backend supports. The shared case suite is
+//! deferred to a future task — backends currently cover the new API via
+//! their own integration/composition tests in
+//! `crates/eventuary-<backend>/tests/`.
 
 mod capabilities;
 
