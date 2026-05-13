@@ -41,6 +41,18 @@ impl SqsReader {
         if let Some(org) = self.config.organization.as_ref() {
             filter.organization = Some(org.clone());
         }
+        if !self.config.topics.is_empty() {
+            filter.topics = Some(
+                self.config
+                    .topics
+                    .iter()
+                    .map(|t| eventuary_core::TopicPattern::exact(t.clone()))
+                    .collect(),
+            );
+        }
+        if let Some(ns) = self.config.namespace.as_ref() {
+            filter.namespace = Some(eventuary_core::NamespacePattern::prefix(ns.clone()));
+        }
         SqsSubscription {
             queue_url: self.config.queue_url.clone(),
             wait_time: self.config.wait_time,
