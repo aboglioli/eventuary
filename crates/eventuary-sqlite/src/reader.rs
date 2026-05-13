@@ -373,18 +373,9 @@ async fn fetch_batch(
     let conn = Arc::clone(conn);
     let relation = events_relation.to_owned();
     let org = filter.organization.as_ref().map(|o| o.as_str().to_owned());
-    let exact_topics: Vec<String> = filter
-        .topics
-        .as_ref()
-        .map(|patterns| {
-            patterns
-                .iter()
-                .map(|p| match p {
-                    TopicPattern::Exact(t) => t.as_str().to_owned(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let exact_topic: Option<String> = filter.topic.as_ref().map(|p| match p {
+        TopicPattern::Exact(t) => t.as_str().to_owned(),
+    });
     let ns_prefix = filter.namespace.as_ref().and_then(|p| match p {
         eventuary_core::NamespacePattern::Prefix(ns) if !ns.is_root() => {
             Some(ns.as_str().to_owned())
@@ -409,17 +400,10 @@ async fn fetch_batch(
             params.push(Value::Text(o.clone()));
             idx += 1;
         }
-        if !exact_topics.is_empty() {
-            let placeholders: Vec<String> = exact_topics
-                .iter()
-                .enumerate()
-                .map(|(i, _)| format!("?{}", idx + i))
-                .collect();
-            sql.push_str(&format!(" AND topic IN ({})", placeholders.join(",")));
-            for t in &exact_topics {
-                params.push(Value::Text(t.clone()));
-            }
-            idx += exact_topics.len();
+        if let Some(t) = &exact_topic {
+            sql.push_str(&format!(" AND topic = ?{idx}"));
+            params.push(Value::Text(t.clone()));
+            idx += 1;
         }
         if let Some(prefix) = &ns_prefix {
             sql.push_str(&format!(

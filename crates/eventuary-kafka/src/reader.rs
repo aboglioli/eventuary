@@ -110,13 +110,10 @@ impl KafkaReader {
         if let Some(org) = self.config.organization.as_ref() {
             filter.organization = Some(org.clone());
         }
-        if let Some(topics) = self.config.event_topics.as_ref() {
-            filter.topics = Some(
-                topics
-                    .iter()
-                    .map(|t| eventuary_core::TopicPattern::exact(t.clone()))
-                    .collect(),
-            );
+        if let Some(topics) = self.config.event_topics.as_ref()
+            && let [topic] = topics.as_slice()
+        {
+            filter.topic = Some(eventuary_core::TopicPattern::exact(topic.clone()));
         }
         if let Some(ns) = self.config.namespace.as_ref() {
             filter.namespace = Some(eventuary_core::NamespacePattern::prefix(ns.clone()));

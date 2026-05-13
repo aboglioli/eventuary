@@ -96,7 +96,7 @@ impl Filter for AllFilter {
 #[derive(Debug, Clone, Default)]
 pub struct EventFilter {
     pub organization: Option<OrganizationId>,
-    pub topics: Option<Vec<TopicPattern>>,
+    pub topic: Option<TopicPattern>,
     pub namespace: Option<NamespacePattern>,
     pub keys: Option<Vec<EventKey>>,
     pub metadata: Option<Metadata>,
@@ -121,8 +121,8 @@ impl EventFilter {
         {
             return false;
         }
-        if let Some(topics) = self.topics.as_ref()
-            && !topics.iter().any(|p| p.matches_topic(event.topic()))
+        if let Some(topic) = self.topic.as_ref()
+            && !topic.matches_topic(event.topic())
         {
             return false;
         }
