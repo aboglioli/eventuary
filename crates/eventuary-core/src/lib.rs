@@ -29,7 +29,6 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod collector;
-mod consumer_group_id;
 mod error;
 mod event;
 mod event_key;
@@ -47,17 +46,16 @@ mod topic;
 mod topic_pattern;
 
 pub use collector::EventCollector;
-pub use consumer_group_id::ConsumerGroupId;
 pub use error::{Error, Result};
 pub use event::{Event, EventId};
 pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
     BatchedStream, BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter,
-    CheckpointResumePolicy, ConsumerHandle, Cursor, CursorId, DeadLetterWriter, DefaultRetryPolicy,
-    DynAcker, DynHandler, DynReader, DynWriter, Filter, FilterExt, FilteredHandler, Handler,
-    HandlerExt, Message, NoCursor, Reader, ReaderExt, RetryAction, RetryConfig, RetryHandler,
-    RetryPolicy, SpawnedStream, Writer, WriterExt, backoff_delay,
+    CheckpointResumePolicy, ConsumerGroupId, ConsumerHandle, Cursor, CursorId, DeadLetterWriter,
+    DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter, FilterExt,
+    FilteredHandler, Handler, HandlerExt, Message, NoCursor, Reader, ReaderExt, RetryAction,
+    RetryConfig, RetryHandler, RetryPolicy, SpawnedStream, Writer, WriterExt, backoff_delay,
 };
 pub use metadata::Metadata;
 pub use namespace::Namespace;

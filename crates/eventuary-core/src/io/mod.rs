@@ -2,6 +2,7 @@ pub use futures::future::BoxFuture;
 
 pub mod acker;
 pub mod checkpoint;
+pub mod consumer_group_id;
 pub mod consumers;
 mod cursor;
 pub mod filter;
@@ -16,6 +17,7 @@ pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
 pub use checkpoint::{
     CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore, StreamId,
 };
+pub use consumer_group_id::ConsumerGroupId;
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
