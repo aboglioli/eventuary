@@ -63,7 +63,7 @@ crates/
 │       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
 │       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
-│       ├── partition.rs    # LogicalPartition, CursorPartition, partition_for, fnv1a_u64
+│       ├── partition.rs    # LogicalPartition, partition_for, fnv1a_u64
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
 │       ├── start_from.rs   # StartFrom<C> (Earliest / Latest / Timestamp / After)
 │       ├── serialization.rs # SerializedEvent wire format
@@ -287,22 +287,25 @@ single source. Cross-cutting concerns live in generic core wrappers in
   delivered order** per partition. `ack` calls the inner acker first and
   then commits synchronously so store errors propagate; `nack` leaves the
   checkpoint untouched.
-- `CursorPartition` maps a delivery cursor to the optional logical
-  partition used in the checkpoint key. `CheckpointReader` stores the
-  full cursor value emitted by the inner reader. For
-  `PartitionedReader<R>`, that means the checkpoint value is
-  `PartitionedCursor<R::Cursor>` and the key also includes the logical
-  partition for efficient lookup and independent per-lane commits.
+- `Cursor` is the cursor-introspection trait. Every reader's cursor type
+  implements it. `Cursor::id()` returns `CursorId::Global` by default and
+  `CursorId::Named(Arc<str>)` for cursors that mark independent progress
+  points (e.g., `PartitionedCursor<C>` returns
+  `CursorId::Named("partition:{count}:{id}")`). `CheckpointReader` uses
+  `cursor.id()` to build the `CheckpointKey` and to track per-progress-point
+  pending state. The checkpoint store persists the full cursor value.
 - `CheckpointStore<C>` is the persistence trait. SQL implementations
   (`PgCheckpointStore`, `SqliteCheckpointStore`) own the
   `consumer_offsets` table and persist the full inner cursor as JSON
   (`PgCursor`, `SqliteCursor`, or `PartitionedCursor<...>` when composed
-  under a `PartitionedReader`).
+  under a `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
+  cursor_id)`.
 
 Identity for the checkpoint store is `CheckpointKey { scope: { group,
-stream_id }, partition: Option<LogicalPartition> }`. Unpartitioned
-consumers serialize as `(partition = 0, partition_count = 1)`, matching
-the default schema columns.
+stream_id }, cursor_id: CursorId }`. Unpartitioned consumers use
+`CursorId::Global`; partitioned consumers use
+`CursorId::Named("partition:{count}:{id}")` so each lane checkpoints
+independently.
 
 **Backend capability matrix.**
 
@@ -371,7 +374,8 @@ behavior directly.
   persists the full inner cursor as JSON (typically `SqliteCursor` for a
   raw source reader, or `PartitionedCursor<SqliteCursor>` when composed
   under a `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
-  partition, partition_count)`.
+  cursor_id)` where `cursor_id` is `TEXT` (the serialized `CursorId`:
+  `"global"` or `"partition:{count}:{id}"`).
 - `SqliteDatabaseConfig`, `SqliteReaderConfig`, `SqliteWriterConfig`, and
   `SqliteCheckpointStoreConfig` all support validated relation names.
 - Polling reader: `batch_size` + `poll_interval`.
@@ -386,7 +390,8 @@ behavior directly.
   persists the full inner cursor as JSON (typically `PgCursor` for a raw
   source reader, or `PartitionedCursor<PgCursor>` when composed under a
   `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
-  partition, partition_count)`.
+  cursor_id)` where `cursor_id` is `JSONB` (the serialized `CursorId`:
+  `"global"` or `"partition:{count}:{id}"`).
 - `PgDatabaseConfig`, `PgReaderConfig`, `PgWriterConfig`, and
   `PgCheckpointStoreConfig` all support validated simple or
   schema-qualified relation names.
@@ -538,12 +543,15 @@ Worth knowing when changing the codebase:
   `CheckpointReader<R, S>` over a `CheckpointStore<C>` in core. SQL
   backends own only their `consumer_offsets` table via
   `PgCheckpointStore` / `SqliteCheckpointStore`; the checkpoint key is
-  `{ scope: { group, stream_id }, partition: Option<LogicalPartition> }`.
-  `CheckpointReader` persists the full cursor emitted by the inner
-  reader. `CursorPartition` is the only cursor-introspection trait —
-  used only to build the checkpoint key partition. `StartableSubscription`
+  `{ scope: { group, stream_id }, cursor_id: CursorId }`.
+- **`Cursor` trait with `id() -> CursorId`** is the cursor-introspection
+  contract. `CursorId::Global` for readers with one progress point;
+  `CursorId::Named(Arc<str>)` for readers with multiple independent
+  progress points (partitions, lanes, named streams). `StartableSubscription`
   is the only seed mechanism — `CheckpointReader` and `PartitionedReader`
   both call `inner.with_start(StartFrom::After(cursor))` to resume.
+  `CheckpointReader` persists the full cursor; the checkpoint key
+  identifies progress points by `CursorId`.
 - **Validated SQL relation names.** PostgreSQL and SQLite configs accept
   simple names (`events`) or schema-qualified names (`eventuary.events`)
   where supported. Always render through `PgRelationName` /

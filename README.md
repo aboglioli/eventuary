@@ -212,11 +212,21 @@ let mut stream = checkpointed
 ```
 
 `CheckpointReader` commits checkpoints in contiguous delivered order per
-logical partition. `nack` does not advance the checkpoint. SQL checkpoint
-stores persist the full inner cursor as JSON — `PgCursor` / `SqliteCursor`
-for a raw source reader, or `PartitionedCursor<...>` when composed under a
-`PartitionedReader` — and `CursorPartition` projects the optional logical
-partition into the checkpoint key.
+progress point. `nack` does not advance the checkpoint. Every reader's
+cursor implements the `Cursor` trait, which exposes `id() -> CursorId`.
+`CursorId::Global` identifies readers with a single progress point;
+`CursorId::Named(Arc<str>)` identifies cursors that mark independent
+progress points (for example, `PartitionedCursor<C>` returns
+`CursorId::Named("partition:{count}:{id}")`). `CheckpointReader` uses
+`cursor.id()` to build the checkpoint key and to track per-progress-point
+pending state.
+
+SQL checkpoint stores persist the full inner cursor as JSON —
+`PgCursor` / `SqliteCursor` for a raw source reader, or
+`PartitionedCursor<...>` when composed under a `PartitionedReader`. The
+`consumer_offsets` row is keyed by `(consumer_group_id, stream_id,
+cursor_id)`, where `cursor_id` is `JSONB` on Postgres and `TEXT` on
+SQLite.
 
 On resume `CheckpointReader` seeds the inner subscription via
 `StartableSubscription::with_start(StartFrom::After(min(stored_cursors)))`.
