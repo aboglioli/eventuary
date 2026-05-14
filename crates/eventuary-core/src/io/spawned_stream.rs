@@ -54,8 +54,8 @@ mod tests {
 
     use super::*;
     use crate::event::Event;
-    use crate::io::acker::NoopAcker;
     use crate::io::NoCursor;
+    use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
     fn ev() -> Event {

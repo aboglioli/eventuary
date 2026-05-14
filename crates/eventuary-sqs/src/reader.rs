@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use aws_sdk_sqs::Client;
@@ -93,34 +92,27 @@ impl Reader for SqsReader {
                             let body = match m.body.as_deref() {
                                 Some(b) => b,
                                 None => {
-                                    let _ =
-                                        BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
+                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                                     continue;
                                 }
                             };
                             let serialized = match SerializedEvent::from_json_str(body) {
                                 Ok(s) => s,
                                 Err(_) => {
-                                    let _ =
-                                        BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
+                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                                     continue;
                                 }
                             };
                             let event = match serialized.to_event() {
                                 Ok(e) => e,
                                 Err(_) => {
-                                    let _ =
-                                        BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
+                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                                     continue;
                                 }
                             };
                             let acker = BatchedAcker::new(receipt, tx_ack.clone());
                             if tx
-                                .send(Ok(Message::new(
-                                    event,
-                                    acker,
-                                    eventuary_core::io::NoCursor,
-                                )))
+                                .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))
                                 .await
                                 .is_err()
                             {

@@ -207,20 +207,17 @@ impl Reader for KafkaReader {
                                 continue;
                             }
                         };
-                        let serialized: SerializedEvent =
-                            match serde_json::from_slice(body) {
-                                Ok(s) => s,
-                                Err(_) => {
-                                    let _ =
-                                        BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                                    continue;
-                                }
-                            };
+                        let serialized: SerializedEvent = match serde_json::from_slice(body) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                                continue;
+                            }
+                        };
                         let event: Event = match serialized.to_event() {
                             Ok(e) => e,
                             Err(_) => {
-                                let _ =
-                                    BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                                let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                                 continue;
                             }
                         };

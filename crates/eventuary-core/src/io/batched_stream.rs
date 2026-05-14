@@ -8,8 +8,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
-use crate::io::acker::{AckBuffer, AckBufferConfig, AckCmd, AckShutdown, BatchFlusher, BatchedAcker};
-use crate::io::{Acker, Message, NoCursor};
+use crate::io::acker::{
+    AckBuffer, AckBufferConfig, AckCmd, AckShutdown, BatchFlusher, BatchedAcker,
+};
+use crate::io::{Message, NoCursor};
 
 pub struct BatchedStream<T: Clone + Send + Sync + 'static, C = NoCursor> {
     rx: mpsc::Receiver<Result<Message<BatchedAcker<T>, C>>>,
@@ -44,14 +46,15 @@ pub fn batched_source<T: Clone + Send + Sync + 'static, C: Send + 'static>(
     ack_config: AckBufferConfig,
     channel_capacity: usize,
     source_loop: impl FnOnce(
-            mpsc::Sender<Result<Message<BatchedAcker<T>, C>>>,
-            mpsc::Sender<AckCmd<T>>,
-            CancellationToken,
-        ) -> BoxFuture<'static, ()>
-        + Send + 'static,
+        mpsc::Sender<Result<Message<BatchedAcker<T>, C>>>,
+        mpsc::Sender<AckCmd<T>>,
+        CancellationToken,
+    ) -> BoxFuture<'static, ()>
+    + Send
+    + 'static,
 ) -> BatchedStream<T, C> {
     let ack_buffer = Arc::new(AckBuffer::spawn(flusher, ack_config));
-    let ack: Arc<dyn AckShutdown> = ack_buffer.clone() as Arc<dyn AckShutdown>;
+    let ack: Arc<dyn AckShutdown> = Arc::clone(&ack_buffer) as Arc<dyn AckShutdown>;
     let tx_ack = ack_buffer.sender();
     let (tx, rx) = mpsc::channel(channel_capacity);
     let cancel = CancellationToken::new();
@@ -159,9 +162,7 @@ mod tests {
                     started_clone.store(1, Ordering::SeqCst);
                     cancel.cancelled().await;
                     let acker = BatchedAcker::new("x".to_owned(), tx_ack);
-                    let _ = tx
-                        .send(Ok(Message::new(ev("k0"), acker, NoCursor)))
-                        .await;
+                    let _ = tx.send(Ok(Message::new(ev("k0"), acker, NoCursor))).await;
                 })
             },
         );

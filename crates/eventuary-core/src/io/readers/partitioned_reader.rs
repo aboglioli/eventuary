@@ -22,11 +22,15 @@
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures::{Stream, StreamExt};
+#[cfg(test)]
+use std::pin::Pin;
+
+#[cfg(test)]
+use futures::Stream;
+use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
