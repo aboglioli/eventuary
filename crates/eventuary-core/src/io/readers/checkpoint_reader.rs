@@ -1,8 +1,11 @@
 //! CheckpointReader: composes an inner reader and a checkpoint store.
 //!
-//! On `read`, loads the persisted cursor per `CursorId` for the requested
-//! scope and configures the inner reader to start from
-//! `StartFrom::After(min(stored_cursors))`. Records each delivered cursor
+//! On `read`, loads all persisted cursors for the requested scope
+//! (one per `CursorId`) and hands them to the inner subscription via
+//! `StartableSubscription::with_starts` as a `Vec<StartFrom::After(c)>`.
+//! The inner reader decides which row to resume from — the default
+//! impl picks the smallest `After(c)`; wrappers like `PartitionedReader`
+//! filter by compatibility first. Records each delivered cursor
 //! in contiguous delivered order per `CursorId`. On downstream `ack`,
 //! calls the inner ack first, then commits the cursor to the store
 //! **synchronously** — store commit errors propagate to the caller and
@@ -196,19 +199,18 @@ where
             )));
         }
 
-        let known_from_checkpoints: HashMap<CursorId, R::Cursor> = stored.into_iter().collect();
-        let min_cursor: Option<R::Cursor> = known_from_checkpoints.values().min().cloned();
-
-        let inner_subscription = match min_cursor {
-            Some(cursor) => subscription
-                .inner
-                .clone()
-                .with_start(StartFrom::After(cursor)),
-            None => subscription.inner.clone(),
-        };
+        let inner_subscription = subscription.inner.clone().with_starts(
+            stored
+                .iter()
+                .map(|(_, c)| StartFrom::After(c.clone()))
+                .collect(),
+        );
 
         let (inner_stream, known) = match self.inner.read(inner_subscription).await {
-            Ok(stream) => (stream, known_from_checkpoints),
+            Ok(stream) => {
+                let known: HashMap<CursorId, R::Cursor> = stored.into_iter().collect();
+                (stream, known)
+            }
             Err(Error::InvalidCursor(reason))
                 if matches!(
                     subscription.resume_policy,
@@ -395,23 +397,32 @@ mod tests {
         }
     }
 
-    type PreloadedRows = Vec<(CursorId, TestCursor)>;
-
-    #[derive(Clone, Default)]
-    struct PreloadedStore {
-        rows: std::sync::Arc<TokioMutex<PreloadedRows>>,
+    #[derive(Clone)]
+    struct PreloadedStore<C> {
+        rows: std::sync::Arc<TokioMutex<Vec<(CursorId, C)>>>,
     }
 
-    impl CheckpointStore<TestCursor> for PreloadedStore {
-        async fn load(&self, _: &CheckpointKey) -> Result<Option<TestCursor>> {
+    impl<C> Default for PreloadedStore<C> {
+        fn default() -> Self {
+            Self {
+                rows: std::sync::Arc::new(TokioMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl<C> CheckpointStore<C> for PreloadedStore<C>
+    where
+        C: Clone + Send + Sync + 'static,
+    {
+        async fn load(&self, _: &CheckpointKey) -> Result<Option<C>> {
             Ok(None)
         }
 
-        async fn load_scope(&self, _: &CheckpointScope) -> Result<Vec<(CursorId, TestCursor)>> {
+        async fn load_scope(&self, _: &CheckpointScope) -> Result<Vec<(CursorId, C)>> {
             Ok(self.rows.lock().await.clone())
         }
 
-        async fn commit(&self, _: &CheckpointKey, _: TestCursor) -> Result<()> {
+        async fn commit(&self, _: &CheckpointKey, _: C) -> Result<()> {
             Ok(())
         }
     }
@@ -603,6 +614,117 @@ mod tests {
 
         assert!(matches!(err, Error::InvalidCursor(_)));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_over_mixed_partitions_resumes_from_current_only() {
+        // Stored cursor < VecReader's emitted TestCursor(1) so the
+        // CheckpointReader skip-already-stored guard does not swallow
+        // the resumed event if partition assignment happens to match.
+        use crate::io::readers::{
+            PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
+            partitioned_reader::PartitionedCursor,
+        };
+        use crate::partition::LogicalPartition;
+        use futures::StreamExt;
+        use std::num::NonZeroU16;
+
+        let old_partition = LogicalPartition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let current_partition = LogicalPartition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+
+        let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
+        *store.rows.lock().await = vec![
+            (
+                CursorId::Named(std::sync::Arc::from("partition:8:0")),
+                PartitionedCursor::new(TestCursor(0), old_partition),
+            ),
+            (
+                CursorId::Named(std::sync::Arc::from("partition:4:2")),
+                PartitionedCursor::new(TestCursor(0), current_partition),
+            ),
+        ];
+
+        let inner_reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+        };
+        let partitioned = PartitionedReader::new(
+            inner_reader,
+            PartitionedReaderConfig {
+                partition_count: NonZeroU16::new(4).unwrap(),
+                ..PartitionedReaderConfig::default()
+            },
+        );
+        let checkpointed = CheckpointReader::new(partitioned, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let mut stream = checkpointed
+            .read(CheckpointSubscription::new(
+                PartitionedSubscription::new(TestSub),
+                scope,
+            ))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.event().key().unwrap().as_str(), "k0");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_over_old_partitions_only_falls_back() {
+        // Stored row is incompatible (partition_count=8 vs configured=4);
+        // test exercises the fallback path.
+        use crate::io::readers::{
+            PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
+            partitioned_reader::PartitionedCursor,
+        };
+        use crate::partition::LogicalPartition;
+        use futures::StreamExt;
+        use std::num::NonZeroU16;
+
+        let old_partition = LogicalPartition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
+        *store.rows.lock().await = vec![(
+            CursorId::Named(std::sync::Arc::from("partition:8:0")),
+            PartitionedCursor::new(TestCursor(10), old_partition),
+        )];
+
+        let inner_reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+        };
+        let partitioned = PartitionedReader::new(
+            inner_reader,
+            PartitionedReaderConfig {
+                partition_count: NonZeroU16::new(4).unwrap(),
+                ..PartitionedReaderConfig::default()
+            },
+        );
+        let checkpointed = CheckpointReader::new(partitioned, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let mut stream = checkpointed
+            .read(CheckpointSubscription::new(
+                PartitionedSubscription::new(TestSub),
+                scope,
+            ))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.event().key().unwrap().as_str(), "k0");
     }
 
     #[tokio::test]
