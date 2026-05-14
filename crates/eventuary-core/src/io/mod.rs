@@ -1,6 +1,7 @@
 pub use futures::future::BoxFuture;
 
 pub mod acker;
+mod batched_stream;
 pub mod checkpoint;
 pub mod consumers;
 pub mod filters;
@@ -12,6 +13,7 @@ mod spawned_stream;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
+pub use batched_stream::{BatchedStream, batched_source};
 pub use checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore, StreamId};
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,

@@ -53,7 +53,8 @@ pub use event::{Event, EventId};
 pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
-    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
+    BatchedStream, BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream,
+    BoxWriter, ConsumerHandle,
     DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
     FilterExt, FilteredHandler, Handler, HandlerExt, Message, NoCursor, Reader, ReaderExt,
     RetryAction, RetryConfig, RetryHandler, RetryPolicy, SpawnedStream,
