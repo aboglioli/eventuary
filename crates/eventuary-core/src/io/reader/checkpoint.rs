@@ -18,6 +18,7 @@
 //! persisted value is `PartitionedCursor<R::Cursor>`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -25,12 +26,63 @@ use futures::{Stream, StreamExt};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+use crate::ConsumerGroupId;
 use crate::error::{Error, Result};
-use crate::io::checkpoint::{
-    CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
-};
+use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 use crate::start_from::{StartFrom, StartableSubscription};
+
+pub trait CheckpointStore<C>: Clone + Send + Sync + 'static {
+    fn load<'a>(
+        &'a self,
+        key: &'a CheckpointKey,
+    ) -> impl Future<Output = Result<Option<C>>> + Send + 'a;
+
+    fn load_scope<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+    ) -> impl Future<Output = Result<Vec<(CursorId, C)>>> + Send + 'a;
+
+    fn commit<'a>(
+        &'a self,
+        key: &'a CheckpointKey,
+        cursor: C,
+    ) -> impl Future<Output = Result<()>> + Send + 'a;
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct CheckpointScope {
+    pub consumer_group_id: ConsumerGroupId,
+    pub stream_id: StreamId,
+}
+
+impl CheckpointScope {
+    pub fn new(consumer_group_id: ConsumerGroupId, stream_id: StreamId) -> Self {
+        Self {
+            consumer_group_id,
+            stream_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct CheckpointKey {
+    pub scope: CheckpointScope,
+    pub cursor_id: CursorId,
+}
+
+impl CheckpointKey {
+    pub fn new(scope: CheckpointScope, cursor_id: CursorId) -> Self {
+        Self { scope, cursor_id }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum CheckpointResumePolicy {
+    #[default]
+    UseInitialStart,
+    Error,
+}
 
 #[derive(Debug, Clone)]
 pub struct CheckpointReaderConfig {
@@ -303,8 +355,8 @@ mod tests {
     use crate::ConsumerGroupId;
     use crate::event::Event;
     use crate::io::Message;
+    use crate::io::StreamId;
     use crate::io::acker::NoopAcker;
-    use crate::io::checkpoint::StreamId;
     use crate::payload::Payload;
     use crate::start_from::{StartFrom, StartableSubscription};
     use futures::Stream;
@@ -621,9 +673,8 @@ mod tests {
         // Stored cursor < VecReader's emitted TestCursor(1) so the
         // CheckpointReader skip-already-stored guard does not swallow
         // the resumed event if partition assignment happens to match.
-        use crate::io::readers::{
-            PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
-            partitioned_reader::PartitionedCursor,
+        use crate::io::{
+            PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
         use crate::partition::LogicalPartition;
         use futures::StreamExt;
@@ -680,9 +731,8 @@ mod tests {
     async fn checkpoint_reader_over_old_partitions_only_falls_back() {
         // Stored row is incompatible (partition_count=8 vs configured=4);
         // test exercises the fallback path.
-        use crate::io::readers::{
-            PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
-            partitioned_reader::PartitionedCursor,
+        use crate::io::{
+            PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
         use crate::partition::LogicalPartition;
         use futures::StreamExt;
@@ -749,5 +799,34 @@ mod tests {
 
         let observed = observed.lock().await.clone().unwrap();
         assert_eq!(observed.start, StartFrom::After(TestCursor(10)));
+    }
+
+    #[test]
+    fn checkpoint_resume_policy_defaults_to_use_initial_start() {
+        assert_eq!(
+            CheckpointResumePolicy::default(),
+            CheckpointResumePolicy::UseInitialStart
+        );
+    }
+
+    #[test]
+    fn checkpoint_key_with_global_cursor_id_has_no_partition_subkey() {
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+        let key = CheckpointKey::new(scope, CursorId::Global);
+        assert_eq!(key.cursor_id, CursorId::Global);
+    }
+
+    #[test]
+    fn checkpoint_key_with_named_cursor_id_preserves_value() {
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
+        let key = CheckpointKey::new(scope, id.clone());
+        assert_eq!(key.cursor_id, id);
     }
 }

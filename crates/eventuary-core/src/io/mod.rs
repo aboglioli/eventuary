@@ -1,7 +1,6 @@
 pub use futures::future::BoxFuture;
 
 pub mod acker;
-pub mod checkpoint;
 pub mod consumer_group_id;
 pub mod consumers;
 mod cursor;
@@ -9,14 +8,11 @@ pub mod filter;
 mod handler;
 mod message;
 mod reader;
-pub mod readers;
 mod stream;
+mod stream_id;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
-pub use checkpoint::{
-    CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore, StreamId,
-};
 pub use consumer_group_id::ConsumerGroupId;
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
@@ -28,6 +24,13 @@ pub use filter::{
 };
 pub use handler::{ArcHandler, BoxHandler, DynHandler, FilteredHandler, Handler, HandlerExt};
 pub use message::{Message, NoCursor};
-pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
+pub use reader::{
+    ArcReader, BoxReader, BoxStream, CheckpointAcker, CheckpointKey, CheckpointReader,
+    CheckpointReaderConfig, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
+    CheckpointStream, CheckpointSubscription, DynReader, FilteredReader, FilteredStream,
+    LaneScheduling, PartitionAcker, PartitionedAckMode, PartitionedCursor, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription, Reader, ReaderExt,
+};
 pub use stream::{BatchedStream, SpawnedStream};
+pub use stream_id::StreamId;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};

@@ -7,11 +7,9 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
-use eventuary_core::io::CheckpointStore;
-use eventuary_core::io::checkpoint::{CheckpointScope, StreamId};
-use eventuary_core::io::readers::{
-    CheckpointReader, CheckpointSubscription, PartitionedCursor, PartitionedReader,
-    PartitionedReaderConfig, PartitionedSubscription,
+use eventuary_core::io::{
+    CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription, PartitionedCursor,
+    PartitionedReader, PartitionedReaderConfig, PartitionedSubscription, StreamId,
 };
 use eventuary_core::io::{EventFilter, Reader, Writer};
 use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
