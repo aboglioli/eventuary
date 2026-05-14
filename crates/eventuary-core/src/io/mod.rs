@@ -1,8 +1,8 @@
 pub use futures::future::BoxFuture;
 
 pub mod acker;
+mod consumer;
 pub mod consumer_group_id;
-pub mod consumers;
 mod cursor;
 pub mod filter;
 mod handler;
@@ -13,8 +13,8 @@ mod stream_id;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
+pub use consumer::{BackgroundConsumer, ConsumerHandle};
 pub use consumer_group_id::ConsumerGroupId;
-pub use consumers::{BackgroundConsumer, ConsumerHandle};
 pub use cursor::{Cursor, CursorId};
 pub use filter::{
     AllFilter, AndFilter, ArcFilter, BoxFilter, EventFilter, Filter, FilterExt, NotFilter, OrFilter,
