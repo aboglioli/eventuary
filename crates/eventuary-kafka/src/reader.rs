@@ -15,7 +15,7 @@ use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
 use eventuary_core::io::{Message, Reader};
 use eventuary_core::{
     CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
-    SerializedEvent, StartFrom,
+    SerializedEvent, StartFrom, StartableSubscription,
 };
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
@@ -62,6 +62,13 @@ pub struct KafkaSubscription {
     pub consumer_group_id: ConsumerGroupId,
     pub start_from: StartFrom<KafkaCursor>,
     pub limit: Option<usize>,
+}
+
+impl StartableSubscription<KafkaCursor> for KafkaSubscription {
+    fn with_start(mut self, start: StartFrom<KafkaCursor>) -> Self {
+        self.start_from = start;
+        self
+    }
 }
 
 pub struct KafkaReader {

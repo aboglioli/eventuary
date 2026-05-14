@@ -25,12 +25,11 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::io::checkpoint::{
-    CheckpointKey, CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
-    CheckpointResumePolicy, CheckpointScope, CheckpointStore,
+    CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
 };
 use crate::io::{Acker, Message, Reader};
 use crate::partition::{CommitCursor, CursorPartition, LogicalPartition};
-use crate::start_from::StartFrom;
+use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
 pub struct CheckpointReaderConfig {
@@ -176,7 +175,7 @@ where
     R: Reader + Send + Sync + 'static,
     R::Cursor: CommitCursor + CursorPartition + Send + Sync + 'static,
     <R::Cursor as CommitCursor>::Commit: Send + Sync + 'static,
-    R::Subscription: CheckpointResumableSubscription<<R::Cursor as CommitCursor>::Commit>,
+    R::Subscription: StartableSubscription<<R::Cursor as CommitCursor>::Commit>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
     S: CheckpointStore<<R::Cursor as CommitCursor>::Commit>,
@@ -200,11 +199,6 @@ where
             )));
         }
 
-        let resume_points = stored
-            .iter()
-            .cloned()
-            .map(|(partition, cursor)| CheckpointResumePoint::new(partition, cursor))
-            .collect::<Vec<_>>();
         let known_from_checkpoints: HashMap<
             Option<LogicalPartition>,
             <R::Cursor as CommitCursor>::Commit,
@@ -213,15 +207,10 @@ where
             known_from_checkpoints.values().min().cloned();
 
         let inner_subscription = match min_cursor {
-            Some(cursor) => {
-                subscription
-                    .inner
-                    .clone()
-                    .with_checkpoint_resume(CheckpointResume::new(
-                        StartFrom::After(cursor),
-                        resume_points,
-                    ))
-            }
+            Some(cursor) => subscription
+                .inner
+                .clone()
+                .with_start(StartFrom::After(cursor)),
             None => subscription.inner.clone(),
         };
 
@@ -327,9 +316,7 @@ mod tests {
     use crate::event::Event;
     use crate::io::Message;
     use crate::io::acker::NoopAcker;
-    use crate::io::checkpoint::{
-        CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint, StreamId,
-    };
+    use crate::io::checkpoint::StreamId;
     use crate::io::readers::{PartitionedReader, PartitionedReaderConfig, PartitionedSubscription};
     use crate::payload::Payload;
     use crate::start_from::{StartFrom, StartableSubscription};
@@ -396,47 +383,38 @@ mod tests {
             self
         }
     }
-    impl CheckpointResumableSubscription<TestCursor> for TestSub {
-        fn with_checkpoint_resume(self, resume: CheckpointResume<TestCursor>) -> Self {
-            self.with_start(resume.start().clone())
-        }
-    }
 
     #[derive(Debug, Clone)]
-    struct RecordingSub {
+    struct SeedingSub {
         start: StartFrom<TestCursor>,
-        resume_points: Vec<CheckpointResumePoint<TestCursor>>,
     }
 
-    impl Default for RecordingSub {
+    impl Default for SeedingSub {
         fn default() -> Self {
             Self {
                 start: StartFrom::Earliest,
-                resume_points: Vec::new(),
             }
         }
     }
 
-    impl CheckpointResumableSubscription<TestCursor> for RecordingSub {
-        fn with_checkpoint_resume(mut self, resume: CheckpointResume<TestCursor>) -> Self {
-            let (start, points) = resume.into_parts();
+    impl StartableSubscription<TestCursor> for SeedingSub {
+        fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
             self.start = start;
-            self.resume_points = points;
             self
         }
     }
 
-    struct RecordingSubReader {
-        observed: std::sync::Arc<TokioMutex<Option<RecordingSub>>>,
+    struct SeedingSubReader {
+        observed: std::sync::Arc<TokioMutex<Option<SeedingSub>>>,
     }
 
-    impl Reader for RecordingSubReader {
-        type Subscription = RecordingSub;
+    impl Reader for SeedingSubReader {
+        type Subscription = SeedingSub;
         type Acker = NoopAcker;
         type Cursor = TestCursor;
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
 
-        async fn read(&self, subscription: RecordingSub) -> Result<Self::Stream> {
+        async fn read(&self, subscription: SeedingSub) -> Result<Self::Stream> {
             *self.observed.lock().await = Some(subscription);
             Ok(Box::pin(futures::stream::empty()))
         }
@@ -659,12 +637,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_reader_passes_resume_points_to_inner_subscription() {
+    async fn checkpoint_reader_seeds_inner_with_min_cursor() {
         let partition = LogicalPartition::new(2, std::num::NonZeroU16::new(4).unwrap()).unwrap();
         let store = PreloadedStore::default();
         *store.rows.lock().await = vec![(Some(partition), TestCursor(10))];
         let observed = std::sync::Arc::new(TokioMutex::new(None));
-        let reader = RecordingSubReader {
+        let reader = SeedingSubReader {
             observed: std::sync::Arc::clone(&observed),
         };
         let cr = CheckpointReader::new(reader, store);
@@ -674,15 +652,12 @@ mod tests {
         );
 
         let _stream = cr
-            .read(CheckpointSubscription::new(RecordingSub::default(), scope))
+            .read(CheckpointSubscription::new(SeedingSub::default(), scope))
             .await
             .unwrap();
 
         let observed = observed.lock().await.clone().unwrap();
         assert_eq!(observed.start, StartFrom::After(TestCursor(10)));
-        assert_eq!(observed.resume_points.len(), 1);
-        assert_eq!(observed.resume_points[0].partition(), Some(partition));
-        assert_eq!(*observed.resume_points[0].cursor(), TestCursor(10));
     }
 
     #[derive(Debug, Clone)]
@@ -698,9 +673,9 @@ mod tests {
         }
     }
 
-    impl CheckpointResumableSubscription<TestCursor> for PartitionedTestSub {
-        fn with_checkpoint_resume(mut self, resume: CheckpointResume<TestCursor>) -> Self {
-            self.start = resume.start().clone();
+    impl StartableSubscription<TestCursor> for PartitionedTestSub {
+        fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
+            self.start = start;
             self
         }
     }
