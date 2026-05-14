@@ -10,7 +10,9 @@ const FNV_PRIME: u64 = 0x100000001b3;
 /// `CheckpointReader` for in-process lane scheduling.
 ///
 /// `id < count.get()` is enforced at construction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct LogicalPartition {
     id: u16,
     count: NonZeroU16,
@@ -146,6 +148,18 @@ mod tests {
         let max = *buckets.iter().max().unwrap();
         assert!(min > 800, "bucket distribution too uneven: {buckets:?}");
         assert!(max < 1300, "bucket distribution too uneven: {buckets:?}");
+    }
+
+    #[test]
+    fn logical_partition_serializes_as_id_and_count() {
+        let partition = LogicalPartition::new(3, NonZeroU16::new(8).unwrap()).unwrap();
+
+        let value = serde_json::to_value(partition).unwrap();
+
+        assert_eq!(value["id"], 3);
+        assert_eq!(value["count"], 8);
+        let decoded: LogicalPartition = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, partition);
     }
 
     #[test]

@@ -89,7 +89,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct PartitionedCursor<C> {
     inner: C,
     partition: LogicalPartition,
@@ -498,7 +498,18 @@ mod tests {
     use crate::payload::Payload;
     use std::time::Duration;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Eq,
+        PartialEq,
+        Ord,
+        PartialOrd,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
     struct TestCursor(i64);
 
     impl crate::partition::CursorPartition for TestCursor {
@@ -509,6 +520,17 @@ mod tests {
 
     impl StartableSubscription<TestCursor> for () {
         fn with_start(self, _: StartFrom<TestCursor>) -> Self {}
+    }
+
+    #[test]
+    fn partitioned_cursor_roundtrip_preserves_partition_and_inner() {
+        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(42), partition);
+
+        let value = serde_json::to_value(&cursor).unwrap();
+        let decoded: PartitionedCursor<TestCursor> = serde_json::from_value(value).unwrap();
+
+        assert_eq!(decoded, cursor);
     }
 
     #[test]
