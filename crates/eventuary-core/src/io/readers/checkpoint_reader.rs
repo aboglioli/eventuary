@@ -27,7 +27,7 @@ use crate::io::checkpoint::{
     CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
 };
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
-use crate::start_from::StartableSubscription;
+use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
 pub struct CheckpointReaderConfig {
@@ -196,10 +196,12 @@ where
             )));
         }
 
-        let inner_subscription = subscription
-            .inner
-            .clone()
-            .with_resume_points(stored.clone());
+        let inner_subscription = subscription.inner.clone().with_starts(
+            stored
+                .iter()
+                .map(|(_, c)| StartFrom::After(c.clone()))
+                .collect(),
+        );
 
         let (inner_stream, known) = match self.inner.read(inner_subscription).await {
             Ok(stream) => {
@@ -612,20 +614,19 @@ mod tests {
     }
 
     #[test]
-    fn partitioned_subscription_stores_resume_points_from_with_resume_points() {
+    fn partitioned_subscription_stores_starts_from_with_starts() {
         use crate::io::readers::{PartitionedSubscription, partitioned_reader::PartitionedCursor};
         use crate::partition::LogicalPartition;
         use std::num::NonZeroU16;
 
         let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
-        let rows = vec![(
-            CursorId::Named(std::sync::Arc::from("partition:4:1")),
-            PartitionedCursor::new(TestCursor(10), partition),
-        )];
-        let sub =
-            PartitionedSubscription::<TestSub, TestCursor>::new(TestSub).with_resume_points(rows);
+        let starts = vec![StartFrom::After(PartitionedCursor::new(
+            TestCursor(10),
+            partition,
+        ))];
+        let sub = PartitionedSubscription::<TestSub, TestCursor>::new(TestSub).with_starts(starts);
 
-        assert_eq!(sub.resume_points.len(), 1);
+        assert_eq!(sub.starts.len(), 1);
     }
 
     #[tokio::test]

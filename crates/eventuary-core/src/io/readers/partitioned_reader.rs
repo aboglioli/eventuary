@@ -70,7 +70,7 @@ pub enum LaneScheduling {
 pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
     pub inner: S,
     pub start: StartFrom<PartitionedCursor<C>>,
-    pub resume_points: Vec<(CursorId, PartitionedCursor<C>)>,
+    pub starts: Vec<StartFrom<PartitionedCursor<C>>>,
 }
 
 impl<S, C> PartitionedSubscription<S, C> {
@@ -78,7 +78,7 @@ impl<S, C> PartitionedSubscription<S, C> {
         Self {
             inner,
             start: StartFrom::Earliest,
-            resume_points: Vec::new(),
+            starts: Vec::new(),
         }
     }
 }
@@ -93,8 +93,8 @@ where
         self
     }
 
-    fn with_resume_points(mut self, rows: Vec<(CursorId, PartitionedCursor<C>)>) -> Self {
-        self.resume_points = rows;
+    fn with_starts(mut self, starts: Vec<StartFrom<PartitionedCursor<C>>>) -> Self {
+        self.starts = starts;
         self
     }
 }
@@ -217,12 +217,18 @@ where
     type Stream = SpawnedStream<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let effective_start = if !subscription.resume_points.is_empty() {
+        let effective_start = if !subscription.starts.is_empty() {
             let compatible_min = subscription
-                .resume_points
+                .starts
                 .iter()
-                .filter(|(_, cursor)| cursor.partition().count_nz() == self.config.partition_count)
-                .map(|(_, c)| c.clone())
+                .filter_map(|s| match s {
+                    StartFrom::After(c)
+                        if c.partition().count_nz() == self.config.partition_count =>
+                    {
+                        Some(c.clone())
+                    }
+                    _ => None,
+                })
                 .min();
             match compatible_min {
                 Some(c) => StartFrom::After(c),
