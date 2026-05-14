@@ -5,7 +5,7 @@ mod batched_stream;
 pub mod checkpoint;
 pub mod consumers;
 mod cursor;
-pub mod filters;
+pub mod filter;
 mod handler;
 mod message;
 mod reader;
@@ -23,7 +23,7 @@ pub use consumers::{
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
 };
 pub use cursor::{Cursor, CursorId};
-pub use filters::{
+pub use filter::{
     AllFilter, AndFilter, ArcFilter, BoxFilter, EventFilter, Filter, FilterExt, NotFilter, OrFilter,
 };
 pub use handler::{ArcHandler, BoxHandler, DynHandler, FilteredHandler, Handler, HandlerExt};
