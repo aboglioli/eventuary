@@ -12,10 +12,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{Message, Reader};
+use eventuary_core::io::{Cursor, Message, Reader};
 use eventuary_core::{
-    ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result, SerializedEvent,
-    StartFrom, StartableSubscription,
+    ConsumerGroupId, Error, Event, Result, SerializedEvent, StartFrom, StartableSubscription,
 };
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
@@ -43,11 +42,7 @@ impl Ord for KafkaCursor {
     }
 }
 
-impl CursorPartition for KafkaCursor {
-    fn partition(&self) -> Option<LogicalPartition> {
-        None
-    }
-}
+impl Cursor for KafkaCursor {}
 
 #[derive(Debug, Clone)]
 pub struct KafkaSubscription {
@@ -285,5 +280,21 @@ impl Reader for KafkaReader {
             handle: Some(handle),
             ack_buffer,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eventuary_core::io::{Cursor, CursorId};
+
+    #[test]
+    fn kafka_cursor_id_is_global() {
+        let cursor = KafkaCursor {
+            topic: "events".to_owned(),
+            partition: 0,
+            offset: 42,
+        };
+        assert_eq!(cursor.id(), CursorId::Global);
     }
 }

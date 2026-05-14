@@ -34,8 +34,8 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::io::{Acker, Message, Reader};
-use crate::partition::{CursorPartition, LogicalPartition, partition_for};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+use crate::partition::{LogicalPartition, partition_for};
 use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
@@ -113,9 +113,9 @@ impl<C> PartitionedCursor<C> {
     }
 }
 
-impl<C> CursorPartition for PartitionedCursor<C> {
-    fn partition(&self) -> Option<LogicalPartition> {
-        Some(self.partition)
+impl<C> Cursor for PartitionedCursor<C> {
+    fn id(&self) -> CursorId {
+        self.partition.to_cursor_id()
     }
 }
 
@@ -512,14 +512,20 @@ mod tests {
     )]
     struct TestCursor(i64);
 
-    impl crate::partition::CursorPartition for TestCursor {
-        fn partition(&self) -> Option<LogicalPartition> {
-            None
-        }
-    }
+    impl Cursor for TestCursor {}
 
     impl StartableSubscription<TestCursor> for () {
         fn with_start(self, _: StartFrom<TestCursor>) -> Self {}
+    }
+
+    #[test]
+    fn partitioned_cursor_id_is_named_with_partition() {
+        let partition = LogicalPartition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(7), partition);
+        assert_eq!(
+            cursor.id(),
+            CursorId::Named(std::sync::Arc::from("partition:100:17"))
+        );
     }
 
     #[test]
