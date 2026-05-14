@@ -190,14 +190,27 @@ where
         let scope = subscription.scope.clone();
         let store = self.store.clone();
         let stored = store.load_scope(&scope).await?;
+
+        if stored.is_empty() && matches!(subscription.resume_policy, CheckpointResumePolicy::Error)
+        {
+            return Err(Error::InvalidCursor(format!(
+                "checkpoint reader: no checkpoint found for consumer group `{}` and stream `{}`",
+                scope.consumer_group_id.as_str(),
+                scope.stream_id.as_str()
+            )));
+        }
+
         let resume_points = stored
             .iter()
             .cloned()
             .map(|(partition, cursor)| CheckpointResumePoint::new(partition, cursor))
             .collect::<Vec<_>>();
-        let known: HashMap<Option<LogicalPartition>, <R::Cursor as CommitCursor>::Commit> =
-            stored.into_iter().collect();
-        let min_cursor: Option<<R::Cursor as CommitCursor>::Commit> = known.values().min().cloned();
+        let known_from_checkpoints: HashMap<
+            Option<LogicalPartition>,
+            <R::Cursor as CommitCursor>::Commit,
+        > = stored.into_iter().collect();
+        let min_cursor: Option<<R::Cursor as CommitCursor>::Commit> =
+            known_from_checkpoints.values().min().cloned();
 
         let inner_subscription = match min_cursor {
             Some(cursor) => {
@@ -209,10 +222,26 @@ where
                         resume_points,
                     ))
             }
-            None => subscription.inner,
+            None => subscription.inner.clone(),
         };
 
-        let inner_stream = self.inner.read(inner_subscription).await?;
+        let (inner_stream, known) = match self.inner.read(inner_subscription).await {
+            Ok(stream) => (stream, known_from_checkpoints),
+            Err(Error::InvalidCursor(reason))
+                if matches!(
+                    subscription.resume_policy,
+                    CheckpointResumePolicy::UseInitialStart
+                ) =>
+            {
+                tracing::warn!(
+                    reason = %reason,
+                    "checkpoint reader falling back to initial start after invalid checkpoint cursor"
+                );
+                let stream = self.inner.read(subscription.inner.clone()).await?;
+                (stream, HashMap::new())
+            }
+            Err(e) => return Err(e),
+        };
         let state: PendingMap<<R::Cursor as CommitCursor>::Commit> =
             Arc::new(Mutex::new(HashMap::new()));
         let max_pending = self.config.max_pending_per_key;
@@ -527,6 +556,103 @@ mod tests {
             "expected stream error after per-key max_pending exceeded, held {} messages",
             held.len()
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_errors_when_required_checkpoint_is_missing() {
+        let events: Vec<Event> = vec![ev("k0")];
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let store = MemStore::default();
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let subscription = CheckpointSubscription::new(TestSub, scope)
+            .with_resume_policy(CheckpointResumePolicy::Error);
+
+        let err = match cr.read(subscription).await {
+            Ok(_) => panic!("expected missing checkpoint error"),
+            Err(e) => e,
+        };
+
+        assert!(matches!(err, Error::InvalidCursor(_)));
+        assert!(err.to_string().contains("no checkpoint found"));
+    }
+
+    struct InvalidCursorReader {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Reader for InvalidCursorReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: TestSub) -> Result<Self::Stream> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return Err(Error::InvalidCursor(
+                    "checkpoint partition count changed".to_owned(),
+                ));
+            }
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_retries_with_initial_start_when_checkpoint_cursor_is_invalid() {
+        let store = PreloadedStore::default();
+        *store.rows.lock().await = vec![(None, TestCursor(10))];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = InvalidCursorReader {
+            calls: std::sync::Arc::clone(&calls),
+        };
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let _stream = cr
+            .read(CheckpointSubscription::new(TestSub, scope))
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_returns_invalid_cursor_when_policy_is_error() {
+        let store = PreloadedStore::default();
+        *store.rows.lock().await = vec![(None, TestCursor(10))];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = InvalidCursorReader {
+            calls: std::sync::Arc::clone(&calls),
+        };
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let err = match cr
+            .read(
+                CheckpointSubscription::new(TestSub, scope)
+                    .with_resume_policy(CheckpointResumePolicy::Error),
+            )
+            .await
+        {
+            Ok(_) => panic!("expected invalid cursor error"),
+            Err(e) => e,
+        };
+
+        assert!(matches!(err, Error::InvalidCursor(_)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
