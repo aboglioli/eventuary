@@ -66,11 +66,14 @@ pub enum LaneScheduling {
     QueueDepthWeighted { max_burst_per_lane: NonZeroUsize },
 }
 
+/// `start` is the user-supplied initial position. When `starts` is
+/// non-empty (set by `CheckpointReader` via `with_starts`), it
+/// overrides `start`.
 #[derive(Debug, Clone)]
 pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
     pub inner: S,
     pub start: StartFrom<PartitionedCursor<C>>,
-    pub starts: Vec<StartFrom<PartitionedCursor<C>>>,
+    pub(crate) starts: Vec<StartFrom<PartitionedCursor<C>>>,
 }
 
 impl<S, C> PartitionedSubscription<S, C> {
@@ -94,6 +97,8 @@ where
     }
 
     fn with_starts(mut self, starts: Vec<StartFrom<PartitionedCursor<C>>>) -> Self {
+        // Defer min-picking to PartitionedReader::read where partition_count
+        // is available to filter incompatible rows first.
         self.starts = starts;
         self
     }
@@ -217,6 +222,13 @@ where
     type Stream = SpawnedStream<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        let mismatch_err = || {
+            Error::InvalidCursor(format!(
+                "partitioned reader checkpoint partition count does not match configured partition count {}",
+                self.config.partition_count.get()
+            ))
+        };
+
         let effective_start = if !subscription.starts.is_empty() {
             let compatible_min = subscription
                 .starts
@@ -225,19 +237,15 @@ where
                     StartFrom::After(c)
                         if c.partition().count_nz() == self.config.partition_count =>
                     {
-                        Some(c.clone())
+                        Some(c)
                     }
                     _ => None,
                 })
-                .min();
+                .min()
+                .cloned();
             match compatible_min {
                 Some(c) => StartFrom::After(c),
-                None => {
-                    return Err(Error::InvalidCursor(format!(
-                        "partitioned reader checkpoint partition count does not match configured partition count {}",
-                        self.config.partition_count.get()
-                    )));
-                }
+                None => return Err(mismatch_err()),
             }
         } else {
             subscription.start.clone()
@@ -250,10 +258,7 @@ where
             StartFrom::After(partitioned_cursor) => {
                 let partition = partitioned_cursor.partition();
                 if partition.count_nz() != self.config.partition_count {
-                    return Err(Error::InvalidCursor(format!(
-                        "partitioned reader checkpoint partition count does not match configured partition count {}",
-                        self.config.partition_count.get()
-                    )));
+                    return Err(mismatch_err());
                 }
                 let inner_cursor = partitioned_cursor.into_inner();
                 subscription
@@ -553,6 +558,18 @@ mod tests {
             .with_start(StartFrom::After(cursor.clone()));
 
         assert_eq!(subscription.start, StartFrom::After(cursor));
+    }
+
+    #[test]
+    fn partitioned_subscription_stores_starts_from_with_starts() {
+        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let starts = vec![StartFrom::After(PartitionedCursor::new(
+            TestCursor(10),
+            partition,
+        ))];
+        let sub = PartitionedSubscription::<(), TestCursor>::new(()).with_starts(starts);
+
+        assert_eq!(sub.starts.len(), 1);
     }
 
     #[tokio::test]

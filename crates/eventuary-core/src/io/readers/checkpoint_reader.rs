@@ -1,8 +1,11 @@
 //! CheckpointReader: composes an inner reader and a checkpoint store.
 //!
-//! On `read`, loads the persisted cursor per `CursorId` for the requested
-//! scope and configures the inner reader to start from
-//! `StartFrom::After(min(stored_cursors))`. Records each delivered cursor
+//! On `read`, loads all persisted cursors for the requested scope
+//! (one per `CursorId`) and hands them to the inner subscription via
+//! `StartableSubscription::with_starts` as a `Vec<StartFrom::After(c)>`.
+//! The inner reader decides which row to resume from — the default
+//! impl picks the smallest `After(c)`; wrappers like `PartitionedReader`
+//! filter by compatibility first. Records each delivered cursor
 //! in contiguous delivered order per `CursorId`. On downstream `ack`,
 //! calls the inner ack first, then commits the cursor to the store
 //! **synchronously** — store commit errors propagate to the caller and
@@ -613,24 +616,11 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn partitioned_subscription_stores_starts_from_with_starts() {
-        use crate::io::readers::{PartitionedSubscription, partitioned_reader::PartitionedCursor};
-        use crate::partition::LogicalPartition;
-        use std::num::NonZeroU16;
-
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
-        let starts = vec![StartFrom::After(PartitionedCursor::new(
-            TestCursor(10),
-            partition,
-        ))];
-        let sub = PartitionedSubscription::<TestSub, TestCursor>::new(TestSub).with_starts(starts);
-
-        assert_eq!(sub.starts.len(), 1);
-    }
-
     #[tokio::test]
     async fn checkpoint_reader_over_mixed_partitions_resumes_from_current_only() {
+        // Stored cursor < VecReader's emitted TestCursor(1) so the
+        // CheckpointReader skip-already-stored guard does not swallow
+        // the resumed event if partition assignment happens to match.
         use crate::io::readers::{
             PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
             partitioned_reader::PartitionedCursor,
@@ -688,6 +678,8 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_reader_over_old_partitions_only_falls_back() {
+        // Stored row is incompatible (partition_count=8 vs configured=4);
+        // test exercises the fallback path.
         use crate::io::readers::{
             PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
             partitioned_reader::PartitionedCursor,
