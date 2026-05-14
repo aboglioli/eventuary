@@ -6,8 +6,8 @@ use tokio::time::timeout;
 use eventuary_core::io::CheckpointStore;
 use eventuary_core::io::checkpoint::{CheckpointScope, StreamId};
 use eventuary_core::io::readers::{
-    CheckpointReader, CheckpointSubscription, PartitionedReader, PartitionedReaderConfig,
-    PartitionedSubscription,
+    CheckpointReader, CheckpointSubscription, PartitionedCursor, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription,
 };
 use eventuary_core::io::{EventFilter, Reader, Writer};
 use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
@@ -123,7 +123,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
             ..PartitionedReaderConfig::default()
         },
     );
-    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store = SqliteCheckpointStore::<PartitionedCursor<eventuary_sqlite::SqliteCursor>>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -144,7 +144,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     }
     drop(stream);
 
-    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store2 = SqliteCheckpointStore::<PartitionedCursor<eventuary_sqlite::SqliteCursor>>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
