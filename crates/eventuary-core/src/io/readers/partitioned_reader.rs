@@ -233,13 +233,7 @@ where
             StartFrom::Latest => subscription.inner.with_start(StartFrom::Latest),
             StartFrom::Timestamp(t) => subscription.inner.with_start(StartFrom::Timestamp(t)),
             StartFrom::After(partitioned_cursor) => {
-                let partition =
-                    CursorPartition::partition(&partitioned_cursor).ok_or_else(|| {
-                        Error::InvalidCursor(
-                            "partitioned reader received unpartitioned checkpoint cursor"
-                                .to_owned(),
-                        )
-                    })?;
+                let partition = partitioned_cursor.partition();
                 if partition.count_nz() != self.config.partition_count {
                     return Err(Error::InvalidCursor(format!(
                         "partitioned reader checkpoint partition count does not match configured partition count {}",
