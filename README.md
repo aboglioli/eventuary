@@ -213,14 +213,18 @@ let mut stream = checkpointed
 
 `CheckpointReader` commits checkpoints in contiguous delivered order per
 logical partition. `nack` does not advance the checkpoint. SQL checkpoint
-stores persist the source cursor (`PgCursor` / `SqliteCursor`) and use the
-message cursor's partition metadata as part of the checkpoint key.
+stores persist the full inner cursor as JSON — `PgCursor` / `SqliteCursor`
+for a raw source reader, or `PartitionedCursor<...>` when composed under a
+`PartitionedReader` — and `CursorPartition` projects the optional logical
+partition into the checkpoint key.
 
-`CheckpointReader` passes full checkpoint resume metadata to the inner reader
-subscription. Reader wrappers validate the parts they understand. For example,
-`PartitionedReader` rejects checkpoints written only for a different logical
-partition count before reading its inner source. `CheckpointResumePolicy`
-controls whether `CheckpointReader` returns that error or retries with the
+On resume `CheckpointReader` seeds the inner subscription via
+`StartableSubscription::with_start(StartFrom::After(min(stored_cursors)))`.
+Each wrapper validates the parts of the resume cursor it understands. For
+example, `PartitionedReader` inspects the resume `PartitionedCursor`'s embedded
+`LogicalPartition` and returns `Error::InvalidCursor` if the stored partition
+count differs from its configured count. `CheckpointResumePolicy` controls
+whether `CheckpointReader` returns that error or retries with the
 subscription's configured initial `StartFrom`.
 
 ## Configurable SQL Relations
