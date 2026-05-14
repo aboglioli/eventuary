@@ -8,6 +8,6 @@ pub use checkpoint_reader::{
 };
 pub use filtered_reader::{FilteredReader, FilteredStream};
 pub use partitioned_reader::{
-    LaneScheduling, PartitionAcker, PartitionedReader, PartitionedReaderConfig, PartitionedStream,
+    LaneScheduling, PartitionAcker, PartitionedReader, PartitionedReaderConfig,
     PartitionedSubscription,
 };

@@ -25,7 +25,6 @@ use std::num::{NonZeroU16, NonZeroUsize};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 
 use futures::{Stream, StreamExt};
 use tokio::sync::Mutex;
@@ -34,7 +33,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::io::{Acker, Message, Reader};
+use crate::io::{Acker, Message, Reader, SpawnedStream};
 use crate::partition::{CommitCursor, CursorPartition, LogicalPartition, partition_for};
 use crate::start_from::StartableSubscription;
 
@@ -191,27 +190,6 @@ where
     }
 }
 
-pub struct PartitionedStream<C: Clone + Send + Sync + 'static> {
-    rx: mpsc::Receiver<Result<Message<PartitionAcker<C>, PartitionedCursor<C>>>>,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl<C: Clone + Send + Sync + 'static> Drop for PartitionedStream<C> {
-    fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
-    }
-}
-
-impl<C: Clone + Send + Sync + 'static> Stream for PartitionedStream<C> {
-    type Item = Result<Message<PartitionAcker<C>, PartitionedCursor<C>>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
 pub struct PartitionedReader<R> {
     inner: R,
     config: PartitionedReaderConfig,
@@ -234,7 +212,7 @@ where
     type Subscription = PartitionedSubscription<R::Subscription>;
     type Acker = PartitionAcker<R::Cursor>;
     type Cursor = PartitionedCursor<R::Cursor>;
-    type Stream = PartitionedStream<R::Cursor>;
+    type Stream = SpawnedStream<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner_stream = self.inner.read(subscription.inner).await?;
@@ -467,10 +445,7 @@ where
             let _ = emit_handle.await;
         });
 
-        Ok(PartitionedStream {
-            rx,
-            handle: Some(handle),
-        })
+        Ok(SpawnedStream::new(rx, handle))
     }
 }
 
