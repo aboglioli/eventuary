@@ -442,9 +442,11 @@ mod tests {
         }
     }
 
+    type PreloadedRows = Vec<(Option<LogicalPartition>, TestCursor)>;
+
     #[derive(Clone, Default)]
     struct PreloadedStore {
-        rows: std::sync::Arc<TokioMutex<Vec<(Option<LogicalPartition>, TestCursor)>>>,
+        rows: std::sync::Arc<TokioMutex<PreloadedRows>>,
     }
 
     impl CheckpointStore<TestCursor> for PreloadedStore {

@@ -311,6 +311,14 @@ the default schema columns.
 | `eventuary-sqs` | `NoCursor` | — | queue visibility/delete is the native progress model |
 | `eventuary-kafka` | `NoCursor` | — | consumer group commits are the native progress model |
 
+Checkpoint compatibility is validated by the reader or wrapper that interprets
+the cursor, not by a global topology fingerprint. `CheckpointReader` passes
+checkpoint resume metadata to the inner subscription. `PartitionedReader`
+validates stored logical partition metadata against its configured partition
+count and returns `Error::InvalidCursor` when no compatible current checkpoint
+rows exist. `CheckpointReader` then applies `CheckpointResumePolicy` to fail or
+retry from the original subscription start.
+
 ### Error Model
 
 A single `Error` enum in `eventuary::error`:
