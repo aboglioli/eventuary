@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::io::NoCursor;
+use crate::io::{CursorId, NoCursor};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum StartFrom<C = NoCursor> {
@@ -16,6 +16,17 @@ pub enum StartFrom<C = NoCursor> {
 /// inner subscription when it has a stored checkpoint.
 pub trait StartableSubscription<C>: Clone + Send + 'static {
     fn with_start(self, start: StartFrom<C>) -> Self;
+
+    fn with_resume_points(self, rows: Vec<(CursorId, C)>) -> Self
+    where
+        C: Ord,
+    {
+        let min = rows.into_iter().map(|(_, c)| c).min();
+        match min {
+            Some(c) => self.with_start(StartFrom::After(c)),
+            None => self,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -46,5 +57,40 @@ mod tests {
     fn after_variant_carries_cursor() {
         let start = StartFrom::After(TestCursor(9));
         assert_eq!(start, StartFrom::After(TestCursor(9)));
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct StartableSub {
+        start: StartFrom<i64>,
+    }
+
+    impl StartableSubscription<i64> for StartableSub {
+        fn with_start(mut self, start: StartFrom<i64>) -> Self {
+            self.start = start;
+            self
+        }
+    }
+
+    #[test]
+    fn with_resume_points_picks_min_cursor() {
+        let sub = StartableSub::default();
+        let rows = vec![
+            (CursorId::Global, 100_i64),
+            (CursorId::Named(std::sync::Arc::from("a")), 50_i64),
+            (CursorId::Named(std::sync::Arc::from("b")), 200_i64),
+        ];
+
+        let resumed = sub.with_resume_points(rows);
+
+        assert_eq!(resumed.start, StartFrom::After(50_i64));
+    }
+
+    #[test]
+    fn with_resume_points_empty_returns_unchanged() {
+        let sub = StartableSub::default();
+
+        let resumed = sub.with_resume_points(vec![]);
+
+        assert_eq!(resumed.start, StartFrom::Latest);
     }
 }

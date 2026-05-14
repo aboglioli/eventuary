@@ -70,6 +70,7 @@ pub enum LaneScheduling {
 pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
     pub inner: S,
     pub start: StartFrom<PartitionedCursor<C>>,
+    pub resume_points: Vec<(CursorId, PartitionedCursor<C>)>,
 }
 
 impl<S, C> PartitionedSubscription<S, C> {
@@ -77,6 +78,7 @@ impl<S, C> PartitionedSubscription<S, C> {
         Self {
             inner,
             start: StartFrom::Earliest,
+            resume_points: Vec::new(),
         }
     }
 }
@@ -84,10 +86,15 @@ impl<S, C> PartitionedSubscription<S, C> {
 impl<S, C> StartableSubscription<PartitionedCursor<C>> for PartitionedSubscription<S, C>
 where
     S: Clone + Send + 'static,
-    C: Clone + Send + 'static,
+    C: Clone + Ord + Send + 'static,
 {
     fn with_start(mut self, start: StartFrom<PartitionedCursor<C>>) -> Self {
         self.start = start;
+        self
+    }
+
+    fn with_resume_points(mut self, rows: Vec<(CursorId, PartitionedCursor<C>)>) -> Self {
+        self.resume_points = rows;
         self
     }
 }
@@ -210,7 +217,27 @@ where
     type Stream = SpawnedStream<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let inner_subscription = match subscription.start {
+        let effective_start = if !subscription.resume_points.is_empty() {
+            let compatible_min = subscription
+                .resume_points
+                .iter()
+                .filter(|(_, cursor)| cursor.partition().count_nz() == self.config.partition_count)
+                .map(|(_, c)| c.clone())
+                .min();
+            match compatible_min {
+                Some(c) => StartFrom::After(c),
+                None => {
+                    return Err(Error::InvalidCursor(format!(
+                        "partitioned reader checkpoint partition count does not match configured partition count {}",
+                        self.config.partition_count.get()
+                    )));
+                }
+            }
+        } else {
+            subscription.start.clone()
+        };
+
+        let inner_subscription = match effective_start {
             StartFrom::Earliest => subscription.inner.with_start(StartFrom::Earliest),
             StartFrom::Latest => subscription.inner.with_start(StartFrom::Latest),
             StartFrom::Timestamp(t) => subscription.inner.with_start(StartFrom::Timestamp(t)),
