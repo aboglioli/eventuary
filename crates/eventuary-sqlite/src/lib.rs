@@ -20,7 +20,7 @@ pub use database::{
     render_schema_sql, schema_sql,
 };
 pub use reader::{
-    SqliteCursor, SqliteCursorAcker, SqliteReader, SqliteReaderConfig, SqliteStream,
+    SqliteCursor, SqliteCursorAcker, SqliteReader, SqliteReaderConfig,
     SqliteSubscription,
 };
 pub use relation::SqliteRelationName;

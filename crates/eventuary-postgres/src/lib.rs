@@ -19,6 +19,6 @@ pub use database::{
     Migration, PgConnectOptions, PgDatabase, PgDatabaseConfig, migrations, render_migration_sql,
     render_schema_sql, schema_sql,
 };
-pub use reader::{PgCursor, PgCursorAcker, PgReader, PgReaderConfig, PgStream, PgSubscription};
+pub use reader::{PgCursor, PgCursorAcker, PgReader, PgReaderConfig, PgSubscription};
 pub use relation::PgRelationName;
 pub use writer::{PgEventWriter, PgWriterConfig};
