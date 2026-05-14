@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS {offsets} (
     stream_id   TEXT    NOT NULL DEFAULT 'default',
     partition         INTEGER NOT NULL DEFAULT 0,
     partition_count   INTEGER NOT NULL DEFAULT 1,
-    sequence          BIGINT  NOT NULL,
+    cursor            JSONB   NOT NULL,
     PRIMARY KEY (consumer_group_id, stream_id, partition, partition_count)
 );
 
