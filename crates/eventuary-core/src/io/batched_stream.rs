@@ -8,19 +8,23 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
-use crate::io::acker::{
-    AckBuffer, AckBufferConfig, AckCmd, AckShutdown, BatchFlusher, BatchedAcker,
-};
+use crate::io::acker::{AckBuffer, AckBufferConfig, AckCmd, BatchFlusher, BatchedAcker};
 use crate::io::{Message, NoCursor};
 
-pub struct BatchedStream<T: Clone + Send + Sync + 'static, C = NoCursor> {
+pub struct BatchedStream<
+    T: Clone + Send + Sync + 'static,
+    F: BatchFlusher<Token = T> + 'static,
+    C = NoCursor,
+> {
     rx: mpsc::Receiver<Result<Message<BatchedAcker<T>, C>>>,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
-    ack: Arc<dyn AckShutdown>,
+    ack: Arc<AckBuffer<F>>,
 }
 
-impl<T: Clone + Send + Sync + 'static, C> Stream for BatchedStream<T, C> {
+impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C> Stream
+    for BatchedStream<T, F, C>
+{
     type Item = Result<Message<BatchedAcker<T>, C>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -28,7 +32,9 @@ impl<T: Clone + Send + Sync + 'static, C> Stream for BatchedStream<T, C> {
     }
 }
 
-impl<T: Clone + Send + Sync + 'static, C> Drop for BatchedStream<T, C> {
+impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C> Drop
+    for BatchedStream<T, F, C>
+{
     fn drop(&mut self) {
         self.cancel.cancel();
         if let Some(handle) = self.handle.take() {
@@ -41,8 +47,12 @@ impl<T: Clone + Send + Sync + 'static, C> Drop for BatchedStream<T, C> {
     }
 }
 
-pub fn batched_source<T: Clone + Send + Sync + 'static, C: Send + 'static>(
-    flusher: impl BatchFlusher<Token = T> + 'static,
+pub fn batched_source<
+    T: Clone + Send + Sync + 'static,
+    C: Send + 'static,
+    F: BatchFlusher<Token = T> + 'static,
+>(
+    flusher: F,
     ack_config: AckBufferConfig,
     channel_capacity: usize,
     source_loop: impl FnOnce(
@@ -52,9 +62,8 @@ pub fn batched_source<T: Clone + Send + Sync + 'static, C: Send + 'static>(
     ) -> BoxFuture<'static, ()>
     + Send
     + 'static,
-) -> BatchedStream<T, C> {
-    let ack_buffer = Arc::new(AckBuffer::spawn(flusher, ack_config));
-    let ack: Arc<dyn AckShutdown> = Arc::clone(&ack_buffer) as Arc<dyn AckShutdown>;
+) -> BatchedStream<T, F, C> {
+    let ack_buffer = AckBuffer::spawn(flusher, ack_config);
     let tx_ack = ack_buffer.sender();
     let (tx, rx) = mpsc::channel(channel_capacity);
     let cancel = CancellationToken::new();
@@ -69,7 +78,7 @@ pub fn batched_source<T: Clone + Send + Sync + 'static, C: Send + 'static>(
         rx,
         cancel,
         handle: Some(handle),
-        ack,
+        ack: ack_buffer,
     }
 }
 

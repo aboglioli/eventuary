@@ -39,7 +39,7 @@ impl SqsReader {
         }
     }
 
-    pub async fn read(&self) -> Result<BatchedStream<String>> {
+    pub async fn read(&self) -> Result<BatchedStream<String, SqsFlusher>> {
         eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
 }
@@ -48,7 +48,7 @@ impl Reader for SqsReader {
     type Subscription = SqsSubscription;
     type Acker = BatchedAcker<String>;
     type Cursor = eventuary_core::io::NoCursor;
-    type Stream = BatchedStream<String>;
+    type Stream = BatchedStream<String, SqsFlusher>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let client = self.client.clone();

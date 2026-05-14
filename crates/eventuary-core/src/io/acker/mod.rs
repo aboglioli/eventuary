@@ -12,17 +12,6 @@ use crate::error::Result;
 
 pub use ::either::Either;
 pub use batched::{AckBuffer, AckBufferConfig, AckCmd, BatchFlusher, BatchedAcker};
-
-pub(crate) trait AckShutdown: Send + Sync {
-    fn shutdown(&self) -> BoxFuture<'static, Result<()>>;
-}
-
-impl<F: BatchFlusher + 'static> AckShutdown for std::sync::Arc<AckBuffer<F>> {
-    fn shutdown(&self) -> BoxFuture<'static, Result<()>> {
-        let buffer = std::sync::Arc::clone(self);
-        Box::pin(async move { AckBuffer::shutdown(&buffer).await })
-    }
-}
 pub use noop::NoopAcker;
 pub use once::OnceAcker;
 

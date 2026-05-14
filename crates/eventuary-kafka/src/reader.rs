@@ -9,12 +9,14 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
 use eventuary_core::io::{BatchedStream, Message, Reader, batched_source};
+
+use crate::flusher::KafkaFlusher;
 use eventuary_core::{
     CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
     SerializedEvent, StartFrom,
 };
 
-use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
+use crate::flusher::KafkaOffsetToken;
 use crate::reader_config::KafkaReaderConfig;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -109,7 +111,7 @@ impl KafkaReader {
         }
     }
 
-    pub async fn read(&self) -> Result<BatchedStream<KafkaOffsetToken, KafkaCursor>> {
+    pub async fn read(&self) -> Result<BatchedStream<KafkaOffsetToken, KafkaFlusher, KafkaCursor>> {
         eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
 }
@@ -151,7 +153,7 @@ impl Reader for KafkaReader {
     type Subscription = KafkaSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
     type Cursor = KafkaCursor;
-    type Stream = BatchedStream<KafkaOffsetToken, KafkaCursor>;
+    type Stream = BatchedStream<KafkaOffsetToken, KafkaFlusher, KafkaCursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         if subscription.consumer_group_id != self.config.consumer_group_id {
