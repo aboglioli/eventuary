@@ -34,12 +34,9 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::io::checkpoint::{
-    CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
-};
 use crate::io::{Acker, Message, Reader};
 use crate::partition::{CommitCursor, CursorPartition, LogicalPartition, partition_for};
-use crate::start_from::StartFrom;
+use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
 pub struct PartitionedReaderConfig {
@@ -69,30 +66,25 @@ pub enum LaneScheduling {
 #[derive(Debug, Clone)]
 pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
     pub inner: S,
-    resume_points: Vec<CheckpointResumePoint<C>>,
+    pub start: StartFrom<PartitionedCursor<C>>,
 }
 
 impl<S, C> PartitionedSubscription<S, C> {
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            resume_points: Vec::new(),
+            start: StartFrom::Earliest,
         }
-    }
-
-    pub fn resume_points(&self) -> &[CheckpointResumePoint<C>] {
-        &self.resume_points
     }
 }
 
-impl<S, C> CheckpointResumableSubscription<C> for PartitionedSubscription<S, C>
+impl<S, C> StartableSubscription<PartitionedCursor<C>> for PartitionedSubscription<S, C>
 where
     S: Clone + Send + 'static,
     C: Clone + Send + 'static,
 {
-    fn with_checkpoint_resume(mut self, resume: CheckpointResume<C>) -> Self {
-        let (_start, points) = resume.into_parts();
-        self.resume_points = points;
+    fn with_start(mut self, start: StartFrom<PartitionedCursor<C>>) -> Self {
+        self.start = start;
         self
     }
 }
@@ -241,7 +233,7 @@ where
     R::Cursor: Clone + Send + Sync + 'static,
     R::Cursor: CommitCursor,
     <R::Cursor as CommitCursor>::Commit: Clone + Ord + Send + Sync + 'static,
-    R::Subscription: CheckpointResumableSubscription<<R::Cursor as CommitCursor>::Commit>,
+    R::Subscription: StartableSubscription<<R::Cursor as CommitCursor>::Commit>,
 {
     type Subscription =
         PartitionedSubscription<R::Subscription, <R::Cursor as CommitCursor>::Commit>;
@@ -250,22 +242,16 @@ where
     type Stream = PartitionedStream<R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let compatible_resume =
-            compatible_resume_points(subscription.resume_points(), self.config.partition_count)?;
-        let inner_subscription = if compatible_resume.is_empty() {
-            subscription.inner
-        } else {
-            let min_cursor = compatible_resume
-                .iter()
-                .map(|point| point.cursor().clone())
-                .min()
-                .expect("compatible resume points are non-empty");
-            subscription
-                .inner
-                .with_checkpoint_resume(CheckpointResume::new(
-                    StartFrom::After(min_cursor),
-                    compatible_resume,
-                ))
+        let inner_subscription = match subscription.start {
+            StartFrom::Earliest => subscription.inner.with_start(StartFrom::Earliest),
+            StartFrom::Latest => subscription.inner.with_start(StartFrom::Latest),
+            StartFrom::Timestamp(t) => subscription.inner.with_start(StartFrom::Timestamp(t)),
+            StartFrom::After(cursor) => {
+                let inner_cursor = cursor.into_inner();
+                subscription
+                    .inner
+                    .with_start(StartFrom::After(inner_cursor))
+            }
         };
         let inner_stream = self.inner.read(inner_subscription).await?;
         let count_nz = self.config.partition_count;
@@ -504,51 +490,6 @@ where
     }
 }
 
-fn compatible_resume_points<C>(
-    points: &[CheckpointResumePoint<C>],
-    partition_count: NonZeroU16,
-) -> Result<Vec<CheckpointResumePoint<C>>>
-where
-    C: Clone + Ord,
-{
-    if points.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut compatible = Vec::new();
-    let mut saw_incompatible = false;
-    let mut saw_unpartitioned = false;
-
-    for point in points {
-        match point.partition() {
-            Some(partition) if partition.count_nz() == partition_count => {
-                compatible.push(point.clone());
-            }
-            Some(_) => saw_incompatible = true,
-            None => saw_unpartitioned = true,
-        }
-    }
-
-    if !compatible.is_empty() {
-        return Ok(compatible);
-    }
-
-    if saw_unpartitioned {
-        return Err(Error::InvalidCursor(
-            "partitioned reader received unpartitioned checkpoint cursor".to_owned(),
-        ));
-    }
-
-    if saw_incompatible {
-        return Err(Error::InvalidCursor(format!(
-            "partitioned reader checkpoint partition count does not match configured partition count {}",
-            partition_count.get()
-        )));
-    }
-
-    Ok(Vec::new())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,24 +516,18 @@ mod tests {
         }
     }
 
-    impl CheckpointResumableSubscription<TestCursor> for () {
-        fn with_checkpoint_resume(self, _: CheckpointResume<TestCursor>) -> Self {
-            self
-        }
+    impl StartableSubscription<TestCursor> for () {
+        fn with_start(self, _: StartFrom<TestCursor>) -> Self {}
     }
 
     #[test]
-    fn partitioned_subscription_stores_checkpoint_resume_metadata_without_rewriting_inner() {
+    fn partitioned_subscription_stores_start_after_cursor() {
         let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
-        let subscription =
-            PartitionedSubscription::new(()).with_checkpoint_resume(CheckpointResume::new(
-                crate::start_from::StartFrom::After(TestCursor(10)),
-                vec![CheckpointResumePoint::new(Some(partition), TestCursor(10))],
-            ));
+        let cursor = PartitionedCursor::new(TestCursor(10), partition);
+        let subscription = PartitionedSubscription::<(), TestCursor>::new(())
+            .with_start(StartFrom::After(cursor.clone()));
 
-        assert_eq!(subscription.resume_points().len(), 1);
-        assert_eq!(subscription.resume_points()[0].partition(), Some(partition));
-        assert_eq!(*subscription.resume_points()[0].cursor(), TestCursor(10));
+        assert_eq!(subscription.start, StartFrom::After(cursor));
     }
 
     struct VecReader {
@@ -855,88 +790,6 @@ mod tests {
             cold_pos < 16,
             "cold lane starved: cold delivered at position {cold_pos}, order={order:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn partitioned_reader_rejects_checkpoint_resume_when_all_partitions_use_old_count() {
-        let reader = VecReader {
-            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
-        };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let old_partition = LogicalPartition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
-        let subscription =
-            PartitionedSubscription::new(()).with_checkpoint_resume(CheckpointResume::new(
-                crate::start_from::StartFrom::After(TestCursor(10)),
-                vec![CheckpointResumePoint::new(
-                    Some(old_partition),
-                    TestCursor(10),
-                )],
-            ));
-
-        let err = match partitioned.read(subscription).await {
-            Ok(_) => panic!("expected invalid cursor error"),
-            Err(e) => e,
-        };
-
-        assert!(matches!(err, Error::InvalidCursor(_)));
-        assert!(err.to_string().contains("partition count"));
-    }
-
-    #[tokio::test]
-    async fn partitioned_reader_rejects_unpartitioned_checkpoint_resume() {
-        let reader = VecReader {
-            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
-        };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let subscription =
-            PartitionedSubscription::new(()).with_checkpoint_resume(CheckpointResume::new(
-                crate::start_from::StartFrom::After(TestCursor(10)),
-                vec![CheckpointResumePoint::new(None, TestCursor(10))],
-            ));
-
-        let err = match partitioned.read(subscription).await {
-            Ok(_) => panic!("expected invalid cursor error"),
-            Err(e) => e,
-        };
-
-        assert!(matches!(err, Error::InvalidCursor(_)));
-        assert!(err.to_string().contains("unpartitioned"));
-    }
-
-    #[tokio::test]
-    async fn partitioned_reader_accepts_checkpoint_resume_with_matching_partition_count() {
-        let reader = VecReader {
-            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
-        };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
-        let subscription =
-            PartitionedSubscription::new(()).with_checkpoint_resume(CheckpointResume::new(
-                crate::start_from::StartFrom::After(TestCursor(10)),
-                vec![CheckpointResumePoint::new(Some(partition), TestCursor(10))],
-            ));
-
-        let _stream = partitioned.read(subscription).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn partitioned_reader_ignores_old_partition_rows_when_current_rows_exist() {
-        let reader = VecReader {
-            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
-        };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let old_partition = LogicalPartition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
-        let current_partition = LogicalPartition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
-        let subscription =
-            PartitionedSubscription::new(()).with_checkpoint_resume(CheckpointResume::new(
-                crate::start_from::StartFrom::After(TestCursor(20)),
-                vec![
-                    CheckpointResumePoint::new(Some(old_partition), TestCursor(10)),
-                    CheckpointResumePoint::new(Some(current_partition), TestCursor(20)),
-                ],
-            ));
-
-        let _stream = partitioned.read(subscription).await.unwrap();
     }
 
     #[tokio::test]

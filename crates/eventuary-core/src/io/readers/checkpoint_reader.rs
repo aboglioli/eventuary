@@ -317,7 +317,6 @@ mod tests {
     use crate::io::Message;
     use crate::io::acker::NoopAcker;
     use crate::io::checkpoint::StreamId;
-    use crate::io::readers::{PartitionedReader, PartitionedReaderConfig, PartitionedSubscription};
     use crate::payload::Payload;
     use crate::start_from::{StartFrom, StartableSubscription};
     use futures::Stream;
@@ -658,111 +657,5 @@ mod tests {
 
         let observed = observed.lock().await.clone().unwrap();
         assert_eq!(observed.start, StartFrom::After(TestCursor(10)));
-    }
-
-    #[derive(Debug, Clone)]
-    struct PartitionedTestSub {
-        start: StartFrom<TestCursor>,
-    }
-
-    impl Default for PartitionedTestSub {
-        fn default() -> Self {
-            Self {
-                start: StartFrom::Earliest,
-            }
-        }
-    }
-
-    impl StartableSubscription<TestCursor> for PartitionedTestSub {
-        fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
-            self.start = start;
-            self
-        }
-    }
-
-    struct OneEventReader;
-
-    impl Reader for OneEventReader {
-        type Subscription = PartitionedTestSub;
-        type Acker = NoopAcker;
-        type Cursor = TestCursor;
-        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
-
-        async fn read(&self, _: PartitionedTestSub) -> Result<Self::Stream> {
-            Ok(Box::pin(futures::stream::iter(vec![Ok(Message::new(
-                ev("k0"),
-                NoopAcker,
-                TestCursor(1),
-            ))])))
-        }
-    }
-
-    #[tokio::test]
-    async fn checkpoint_reader_falls_back_when_partitioned_reader_rejects_old_partition_count() {
-        use futures::StreamExt;
-        let old_partition =
-            LogicalPartition::new(0, std::num::NonZeroU16::new(8).unwrap()).unwrap();
-        let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(Some(old_partition), TestCursor(10))];
-        let partitioned = PartitionedReader::new(
-            OneEventReader,
-            PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
-                ..PartitionedReaderConfig::default()
-            },
-        );
-        let checkpointed = CheckpointReader::new(partitioned, store);
-        let scope = CheckpointScope::new(
-            ConsumerGroupId::new("g").unwrap(),
-            StreamId::new("s").unwrap(),
-        );
-
-        let mut stream = checkpointed
-            .read(CheckpointSubscription::new(
-                PartitionedSubscription::new(PartitionedTestSub::default()),
-                scope,
-            ))
-            .await
-            .unwrap();
-
-        let msg = stream.next().await.unwrap().unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k0");
-    }
-
-    #[tokio::test]
-    async fn checkpoint_reader_errors_when_partitioned_reader_rejects_old_partition_count_and_policy_is_error()
-     {
-        let old_partition =
-            LogicalPartition::new(0, std::num::NonZeroU16::new(8).unwrap()).unwrap();
-        let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(Some(old_partition), TestCursor(10))];
-        let partitioned = PartitionedReader::new(
-            OneEventReader,
-            PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
-                ..PartitionedReaderConfig::default()
-            },
-        );
-        let checkpointed = CheckpointReader::new(partitioned, store);
-        let scope = CheckpointScope::new(
-            ConsumerGroupId::new("g").unwrap(),
-            StreamId::new("s").unwrap(),
-        );
-
-        let err = match checkpointed
-            .read(
-                CheckpointSubscription::new(
-                    PartitionedSubscription::new(PartitionedTestSub::default()),
-                    scope,
-                )
-                .with_resume_policy(CheckpointResumePolicy::Error),
-            )
-            .await
-        {
-            Ok(_) => panic!("expected invalid cursor error"),
-            Err(e) => e,
-        };
-
-        assert!(matches!(err, Error::InvalidCursor(_)));
     }
 }
