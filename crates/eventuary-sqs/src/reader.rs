@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::checkpoint::{CheckpointResumableSubscription, CheckpointResume};
 use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
@@ -23,12 +22,6 @@ pub struct SqsSubscription {
     pub visibility_timeout: Duration,
     pub max_messages: i32,
     pub limit: Option<usize>,
-}
-
-impl CheckpointResumableSubscription<NoCursor> for SqsSubscription {
-    fn with_checkpoint_resume(self, _: CheckpointResume<NoCursor>) -> Self {
-        self
-    }
 }
 
 pub struct SqsReader {
@@ -180,36 +173,5 @@ impl Reader for SqsReader {
             handle: Some(handle),
             ack_buffer,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use eventuary_core::StartFrom;
-    use eventuary_core::io::NoCursor;
-    use eventuary_core::io::checkpoint::{
-        CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
-    };
-
-    #[test]
-    fn sqs_subscription_accepts_checkpoint_resume_without_changing_fields() {
-        let subscription = SqsSubscription {
-            queue_url: "queue".to_owned(),
-            wait_time: Duration::from_secs(1),
-            visibility_timeout: Duration::from_secs(30),
-            max_messages: 1,
-            limit: None,
-        };
-        let resume = CheckpointResume::new(
-            StartFrom::After(NoCursor),
-            vec![CheckpointResumePoint::new(None, NoCursor)],
-        );
-
-        let resumed = subscription.clone().with_checkpoint_resume(resume);
-
-        assert_eq!(resumed.queue_url, subscription.queue_url);
-        assert_eq!(resumed.max_messages, subscription.max_messages);
     }
 }

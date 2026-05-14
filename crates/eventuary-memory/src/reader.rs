@@ -6,19 +6,12 @@ use futures::Stream;
 use tokio::sync::{Mutex, mpsc};
 
 use eventuary_core::io::acker::NoopAcker;
-use eventuary_core::io::checkpoint::{CheckpointResumableSubscription, CheckpointResume};
 use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Event, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemorySubscription {
     pub limit: Option<usize>,
-}
-
-impl CheckpointResumableSubscription<NoCursor> for MemorySubscription {
-    fn with_checkpoint_resume(self, _: CheckpointResume<NoCursor>) -> Self {
-        self
-    }
 }
 
 pub struct InmemReader {
@@ -171,25 +164,6 @@ mod tests {
         let msg2 = stream.next().await.unwrap().unwrap();
         assert_eq!(msg2.event().organization().as_str(), "org-b");
         msg2.ack().await.unwrap();
-    }
-
-    #[test]
-    fn memory_subscription_accepts_checkpoint_resume_without_changing_fields() {
-        use eventuary_core::StartFrom;
-        use eventuary_core::io::NoCursor;
-        use eventuary_core::io::checkpoint::{
-            CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
-        };
-
-        let subscription = MemorySubscription { limit: Some(5) };
-        let resume = CheckpointResume::new(
-            StartFrom::After(NoCursor),
-            vec![CheckpointResumePoint::new(None, NoCursor)],
-        );
-
-        let resumed = subscription.clone().with_checkpoint_resume(resume);
-
-        assert_eq!(resumed.limit, subscription.limit);
     }
 
     #[tokio::test]
