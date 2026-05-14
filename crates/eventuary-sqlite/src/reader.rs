@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
     StartableSubscription, TopicPattern,
 };
 
@@ -40,13 +40,6 @@ impl SqliteCursor {
 impl CursorPartition for SqliteCursor {
     fn partition(&self) -> Option<LogicalPartition> {
         None
-    }
-}
-
-impl CommitCursor for SqliteCursor {
-    type Commit = SqliteCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        *self
     }
 }
 

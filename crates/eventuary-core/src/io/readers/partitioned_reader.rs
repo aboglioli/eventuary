@@ -119,16 +119,6 @@ impl<C> CursorPartition for PartitionedCursor<C> {
     }
 }
 
-impl<C> CommitCursor for PartitionedCursor<C>
-where
-    C: CommitCursor,
-{
-    type Commit = C::Commit;
-    fn commit_cursor(&self) -> Self::Commit {
-        self.inner.commit_cursor()
-    }
-}
-
 struct InFlightItem<C> {
     id: u64,
     event: Event,
@@ -505,14 +495,6 @@ mod tests {
     impl crate::partition::CursorPartition for TestCursor {
         fn partition(&self) -> Option<LogicalPartition> {
             None
-        }
-    }
-
-    impl crate::partition::CommitCursor for TestCursor {
-        type Commit = TestCursor;
-
-        fn commit_cursor(&self) -> Self::Commit {
-            *self
         }
     }
 

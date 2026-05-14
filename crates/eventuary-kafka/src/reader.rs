@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
 use eventuary_core::io::{Message, Reader};
 use eventuary_core::{
-    CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
-    SerializedEvent, StartFrom, StartableSubscription,
+    ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result, SerializedEvent,
+    StartFrom, StartableSubscription,
 };
 
 use crate::flusher::{KafkaFlusher, KafkaOffsetToken};
@@ -46,13 +46,6 @@ impl Ord for KafkaCursor {
 impl CursorPartition for KafkaCursor {
     fn partition(&self) -> Option<LogicalPartition> {
         None
-    }
-}
-
-impl CommitCursor for KafkaCursor {
-    type Commit = KafkaCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        self.clone()
     }
 }
 

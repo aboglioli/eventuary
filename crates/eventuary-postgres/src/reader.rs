@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
-    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
+    CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
     StartableSubscription, TopicPattern,
 };
 
@@ -39,13 +39,6 @@ impl PgCursor {
 impl CursorPartition for PgCursor {
     fn partition(&self) -> Option<LogicalPartition> {
         None
-    }
-}
-
-impl CommitCursor for PgCursor {
-    type Commit = PgCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        *self
     }
 }
 
