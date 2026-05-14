@@ -1,19 +1,18 @@
 //! CheckpointReader: composes an inner reader and a checkpoint store.
 //!
-//! On `read`, loads the persisted cursor per partition for the requested
+//! On `read`, loads the persisted cursor per `CursorId` for the requested
 //! scope and configures the inner reader to start from
 //! `StartFrom::After(min(stored_cursors))`. Records each delivered cursor
-//! in contiguous delivered order per partition. On downstream `ack`,
+//! in contiguous delivered order per `CursorId`. On downstream `ack`,
 //! calls the inner ack first, then commits the cursor to the store
 //! **synchronously** — store commit errors propagate to the caller and
 //! to consumers of the stream.
 //!
 //! The checkpoint store persists the same cursor type the inner reader
-//! emits. `CheckpointReader` uses `CursorPartition::partition()` only to
-//! build the checkpoint key; it does not transform the cursor before
-//! storing or resuming. For partitioned composition
-//! (`PartitionedReader<R>`), the persisted value is
-//! `PartitionedCursor<R::Cursor>`.
+//! emits. `CheckpointReader` uses `Cursor::id()` only to build the
+//! checkpoint key; it does not transform the cursor before storing or
+//! resuming. For partitioned composition (`PartitionedReader<R>`), the
+//! persisted value is `PartitionedCursor<R::Cursor>`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -27,8 +26,7 @@ use crate::error::{Error, Result};
 use crate::io::checkpoint::{
     CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
 };
-use crate::io::{Acker, Message, Reader};
-use crate::partition::{CursorPartition, LogicalPartition};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
@@ -102,12 +100,12 @@ impl<C: Clone> PendingState<C> {
     }
 }
 
-type PendingMap<C> = Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<C>>>>;
+type PendingMap<C> = Arc<Mutex<HashMap<CursorId, PendingState<C>>>>;
 
 pub struct CheckpointAcker<A: Acker, C, S: CheckpointStore<C>> {
     inner: A,
     scope: CheckpointScope,
-    partition: Option<LogicalPartition>,
+    cursor_id: CursorId,
     index: usize,
     state: PendingMap<C>,
     store: S,
@@ -124,14 +122,14 @@ where
         let advanced = {
             let mut state = self.state.lock().await;
             let entry = state
-                .entry(self.partition)
+                .entry(self.cursor_id.clone())
                 .or_insert_with(PendingState::new);
             entry.complete(self.index)
         };
         if let Some(cursor) = advanced {
             let key = CheckpointKey {
                 scope: self.scope.clone(),
-                partition: self.partition,
+                cursor_id: self.cursor_id.clone(),
             };
             self.store.commit(&key, cursor).await?;
         }
@@ -173,7 +171,7 @@ impl<R, S> CheckpointReader<R, S> {
 impl<R, S> Reader for CheckpointReader<R, S>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: Clone + Ord + CursorPartition + Send + Sync + 'static,
+    R::Cursor: Clone + Ord + Cursor + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
@@ -198,8 +196,7 @@ where
             )));
         }
 
-        let known_from_checkpoints: HashMap<Option<LogicalPartition>, R::Cursor> =
-            stored.into_iter().collect();
+        let known_from_checkpoints: HashMap<CursorId, R::Cursor> = stored.into_iter().collect();
         let min_cursor: Option<R::Cursor> = known_from_checkpoints.values().min().cloned();
 
         let inner_subscription = match min_cursor {
@@ -248,9 +245,9 @@ where
                         continue;
                     }
                 };
-                let cursor_partition = msg.cursor().partition();
+                let cursor_id: CursorId = msg.cursor().id();
                 let cursor = msg.cursor().clone();
-                if let Some(stored_cursor) = known_for_stream.get(&cursor_partition)
+                if let Some(stored_cursor) = known_for_stream.get(&cursor_id)
                     && cursor <= *stored_cursor
                 {
                     let _ = msg.ack().await;
@@ -260,26 +257,26 @@ where
                 let index = {
                     let mut state_guard = state_for_stream.lock().await;
                     let pending_now = state_guard
-                        .get(&cursor_partition)
+                        .get(&cursor_id)
                         .map(|s| s.pending_count())
                         .unwrap_or(0);
                     if pending_now >= max_pending {
                         let _ = tx
                             .send(Err(Error::Store(format!(
-                                "checkpoint reader: max_pending_per_key ({max_pending}) reached for partition {cursor_partition:?}"
+                                "checkpoint reader: max_pending_per_key ({max_pending}) reached for cursor id {cursor_id:?}"
                             ))))
                             .await;
                         return;
                     }
                     let entry = state_guard
-                        .entry(cursor_partition)
+                        .entry(cursor_id.clone())
                         .or_insert_with(PendingState::new);
                     entry.record(cursor.clone())
                 };
                 let acker: CheckpointAcker<R::Acker, R::Cursor, S> = CheckpointAcker {
                     inner: inner_acker,
                     scope: scope_for_stream.clone(),
-                    partition: cursor_partition,
+                    cursor_id: cursor_id.clone(),
                     index,
                     state: Arc::clone(&state_for_stream),
                     store: store_for_stream.clone(),
@@ -352,11 +349,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
     struct TestCursor(i64);
 
-    impl CursorPartition for TestCursor {
-        fn partition(&self) -> Option<LogicalPartition> {
-            None
-        }
-    }
+    impl Cursor for TestCursor {}
 
     #[derive(Debug, Clone, Default)]
     struct TestSub;
@@ -402,7 +395,7 @@ mod tests {
         }
     }
 
-    type PreloadedRows = Vec<(Option<LogicalPartition>, TestCursor)>;
+    type PreloadedRows = Vec<(CursorId, TestCursor)>;
 
     #[derive(Clone, Default)]
     struct PreloadedStore {
@@ -414,10 +407,7 @@ mod tests {
             Ok(None)
         }
 
-        async fn load_scope(
-            &self,
-            _: &CheckpointScope,
-        ) -> Result<Vec<(Option<LogicalPartition>, TestCursor)>> {
+        async fn load_scope(&self, _: &CheckpointScope) -> Result<Vec<(CursorId, TestCursor)>> {
             Ok(self.rows.lock().await.clone())
         }
 
@@ -454,10 +444,7 @@ mod tests {
         async fn load(&self, _: &CheckpointKey) -> Result<Option<TestCursor>> {
             Ok(None)
         }
-        async fn load_scope(
-            &self,
-            _: &CheckpointScope,
-        ) -> Result<Vec<(Option<LogicalPartition>, TestCursor)>> {
+        async fn load_scope(&self, _: &CheckpointScope) -> Result<Vec<(CursorId, TestCursor)>> {
             Ok(vec![])
         }
         async fn commit(&self, key: &CheckpointKey, cursor: TestCursor) -> Result<()> {
@@ -570,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reader_retries_with_initial_start_when_checkpoint_cursor_is_invalid() {
         let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(None, TestCursor(10))];
+        *store.rows.lock().await = vec![(CursorId::Global, TestCursor(10))];
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reader = InvalidCursorReader {
             calls: std::sync::Arc::clone(&calls),
@@ -592,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reader_returns_invalid_cursor_when_policy_is_error() {
         let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(None, TestCursor(10))];
+        *store.rows.lock().await = vec![(CursorId::Global, TestCursor(10))];
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reader = InvalidCursorReader {
             calls: std::sync::Arc::clone(&calls),
@@ -620,9 +607,9 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_reader_seeds_inner_with_min_cursor() {
-        let partition = LogicalPartition::new(2, std::num::NonZeroU16::new(4).unwrap()).unwrap();
+        let cursor_id = CursorId::Named(std::sync::Arc::from("partition:4:2"));
         let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(Some(partition), TestCursor(10))];
+        *store.rows.lock().await = vec![(cursor_id, TestCursor(10))];
         let observed = std::sync::Arc::new(TokioMutex::new(None));
         let reader = SeedingSubReader {
             observed: std::sync::Arc::clone(&observed),
