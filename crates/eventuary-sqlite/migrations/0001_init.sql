@@ -21,10 +21,9 @@ CREATE INDEX IF NOT EXISTS idx_events_org_topic_seq ON {events} (organization, t
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON {events} (timestamp);
 
 CREATE TABLE IF NOT EXISTS {offsets} (
-    consumer_group_id TEXT    NOT NULL,
-    stream_id   TEXT    NOT NULL DEFAULT 'default',
-    partition         INTEGER NOT NULL DEFAULT 0,
-    partition_count   INTEGER NOT NULL DEFAULT 1,
-    sequence          INTEGER NOT NULL,
-    PRIMARY KEY (consumer_group_id, stream_id, partition, partition_count)
+    consumer_group_id TEXT NOT NULL,
+    stream_id         TEXT NOT NULL DEFAULT 'default',
+    cursor_id         TEXT NOT NULL,
+    cursor            TEXT NOT NULL,
+    PRIMARY KEY (consumer_group_id, stream_id, cursor_id)
 );

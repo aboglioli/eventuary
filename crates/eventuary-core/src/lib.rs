@@ -53,16 +53,17 @@ pub use event::{Event, EventId};
 pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
-    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
-    DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
-    FilterExt, FilteredHandler, Handler, HandlerExt, Message, NoCursor, Reader, ReaderExt,
-    RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt, backoff_delay,
+    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter,
+    CheckpointResumePolicy, ConsumerHandle, Cursor, CursorId, DeadLetterWriter, DefaultRetryPolicy,
+    DynAcker, DynHandler, DynReader, DynWriter, Filter, FilterExt, FilteredHandler, Handler,
+    HandlerExt, Message, NoCursor, Reader, ReaderExt, RetryAction, RetryConfig, RetryHandler,
+    RetryPolicy, Writer, WriterExt, backoff_delay,
 };
 pub use metadata::Metadata;
 pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
-pub use partition::{CommitCursor, CursorPartition, LogicalPartition, fnv1a_u64, partition_for};
+pub use partition::{LogicalPartition, fnv1a_u64, partition_for};
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};

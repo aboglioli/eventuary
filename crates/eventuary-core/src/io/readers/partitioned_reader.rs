@@ -34,9 +34,9 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::io::{Acker, Message, Reader};
-use crate::partition::{CommitCursor, CursorPartition, LogicalPartition, partition_for};
-use crate::start_from::StartableSubscription;
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+use crate::partition::{LogicalPartition, partition_for};
+use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
 pub struct PartitionedReaderConfig {
@@ -64,31 +64,32 @@ pub enum LaneScheduling {
 }
 
 #[derive(Debug, Clone)]
-pub struct PartitionedSubscription<S> {
+pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
     pub inner: S,
+    pub start: StartFrom<PartitionedCursor<C>>,
 }
 
-impl<S> PartitionedSubscription<S> {
+impl<S, C> PartitionedSubscription<S, C> {
     pub fn new(inner: S) -> Self {
-        Self { inner }
-    }
-}
-
-/// `PartitionedSubscription` resumes from a checkpoint by delegating to
-/// the inner subscription with the same cursor — the partition envelope
-/// is stripped by `CheckpointReader` via `CommitCursor`.
-impl<S, C> StartableSubscription<C> for PartitionedSubscription<S>
-where
-    S: StartableSubscription<C>,
-{
-    fn with_start(self, start: crate::start_from::StartFrom<C>) -> Self {
         Self {
-            inner: self.inner.with_start(start),
+            inner,
+            start: StartFrom::Earliest,
         }
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+impl<S, C> StartableSubscription<PartitionedCursor<C>> for PartitionedSubscription<S, C>
+where
+    S: Clone + Send + 'static,
+    C: Clone + Send + 'static,
+{
+    fn with_start(mut self, start: StartFrom<PartitionedCursor<C>>) -> Self {
+        self.start = start;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct PartitionedCursor<C> {
     inner: C,
     partition: LogicalPartition,
@@ -112,19 +113,9 @@ impl<C> PartitionedCursor<C> {
     }
 }
 
-impl<C> CursorPartition for PartitionedCursor<C> {
-    fn partition(&self) -> Option<LogicalPartition> {
-        Some(self.partition)
-    }
-}
-
-impl<C> CommitCursor for PartitionedCursor<C>
-where
-    C: CommitCursor,
-{
-    type Commit = C::Commit;
-    fn commit_cursor(&self) -> Self::Commit {
-        self.inner.commit_cursor()
+impl<C> Cursor for PartitionedCursor<C> {
+    fn id(&self) -> CursorId {
+        self.partition.to_cursor_id()
     }
 }
 
@@ -226,18 +217,36 @@ impl<R> PartitionedReader<R> {
 impl<R> Reader for PartitionedReader<R>
 where
     R: Reader + Send + Sync + 'static,
-    R::Subscription: Send + 'static,
-    R::Stream: Send + 'static,
+    R::Cursor: Clone + Ord + Send + Sync + 'static,
+    R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
-    R::Cursor: Clone + Send + Sync + 'static,
+    R::Stream: Send + 'static,
 {
-    type Subscription = PartitionedSubscription<R::Subscription>;
+    type Subscription = PartitionedSubscription<R::Subscription, R::Cursor>;
     type Acker = PartitionAcker<R::Cursor>;
     type Cursor = PartitionedCursor<R::Cursor>;
     type Stream = PartitionedStream<R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let inner_stream = self.inner.read(subscription.inner).await?;
+        let inner_subscription = match subscription.start {
+            StartFrom::Earliest => subscription.inner.with_start(StartFrom::Earliest),
+            StartFrom::Latest => subscription.inner.with_start(StartFrom::Latest),
+            StartFrom::Timestamp(t) => subscription.inner.with_start(StartFrom::Timestamp(t)),
+            StartFrom::After(partitioned_cursor) => {
+                let partition = partitioned_cursor.partition();
+                if partition.count_nz() != self.config.partition_count {
+                    return Err(Error::InvalidCursor(format!(
+                        "partitioned reader checkpoint partition count does not match configured partition count {}",
+                        self.config.partition_count.get()
+                    )));
+                }
+                let inner_cursor = partitioned_cursor.into_inner();
+                subscription
+                    .inner
+                    .with_start(StartFrom::After(inner_cursor))
+            }
+        };
+        let inner_stream = self.inner.read(inner_subscription).await?;
         let count_nz = self.config.partition_count;
         let count = count_nz.get() as usize;
         let count_u32 = std::num::NonZeroU32::new(count_nz.get() as u32).unwrap();
@@ -483,8 +492,101 @@ mod tests {
     use crate::payload::Payload;
     use std::time::Duration;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Eq,
+        PartialEq,
+        Ord,
+        PartialOrd,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
     struct TestCursor(i64);
+
+    impl Cursor for TestCursor {}
+
+    impl StartableSubscription<TestCursor> for () {
+        fn with_start(self, _: StartFrom<TestCursor>) -> Self {}
+    }
+
+    #[test]
+    fn partitioned_cursor_id_is_named_with_partition() {
+        let partition = LogicalPartition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(7), partition);
+        assert_eq!(
+            cursor.id(),
+            CursorId::Named(std::sync::Arc::from("partition:100:17"))
+        );
+    }
+
+    #[test]
+    fn partitioned_cursor_roundtrip_preserves_partition_and_inner() {
+        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(42), partition);
+
+        let value = serde_json::to_value(&cursor).unwrap();
+        let decoded: PartitionedCursor<TestCursor> = serde_json::from_value(value).unwrap();
+
+        assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn partitioned_subscription_stores_start_after_cursor() {
+        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(10), partition);
+        let subscription = PartitionedSubscription::<(), TestCursor>::new(())
+            .with_start(StartFrom::After(cursor.clone()));
+
+        assert_eq!(subscription.start, StartFrom::After(cursor));
+    }
+
+    #[tokio::test]
+    async fn partitioned_reader_rejects_start_after_cursor_with_mismatched_partition_count() {
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+        };
+        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
+        let old_partition = LogicalPartition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(10), old_partition);
+        let subscription =
+            PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
+
+        let err = match partitioned.read(subscription).await {
+            Ok(_) => panic!("expected invalid cursor error"),
+            Err(e) => e,
+        };
+
+        assert!(matches!(err, Error::InvalidCursor(_)));
+        assert!(err.to_string().contains("partition count"));
+    }
+
+    #[tokio::test]
+    async fn partitioned_reader_accepts_start_after_cursor_with_matching_partition_count() {
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+        };
+        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
+        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(10), partition);
+        let subscription =
+            PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
+
+        let _stream = partitioned.read(subscription).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn partitioned_reader_forwards_earliest_unchanged() {
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+        };
+        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
+        let subscription = PartitionedSubscription::<_, TestCursor>::new(());
+
+        let _stream = partitioned.read(subscription).await.unwrap();
+    }
 
     struct VecReader {
         events: std::sync::Mutex<Option<Vec<Event>>>,

@@ -7,11 +7,17 @@ use tokio::sync::{Mutex, mpsc};
 
 use eventuary_core::io::acker::NoopAcker;
 use eventuary_core::io::{Message, NoCursor, Reader};
-use eventuary_core::{Event, Result};
+use eventuary_core::{Event, Result, StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemorySubscription {
     pub limit: Option<usize>,
+}
+
+impl StartableSubscription<NoCursor> for MemorySubscription {
+    fn with_start(self, _: StartFrom<NoCursor>) -> Self {
+        self
+    }
 }
 
 pub struct InmemReader {

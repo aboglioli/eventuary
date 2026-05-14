@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{Message, Reader};
-use eventuary_core::{Result, SerializedEvent};
+use eventuary_core::io::{Message, NoCursor, Reader};
+use eventuary_core::{Result, SerializedEvent, StartFrom, StartableSubscription};
 
 use crate::flusher::SqsFlusher;
 use crate::reader_config::SqsReaderConfig;
@@ -22,6 +22,12 @@ pub struct SqsSubscription {
     pub visibility_timeout: Duration,
     pub max_messages: i32,
     pub limit: Option<usize>,
+}
+
+impl StartableSubscription<NoCursor> for SqsSubscription {
+    fn with_start(self, _: StartFrom<NoCursor>) -> Self {
+        self
+    }
 }
 
 pub struct SqsReader {

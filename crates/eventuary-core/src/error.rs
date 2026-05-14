@@ -26,6 +26,9 @@ pub enum Error {
     #[error("invalid start position: {0}")]
     InvalidStartFrom(String),
 
+    #[error("invalid cursor: {0}")]
+    InvalidCursor(String),
+
     #[error("serialization error: {0}")]
     Serialization(String),
 
@@ -50,5 +53,12 @@ mod tests {
         let err = Error::Config("missing url".to_owned());
         assert!(matches!(err, Error::Config(_)));
         assert_eq!(err.to_string(), "config error: missing url");
+    }
+
+    #[test]
+    fn invalid_cursor_variant_is_constructible() {
+        let err = Error::InvalidCursor("partition count changed".to_owned());
+        assert!(matches!(err, Error::InvalidCursor(_)));
+        assert_eq!(err.to_string(), "invalid cursor: partition count changed");
     }
 }

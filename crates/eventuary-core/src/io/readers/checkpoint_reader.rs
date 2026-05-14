@@ -1,19 +1,18 @@
 //! CheckpointReader: composes an inner reader and a checkpoint store.
 //!
-//! On `read`, loads the persisted cursor per partition for the requested
+//! On `read`, loads the persisted cursor per `CursorId` for the requested
 //! scope and configures the inner reader to start from
 //! `StartFrom::After(min(stored_cursors))`. Records each delivered cursor
-//! in contiguous delivered order per partition. On downstream `ack`,
+//! in contiguous delivered order per `CursorId`. On downstream `ack`,
 //! calls the inner ack first, then commits the cursor to the store
 //! **synchronously** — store commit errors propagate to the caller and
 //! to consumers of the stream.
 //!
-//! The acker holds the cursor type the store persists: `Commit`. The
-//! delivery cursor is `R::Cursor`; `CommitCursor::commit_cursor()`
-//! produces the value the store sees. For partitioned composition
-//! (`PartitionedReader<R>`) the delivery cursor is
-//! `PartitionedCursor<R::Cursor>` and its `commit_cursor()` strips the
-//! partition envelope.
+//! The checkpoint store persists the same cursor type the inner reader
+//! emits. `CheckpointReader` uses `Cursor::id()` only to build the
+//! checkpoint key; it does not transform the cursor before storing or
+//! resuming. For partitioned composition (`PartitionedReader<R>`), the
+//! persisted value is `PartitionedCursor<R::Cursor>`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -24,9 +23,10 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
-use crate::io::checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore};
-use crate::io::{Acker, Message, Reader};
-use crate::partition::{CommitCursor, CursorPartition, LogicalPartition};
+use crate::io::checkpoint::{
+    CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
+};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
@@ -46,11 +46,21 @@ impl Default for CheckpointReaderConfig {
 pub struct CheckpointSubscription<S> {
     pub inner: S,
     pub scope: CheckpointScope,
+    pub resume_policy: CheckpointResumePolicy,
 }
 
 impl<S> CheckpointSubscription<S> {
     pub fn new(inner: S, scope: CheckpointScope) -> Self {
-        Self { inner, scope }
+        Self {
+            inner,
+            scope,
+            resume_policy: CheckpointResumePolicy::UseInitialStart,
+        }
+    }
+
+    pub fn with_resume_policy(mut self, policy: CheckpointResumePolicy) -> Self {
+        self.resume_policy = policy;
+        self
     }
 }
 
@@ -90,12 +100,12 @@ impl<C: Clone> PendingState<C> {
     }
 }
 
-type PendingMap<C> = Arc<Mutex<HashMap<Option<LogicalPartition>, PendingState<C>>>>;
+type PendingMap<C> = Arc<Mutex<HashMap<CursorId, PendingState<C>>>>;
 
 pub struct CheckpointAcker<A: Acker, C, S: CheckpointStore<C>> {
     inner: A,
     scope: CheckpointScope,
-    partition: Option<LogicalPartition>,
+    cursor_id: CursorId,
     index: usize,
     state: PendingMap<C>,
     store: S,
@@ -112,14 +122,14 @@ where
         let advanced = {
             let mut state = self.state.lock().await;
             let entry = state
-                .entry(self.partition)
+                .entry(self.cursor_id.clone())
                 .or_insert_with(PendingState::new);
             entry.complete(self.index)
         };
         if let Some(cursor) = advanced {
             let key = CheckpointKey {
                 scope: self.scope.clone(),
-                partition: self.partition,
+                cursor_id: self.cursor_id.clone(),
             };
             self.store.commit(&key, cursor).await?;
         }
@@ -161,42 +171,63 @@ impl<R, S> CheckpointReader<R, S> {
 impl<R, S> Reader for CheckpointReader<R, S>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: CommitCursor + CursorPartition + Send + Sync + 'static,
-    <R::Cursor as CommitCursor>::Commit: Send + Sync + 'static,
-    R::Subscription: StartableSubscription<<R::Cursor as CommitCursor>::Commit>,
+    R::Cursor: Clone + Ord + Cursor + Send + Sync + 'static,
+    R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
-    S: CheckpointStore<<R::Cursor as CommitCursor>::Commit>,
+    S: CheckpointStore<R::Cursor>,
 {
     type Subscription = CheckpointSubscription<R::Subscription>;
-    type Acker = CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S>;
-    type Cursor = <R::Cursor as CommitCursor>::Commit;
-    type Stream = CheckpointStream<R::Acker, <R::Cursor as CommitCursor>::Commit, S>;
+    type Acker = CheckpointAcker<R::Acker, R::Cursor, S>;
+    type Cursor = R::Cursor;
+    type Stream = CheckpointStream<R::Acker, R::Cursor, S>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let scope = subscription.scope.clone();
         let store = self.store.clone();
         let stored = store.load_scope(&scope).await?;
-        let known: HashMap<Option<LogicalPartition>, <R::Cursor as CommitCursor>::Commit> =
-            stored.into_iter().collect();
-        let min_cursor: Option<<R::Cursor as CommitCursor>::Commit> = known.values().min().cloned();
+
+        if stored.is_empty() && matches!(subscription.resume_policy, CheckpointResumePolicy::Error)
+        {
+            return Err(Error::InvalidCursor(format!(
+                "checkpoint reader: no checkpoint found for consumer group `{}` and stream `{}`",
+                scope.consumer_group_id.as_str(),
+                scope.stream_id.as_str()
+            )));
+        }
+
+        let known_from_checkpoints: HashMap<CursorId, R::Cursor> = stored.into_iter().collect();
+        let min_cursor: Option<R::Cursor> = known_from_checkpoints.values().min().cloned();
 
         let inner_subscription = match min_cursor {
-            Some(cursor) => subscription.inner.with_start(StartFrom::After(cursor)),
-            None => subscription.inner,
+            Some(cursor) => subscription
+                .inner
+                .clone()
+                .with_start(StartFrom::After(cursor)),
+            None => subscription.inner.clone(),
         };
 
-        let inner_stream = self.inner.read(inner_subscription).await?;
-        let state: PendingMap<<R::Cursor as CommitCursor>::Commit> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let (inner_stream, known) = match self.inner.read(inner_subscription).await {
+            Ok(stream) => (stream, known_from_checkpoints),
+            Err(Error::InvalidCursor(reason))
+                if matches!(
+                    subscription.resume_policy,
+                    CheckpointResumePolicy::UseInitialStart
+                ) =>
+            {
+                tracing::warn!(
+                    reason = %reason,
+                    "checkpoint reader falling back to initial start after invalid checkpoint cursor"
+                );
+                let stream = self.inner.read(subscription.inner.clone()).await?;
+                (stream, HashMap::new())
+            }
+            Err(e) => return Err(e),
+        };
+        let state: PendingMap<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
         let max_pending = self.config.max_pending_per_key;
         let (tx, rx) = mpsc::channel::<
-            Result<
-                Message<
-                    CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S>,
-                    <R::Cursor as CommitCursor>::Commit,
-                >,
-            >,
+            Result<Message<CheckpointAcker<R::Acker, R::Cursor, S>, R::Cursor>>,
         >(64);
         let known = Arc::new(known);
 
@@ -214,10 +245,10 @@ where
                         continue;
                     }
                 };
-                let cursor_partition = msg.cursor().partition();
-                let commit = msg.cursor().commit_cursor();
-                if let Some(stored_cursor) = known_for_stream.get(&cursor_partition)
-                    && commit <= *stored_cursor
+                let cursor_id: CursorId = msg.cursor().id();
+                let cursor = msg.cursor().clone();
+                if let Some(stored_cursor) = known_for_stream.get(&cursor_id)
+                    && cursor <= *stored_cursor
                 {
                     let _ = msg.ack().await;
                     continue;
@@ -226,32 +257,31 @@ where
                 let index = {
                     let mut state_guard = state_for_stream.lock().await;
                     let pending_now = state_guard
-                        .get(&cursor_partition)
+                        .get(&cursor_id)
                         .map(|s| s.pending_count())
                         .unwrap_or(0);
                     if pending_now >= max_pending {
                         let _ = tx
                             .send(Err(Error::Store(format!(
-                                "checkpoint reader: max_pending_per_key ({max_pending}) reached for partition {cursor_partition:?}"
+                                "checkpoint reader: max_pending_per_key ({max_pending}) reached for cursor id {cursor_id:?}"
                             ))))
                             .await;
                         return;
                     }
                     let entry = state_guard
-                        .entry(cursor_partition)
+                        .entry(cursor_id.clone())
                         .or_insert_with(PendingState::new);
-                    entry.record(commit.clone())
+                    entry.record(cursor.clone())
                 };
-                let acker: CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S> =
-                    CheckpointAcker {
-                        inner: inner_acker,
-                        scope: scope_for_stream.clone(),
-                        partition: cursor_partition,
-                        index,
-                        state: Arc::clone(&state_for_stream),
-                        store: store_for_stream.clone(),
-                    };
-                let out = Message::new(event, acker, commit);
+                let acker: CheckpointAcker<R::Acker, R::Cursor, S> = CheckpointAcker {
+                    inner: inner_acker,
+                    scope: scope_for_stream.clone(),
+                    cursor_id: cursor_id.clone(),
+                    index,
+                    state: Arc::clone(&state_for_stream),
+                    store: store_for_stream.clone(),
+                };
+                let out = Message::new(event, acker, cursor);
                 if tx.send(Ok(out)).await.is_err() {
                     return;
                 }
@@ -274,7 +304,7 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::io::checkpoint::StreamId;
     use crate::payload::Payload;
-    use crate::start_from::StartFrom;
+    use crate::start_from::{StartFrom, StartableSubscription};
     use futures::Stream;
     use std::pin::Pin;
     use tokio::sync::Mutex as TokioMutex;
@@ -319,23 +349,70 @@ mod tests {
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
     struct TestCursor(i64);
 
-    impl CursorPartition for TestCursor {
-        fn partition(&self) -> Option<LogicalPartition> {
-            None
-        }
-    }
-    impl CommitCursor for TestCursor {
-        type Commit = TestCursor;
-        fn commit_cursor(&self) -> Self::Commit {
-            *self
-        }
-    }
+    impl Cursor for TestCursor {}
 
     #[derive(Debug, Clone, Default)]
     struct TestSub;
     impl StartableSubscription<TestCursor> for TestSub {
         fn with_start(self, _: StartFrom<TestCursor>) -> Self {
             self
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct SeedingSub {
+        start: StartFrom<TestCursor>,
+    }
+
+    impl Default for SeedingSub {
+        fn default() -> Self {
+            Self {
+                start: StartFrom::Earliest,
+            }
+        }
+    }
+
+    impl StartableSubscription<TestCursor> for SeedingSub {
+        fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
+            self.start = start;
+            self
+        }
+    }
+
+    struct SeedingSubReader {
+        observed: std::sync::Arc<TokioMutex<Option<SeedingSub>>>,
+    }
+
+    impl Reader for SeedingSubReader {
+        type Subscription = SeedingSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, subscription: SeedingSub) -> Result<Self::Stream> {
+            *self.observed.lock().await = Some(subscription);
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    type PreloadedRows = Vec<(CursorId, TestCursor)>;
+
+    #[derive(Clone, Default)]
+    struct PreloadedStore {
+        rows: std::sync::Arc<TokioMutex<PreloadedRows>>,
+    }
+
+    impl CheckpointStore<TestCursor> for PreloadedStore {
+        async fn load(&self, _: &CheckpointKey) -> Result<Option<TestCursor>> {
+            Ok(None)
+        }
+
+        async fn load_scope(&self, _: &CheckpointScope) -> Result<Vec<(CursorId, TestCursor)>> {
+            Ok(self.rows.lock().await.clone())
+        }
+
+        async fn commit(&self, _: &CheckpointKey, _: TestCursor) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -367,10 +444,7 @@ mod tests {
         async fn load(&self, _: &CheckpointKey) -> Result<Option<TestCursor>> {
             Ok(None)
         }
-        async fn load_scope(
-            &self,
-            _: &CheckpointScope,
-        ) -> Result<Vec<(Option<LogicalPartition>, TestCursor)>> {
+        async fn load_scope(&self, _: &CheckpointScope) -> Result<Vec<(CursorId, TestCursor)>> {
             Ok(vec![])
         }
         async fn commit(&self, key: &CheckpointKey, cursor: TestCursor) -> Result<()> {
@@ -432,5 +506,126 @@ mod tests {
             "expected stream error after per-key max_pending exceeded, held {} messages",
             held.len()
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_errors_when_required_checkpoint_is_missing() {
+        let events: Vec<Event> = vec![ev("k0")];
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let store = MemStore::default();
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let subscription = CheckpointSubscription::new(TestSub, scope)
+            .with_resume_policy(CheckpointResumePolicy::Error);
+
+        let err = match cr.read(subscription).await {
+            Ok(_) => panic!("expected missing checkpoint error"),
+            Err(e) => e,
+        };
+
+        assert!(matches!(err, Error::InvalidCursor(_)));
+        assert!(err.to_string().contains("no checkpoint found"));
+    }
+
+    struct InvalidCursorReader {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Reader for InvalidCursorReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: TestSub) -> Result<Self::Stream> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                return Err(Error::InvalidCursor(
+                    "checkpoint partition count changed".to_owned(),
+                ));
+            }
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_retries_with_initial_start_when_checkpoint_cursor_is_invalid() {
+        let store = PreloadedStore::default();
+        *store.rows.lock().await = vec![(CursorId::Global, TestCursor(10))];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = InvalidCursorReader {
+            calls: std::sync::Arc::clone(&calls),
+        };
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let _stream = cr
+            .read(CheckpointSubscription::new(TestSub, scope))
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_returns_invalid_cursor_when_policy_is_error() {
+        let store = PreloadedStore::default();
+        *store.rows.lock().await = vec![(CursorId::Global, TestCursor(10))];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = InvalidCursorReader {
+            calls: std::sync::Arc::clone(&calls),
+        };
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let err = match cr
+            .read(
+                CheckpointSubscription::new(TestSub, scope)
+                    .with_resume_policy(CheckpointResumePolicy::Error),
+            )
+            .await
+        {
+            Ok(_) => panic!("expected invalid cursor error"),
+            Err(e) => e,
+        };
+
+        assert!(matches!(err, Error::InvalidCursor(_)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_reader_seeds_inner_with_min_cursor() {
+        let cursor_id = CursorId::Named(std::sync::Arc::from("partition:4:2"));
+        let store = PreloadedStore::default();
+        *store.rows.lock().await = vec![(cursor_id, TestCursor(10))];
+        let observed = std::sync::Arc::new(TokioMutex::new(None));
+        let reader = SeedingSubReader {
+            observed: std::sync::Arc::clone(&observed),
+        };
+        let cr = CheckpointReader::new(reader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let _stream = cr
+            .read(CheckpointSubscription::new(SeedingSub::default(), scope))
+            .await
+            .unwrap();
+
+        let observed = observed.lock().await.clone().unwrap();
+        assert_eq!(observed.start, StartFrom::After(TestCursor(10)));
     }
 }

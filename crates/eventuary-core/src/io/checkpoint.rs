@@ -2,7 +2,7 @@ use std::future::Future;
 
 use crate::ConsumerGroupId;
 use crate::error::{Error, Result};
-use crate::partition::LogicalPartition;
+use crate::io::CursorId;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct StreamId(String);
@@ -48,13 +48,20 @@ impl CheckpointScope {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct CheckpointKey {
     pub scope: CheckpointScope,
-    pub partition: Option<LogicalPartition>,
+    pub cursor_id: CursorId,
 }
 
 impl CheckpointKey {
-    pub fn new(scope: CheckpointScope, partition: Option<LogicalPartition>) -> Self {
-        Self { scope, partition }
+    pub fn new(scope: CheckpointScope, cursor_id: CursorId) -> Self {
+        Self { scope, cursor_id }
     }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum CheckpointResumePolicy {
+    #[default]
+    UseInitialStart,
+    Error,
 }
 
 pub trait CheckpointStore<C>: Clone + Send + Sync + 'static {
@@ -66,7 +73,7 @@ pub trait CheckpointStore<C>: Clone + Send + Sync + 'static {
     fn load_scope<'a>(
         &'a self,
         scope: &'a CheckpointScope,
-    ) -> impl Future<Output = Result<Vec<(Option<LogicalPartition>, C)>>> + Send + 'a;
+    ) -> impl Future<Output = Result<Vec<(CursorId, C)>>> + Send + 'a;
 
     fn commit<'a>(
         &'a self,
@@ -85,5 +92,34 @@ mod tests {
         assert!(StreamId::new("billing.invoices").is_ok());
         assert!(StreamId::new("").is_err());
         assert!(StreamId::new("bad space").is_err());
+    }
+
+    #[test]
+    fn checkpoint_resume_policy_defaults_to_use_initial_start() {
+        assert_eq!(
+            CheckpointResumePolicy::default(),
+            CheckpointResumePolicy::UseInitialStart
+        );
+    }
+
+    #[test]
+    fn checkpoint_key_with_global_cursor_id_has_no_partition_subkey() {
+        let scope = CheckpointScope::new(
+            crate::ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+        let key = CheckpointKey::new(scope, CursorId::Global);
+        assert_eq!(key.cursor_id, CursorId::Global);
+    }
+
+    #[test]
+    fn checkpoint_key_with_named_cursor_id_preserves_value() {
+        let scope = CheckpointScope::new(
+            crate::ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
+        let key = CheckpointKey::new(scope, id.clone());
+        assert_eq!(key.cursor_id, id);
     }
 }
