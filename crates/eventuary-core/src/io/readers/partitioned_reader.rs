@@ -1,13 +1,25 @@
 //! Partitioned reader: in-process lane scheduler over any inner reader.
 //!
 //! Routes inner messages into N lanes by `partition_for(event, count)`.
-//! Each lane buffers up to `lane_capacity` events. The intake task acks
-//! the inner message as soon as the event is accepted into its lane, so
-//! source-level progress advances immediately. Downstream redelivery is
-//! in-memory only: a downstream `nack` puts the event back at the head of
-//! its lane, a downstream `ack` clears the lane's in-flight slot so the
-//! merged emit task can serve the next event from that lane (or any
+//! Each lane buffers up to `lane_capacity` events. Downstream redelivery
+//! is in-memory only: a downstream `ack` clears the lane's in-flight slot
+//! so the merged emit task can serve the next event from that lane (or any
 //! other ready lane).
+//!
+//! Ack modes:
+//!   - `AckInnerOnLaneAccept` (default): the intake task acks the inner
+//!     message as soon as the event is accepted into its lane, so
+//!     source-level progress advances immediately. A downstream `nack`
+//!     puts the event back at the head of its lane (in-memory redelivery).
+//!     Best for source-cursor readers (Postgres, SQLite) where the cursor
+//!     advances independently of consumer progress.
+//!   - `AckInnerOnDownstreamAck`: the inner acker is retained in the lane
+//!     buffer and forwarded into `PartitionAcker`. A downstream `ack`
+//!     calls the inner acker first, then releases the lane slot. A
+//!     downstream `nack` calls the inner nack and releases the lane (the
+//!     inner acker is responsible for redelivery semantics). Best for
+//!     destructive-ack brokers (SQS, Kafka) where the inner ack
+//!     irreversibly removes the message from the source.
 //!
 //! Lane scheduling:
 //!   - `RoundRobin`: cycle through lanes one event each.
@@ -46,6 +58,7 @@ pub struct PartitionedReaderConfig {
     pub partition_count: NonZeroU16,
     pub lane_capacity: NonZeroUsize,
     pub scheduling: LaneScheduling,
+    pub ack_mode: PartitionedAckMode,
 }
 
 impl Default for PartitionedReaderConfig {
@@ -56,6 +69,7 @@ impl Default for PartitionedReaderConfig {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
+            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
         }
     }
 }
@@ -64,6 +78,13 @@ impl Default for PartitionedReaderConfig {
 pub enum LaneScheduling {
     RoundRobin,
     QueueDepthWeighted { max_burst_per_lane: NonZeroUsize },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum PartitionedAckMode {
+    #[default]
+    AckInnerOnLaneAccept,
+    AckInnerOnDownstreamAck,
 }
 
 #[derive(Debug, Clone)]
@@ -122,42 +143,53 @@ impl<C> Cursor for PartitionedCursor<C> {
     }
 }
 
-struct InFlightItem<C> {
+struct InFlightItem<A: Acker, C> {
     id: u64,
     event: Event,
+    acker: A,
     cursor: C,
 }
 
-struct Lane<C> {
-    queue: VecDeque<BufferedItem<C>>,
-    in_flight: Option<InFlightItem<C>>,
+struct Lane<A: Acker, C> {
+    queue: VecDeque<BufferedItem<A, C>>,
+    in_flight: Option<InFlightItem<A, C>>,
     capacity: usize,
     burst_consumed: usize,
 }
 
-struct BufferedItem<C> {
+struct BufferedItem<A: Acker, C> {
     event: Event,
+    acker: A,
     cursor: C,
 }
 
-struct Lanes<C> {
-    lanes: Vec<Lane<C>>,
+struct Lanes<A: Acker, C> {
+    lanes: Vec<Lane<A, C>>,
     next_id: u64,
     last_served: usize,
 }
 
-pub struct PartitionAcker<C: Clone + Send + Sync + 'static> {
-    state: Arc<Mutex<Lanes<C>>>,
+pub struct PartitionAcker<
+    A: Acker + Clone + Send + Sync + 'static,
+    C: Clone + Send + Sync + 'static,
+> {
+    state: Arc<Mutex<Lanes<A, C>>>,
     notify: Arc<Notify>,
     lane_id: usize,
     id: u64,
+    inner_acker: A,
+    ack_mode: PartitionedAckMode,
 }
 
-impl<C> Acker for PartitionAcker<C>
+impl<A, C> Acker for PartitionAcker<A, C>
 where
+    A: Acker + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
 {
     async fn ack(&self) -> Result<()> {
+        if matches!(self.ack_mode, PartitionedAckMode::AckInnerOnDownstreamAck) {
+            self.inner_acker.ack().await?;
+        }
         let mut state = self.state.lock().await;
         let lane = &mut state.lanes[self.lane_id];
         if matches!(&lane.in_flight, Some(f) if f.id == self.id) {
@@ -169,6 +201,17 @@ where
     }
 
     async fn nack(&self) -> Result<()> {
+        if matches!(self.ack_mode, PartitionedAckMode::AckInnerOnDownstreamAck) {
+            self.inner_acker.nack().await?;
+            let mut state = self.state.lock().await;
+            let lane = &mut state.lanes[self.lane_id];
+            if matches!(&lane.in_flight, Some(f) if f.id == self.id) {
+                lane.in_flight = None;
+            }
+            drop(state);
+            self.notify.notify_waiters();
+            return Ok(());
+        }
         let mut state = self.state.lock().await;
         let lane = &mut state.lanes[self.lane_id];
         if let Some(in_flight) = lane.in_flight.take()
@@ -176,6 +219,7 @@ where
         {
             lane.queue.push_front(BufferedItem {
                 event: in_flight.event,
+                acker: in_flight.acker,
                 cursor: in_flight.cursor,
             });
         }
@@ -201,13 +245,13 @@ where
     R: Reader + Send + Sync + 'static,
     R::Cursor: Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
-    R::Acker: Acker + Send + Sync + 'static,
+    R::Acker: Acker + Clone + Send + Sync + 'static,
     R::Stream: Send + 'static,
 {
     type Subscription = PartitionedSubscription<R::Subscription, R::Cursor>;
-    type Acker = PartitionAcker<R::Cursor>;
+    type Acker = PartitionAcker<R::Acker, R::Cursor>;
     type Cursor = PartitionedCursor<R::Cursor>;
-    type Stream = SpawnedStream<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>;
+    type Stream = SpawnedStream<PartitionAcker<R::Acker, R::Cursor>, PartitionedCursor<R::Cursor>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner_subscription = match subscription.start {
@@ -234,8 +278,9 @@ where
         let count_u32 = std::num::NonZeroU32::new(count_nz.get() as u32).unwrap();
         let lane_capacity = self.config.lane_capacity.get();
         let scheduling = self.config.scheduling;
+        let ack_mode = self.config.ack_mode;
 
-        let lanes_inner: Vec<Lane<R::Cursor>> = (0..count)
+        let lanes_inner: Vec<Lane<R::Acker, R::Cursor>> = (0..count)
             .map(|_| Lane {
                 queue: VecDeque::new(),
                 in_flight: None,
@@ -243,7 +288,7 @@ where
                 burst_consumed: 0,
             })
             .collect();
-        let state: Arc<Mutex<Lanes<R::Cursor>>> = Arc::new(Mutex::new(Lanes {
+        let state: Arc<Mutex<Lanes<R::Acker, R::Cursor>>> = Arc::new(Mutex::new(Lanes {
             lanes: lanes_inner,
             next_id: 0,
             last_served: 0,
@@ -251,7 +296,7 @@ where
         let notify = Arc::new(Notify::new());
 
         let (tx, rx) = mpsc::channel::<
-            Result<Message<PartitionAcker<R::Cursor>, PartitionedCursor<R::Cursor>>>,
+            Result<Message<PartitionAcker<R::Acker, R::Cursor>, PartitionedCursor<R::Cursor>>>,
         >(64);
 
         let intake_done = Arc::new(AtomicBool::new(false));
@@ -292,10 +337,9 @@ where
                         drop(lanes);
                         let msg = msg_holder.take().expect("msg present");
                         let (event, inner_acker, cursor) = msg.into_parts();
-                        // Ack inner source FIRST so a failure terminates
-                        // the stream before the event becomes downstream-
-                        // visible via a lane buffer.
-                        if let Err(e) = inner_acker.ack().await {
+                        if matches!(ack_mode, PartitionedAckMode::AckInnerOnLaneAccept)
+                            && let Err(e) = inner_acker.ack().await
+                        {
                             let _ = intake_tx
                                 .send(Err(Error::Store(format!(
                                     "partitioned reader: inner acker failed: {e}"
@@ -304,9 +348,11 @@ where
                             return;
                         }
                         let mut lanes = intake_state.lock().await;
-                        lanes.lanes[lane_id]
-                            .queue
-                            .push_back(BufferedItem { event, cursor });
+                        lanes.lanes[lane_id].queue.push_back(BufferedItem {
+                            event,
+                            acker: inner_acker,
+                            cursor,
+                        });
                         drop(lanes);
                         intake_notify.notify_waiters();
                         break;
@@ -391,6 +437,7 @@ where
                         lane.in_flight = Some(InFlightItem {
                             id,
                             event: buffered.event.clone(),
+                            acker: buffered.acker.clone(),
                             cursor: buffered.cursor.clone(),
                         });
                         if idx == last {
@@ -410,14 +457,14 @@ where
                         {
                             lanes.lanes[idx].burst_consumed = 0;
                         }
-                        Some((idx, id, buffered.event, buffered.cursor))
+                        Some((idx, id, buffered.event, buffered.acker, buffered.cursor))
                     } else {
                         None
                     }
                 };
 
                 match pick {
-                    Some((lane_id, id, event, cursor)) => {
+                    Some((lane_id, id, event, inner_acker, cursor)) => {
                         let partition =
                             LogicalPartition::new(lane_id as u16, count_nz).expect("valid lane");
                         let acker = PartitionAcker {
@@ -425,6 +472,8 @@ where
                             notify: Arc::clone(&emit_notify),
                             lane_id,
                             id,
+                            inner_acker,
+                            ack_mode,
                         };
                         let cursor_out = PartitionedCursor::new(cursor, partition);
                         let msg = Message::new(event, acker, cursor_out);
@@ -601,6 +650,7 @@ mod tests {
             partition_count: NonZeroU16::new(n).unwrap(),
             lane_capacity: NonZeroUsize::new(cap).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
+            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
         }
     }
 
@@ -710,6 +760,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct FailingAcker;
     impl Acker for FailingAcker {
         async fn ack(&self) -> Result<()> {
@@ -803,6 +854,7 @@ mod tests {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
+            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
         };
         let p = PartitionedReader::new(reader, cfg);
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
@@ -827,6 +879,160 @@ mod tests {
             cold_pos < 16,
             "cold lane starved: cold delivered at position {cold_pos}, order={order:?}"
         );
+    }
+
+    #[test]
+    fn partitioned_reader_config_default_is_ack_inner_on_lane_accept() {
+        let config = PartitionedReaderConfig::default();
+        assert_eq!(config.ack_mode, PartitionedAckMode::AckInnerOnLaneAccept);
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingAcker {
+        ack_count: Arc<std::sync::atomic::AtomicUsize>,
+        nack_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Acker for CountingAcker {
+        async fn ack(&self) -> Result<()> {
+            self.ack_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn nack(&self) -> Result<()> {
+            self.nack_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct CountingAckReader {
+        events: std::sync::Mutex<Option<Vec<Event>>>,
+        acker: CountingAcker,
+    }
+
+    impl Reader for CountingAckReader {
+        type Subscription = ();
+        type Acker = CountingAcker;
+        type Cursor = TestCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<CountingAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let events = self.events.lock().unwrap().take().unwrap();
+            let acker = self.acker.clone();
+            let iter = events
+                .into_iter()
+                .enumerate()
+                .map(move |(i, e)| Ok(Message::new(e, acker.clone(), TestCursor(i as i64 + 1))));
+            Ok(Box::pin(futures::stream::iter(iter)))
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_mode_does_not_ack_inner_on_lane_accept() {
+        let acker = CountingAcker::default();
+        let reader = CountingAckReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+            acker: acker.clone(),
+        };
+        let config = PartitionedReaderConfig {
+            partition_count: NonZeroU16::new(2).unwrap(),
+            lane_capacity: NonZeroUsize::new(64).unwrap(),
+            scheduling: LaneScheduling::RoundRobin,
+            ack_mode: PartitionedAckMode::AckInnerOnDownstreamAck,
+        };
+        let partitioned = PartitionedReader::new(reader, config);
+
+        let mut stream = partitioned
+            .read(PartitionedSubscription::new(()))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(acker.ack_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        msg.ack().await.unwrap();
+
+        assert_eq!(acker.ack_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn delivery_mode_calls_inner_nack_on_downstream_nack() {
+        let acker = CountingAcker::default();
+        let reader = CountingAckReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+            acker: acker.clone(),
+        };
+        let config = PartitionedReaderConfig {
+            partition_count: NonZeroU16::new(2).unwrap(),
+            lane_capacity: NonZeroUsize::new(64).unwrap(),
+            scheduling: LaneScheduling::RoundRobin,
+            ack_mode: PartitionedAckMode::AckInnerOnDownstreamAck,
+        };
+        let partitioned = PartitionedReader::new(reader, config);
+
+        let mut stream = partitioned
+            .read(PartitionedSubscription::new(()))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            acker.nack_count.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        msg.nack().await.unwrap();
+
+        assert_eq!(
+            acker.nack_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn source_mode_acks_inner_on_lane_accept() {
+        let acker = CountingAcker::default();
+        let reader = CountingAckReader {
+            events: std::sync::Mutex::new(Some(vec![ev("k0")])),
+            acker: acker.clone(),
+        };
+        let config = PartitionedReaderConfig {
+            partition_count: NonZeroU16::new(2).unwrap(),
+            lane_capacity: NonZeroUsize::new(64).unwrap(),
+            scheduling: LaneScheduling::RoundRobin,
+            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
+        };
+        let partitioned = PartitionedReader::new(reader, config);
+
+        let mut stream = partitioned
+            .read(PartitionedSubscription::new(()))
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(acker.ack_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        msg.ack().await.unwrap();
+
+        assert_eq!(acker.ack_count.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
