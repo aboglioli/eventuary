@@ -1,16 +1,13 @@
 use std::collections::{HashMap, VecDeque};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use futures::Stream;
 use rusqlite::types::Value;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader};
+use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader, SpawnedStream};
 use eventuary_core::{
     Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
 };
@@ -109,27 +106,6 @@ impl Acker for SqliteCursorAcker {
     }
 }
 
-pub struct SqliteStream {
-    rx: mpsc::Receiver<Result<Message<SqliteCursorAcker, SqliteCursor>>>,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl Drop for SqliteStream {
-    fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
-    }
-}
-
-impl Stream for SqliteStream {
-    type Item = Result<Message<SqliteCursorAcker, SqliteCursor>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
 pub struct SqliteReader {
     conn: SqliteConn,
     config: SqliteReaderConfig,
@@ -145,7 +121,7 @@ impl Reader for SqliteReader {
     type Subscription = SqliteSubscription;
     type Acker = SqliteCursorAcker;
     type Cursor = SqliteCursor;
-    type Stream = SqliteStream;
+    type Stream = SpawnedStream<SqliteCursorAcker, SqliteCursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let conn = Arc::clone(&self.conn);
@@ -164,7 +140,7 @@ impl Reader for SqliteReader {
                 Ok(pos) => pos,
                 Err(e) => {
                     let _ = tx.send(Err(e)).await;
-                    return Ok(SqliteStream { rx, handle: None });
+                    return Ok(SpawnedStream::from_receiver(rx));
                 }
             };
 
@@ -261,10 +237,7 @@ impl Reader for SqliteReader {
             }
         });
 
-        Ok(SqliteStream {
-            rx,
-            handle: Some(handle),
-        })
+        Ok(SpawnedStream::new(rx, handle))
     }
 }
 

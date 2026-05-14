@@ -1,16 +1,13 @@
 use std::collections::{HashMap, VecDeque};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use futures::Stream;
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader};
+use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader, SpawnedStream};
 use eventuary_core::{
     Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
 };
@@ -110,27 +107,6 @@ impl Acker for PgCursorAcker {
     }
 }
 
-pub struct PgStream {
-    rx: mpsc::Receiver<Result<Message<PgCursorAcker, PgCursor>>>,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl Drop for PgStream {
-    fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
-    }
-}
-
-impl Stream for PgStream {
-    type Item = Result<Message<PgCursorAcker, PgCursor>>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
 pub struct PgReader {
     pool: PgPool,
     config: PgReaderConfig,
@@ -146,7 +122,7 @@ impl Reader for PgReader {
     type Subscription = PgSubscription;
     type Acker = PgCursorAcker;
     type Cursor = PgCursor;
-    type Stream = PgStream;
+    type Stream = SpawnedStream<PgCursorAcker, PgCursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let pool = self.pool.clone();
@@ -166,7 +142,7 @@ impl Reader for PgReader {
                 Ok(pos) => pos,
                 Err(e) => {
                     let _ = tx.send(Err(e)).await;
-                    return Ok(PgStream { rx, handle: None });
+                    return Ok(SpawnedStream::from_receiver(rx));
                 }
             };
 
@@ -263,10 +239,7 @@ impl Reader for PgReader {
             }
         });
 
-        Ok(PgStream {
-            rx,
-            handle: Some(handle),
-        })
+        Ok(SpawnedStream::new(rx, handle))
     }
 }
 
