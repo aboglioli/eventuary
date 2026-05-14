@@ -1,10 +1,10 @@
-use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
 
+use eventuary_core::io::CursorId;
 use eventuary_core::io::checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore};
-use eventuary_core::{Error, LogicalPartition, Result};
+use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
@@ -49,19 +49,13 @@ impl<C> SqliteCheckpointStore<C> {
     }
 }
 
-fn encode_partition(partition: Option<LogicalPartition>) -> (i32, i32) {
-    match partition {
-        Some(p) => (p.id() as i32, p.count() as i32),
-        None => (0, 1),
-    }
+fn encode_cursor_id(cursor_id: &CursorId) -> Result<String> {
+    serde_json::to_string(cursor_id)
+        .map_err(|e| Error::Serialization(format!("cursor_id encode: {e}")))
 }
 
-fn decode_partition(p: i32, count: i32) -> Option<LogicalPartition> {
-    if p == 0 && count == 1 {
-        return None;
-    }
-    let nz = NonZeroU16::new(count.max(1) as u16)?;
-    LogicalPartition::new(p as u16, nz).ok()
+fn decode_cursor_id(value: &str) -> Result<CursorId> {
+    serde_json::from_str(value).map_err(|e| Error::Serialization(format!("cursor_id decode: {e}")))
 }
 
 fn encode_cursor<C: Serialize>(cursor: &C) -> Result<String> {
@@ -81,7 +75,7 @@ where
     async fn load(&self, key: &CheckpointKey) -> Result<Option<C>> {
         let conn = Arc::clone(&self.conn);
         let relation = Arc::clone(&self.relation);
-        let (partition, partition_count) = encode_partition(key.partition);
+        let cursor_id = encode_cursor_id(&key.cursor_id)?;
         let group = key.scope.consumer_group_id.as_str().to_owned();
         let stream = key.scope.stream_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
@@ -89,16 +83,13 @@ where
             let sql = format!(
                 "SELECT cursor FROM {relation} \
                  WHERE consumer_group_id = ?1 \
-                   AND stream_id   = ?2 \
-                   AND partition         = ?3 \
-                   AND partition_count   = ?4"
+                   AND stream_id = ?2 \
+                   AND cursor_id = ?3"
             );
             let row = guard
-                .query_row(
-                    &sql,
-                    rusqlite::params![group, stream, partition, partition_count],
-                    |r| r.get::<_, String>(0),
-                )
+                .query_row(&sql, rusqlite::params![group, stream, cursor_id], |r| {
+                    r.get::<_, String>(0)
+                })
                 .map(Some)
                 .or_else(|e| match e {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -114,10 +105,7 @@ where
         .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
     }
 
-    async fn load_scope(
-        &self,
-        scope: &CheckpointScope,
-    ) -> Result<Vec<(Option<LogicalPartition>, C)>> {
+    async fn load_scope(&self, scope: &CheckpointScope) -> Result<Vec<(CursorId, C)>> {
         let conn = Arc::clone(&self.conn);
         let relation = Arc::clone(&self.relation);
         let group = scope.consumer_group_id.as_str().to_owned();
@@ -125,7 +113,7 @@ where
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             let sql = format!(
-                "SELECT partition, partition_count, cursor FROM {relation} \
+                "SELECT cursor_id, cursor FROM {relation} \
                  WHERE consumer_group_id = ?1 AND stream_id = ?2"
             );
             let mut stmt = guard
@@ -133,17 +121,13 @@ where
                 .map_err(|e| Error::Store(e.to_string()))?;
             let rows = stmt
                 .query_map(rusqlite::params![group, stream], |r| {
-                    Ok((
-                        r.get::<_, i32>(0)?,
-                        r.get::<_, i32>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })
                 .map_err(|e| Error::Store(e.to_string()))?;
             let mut out = Vec::new();
             for row in rows {
-                let (p, pc, json) = row.map_err(|e| Error::Store(e.to_string()))?;
-                out.push((decode_partition(p, pc), decode_cursor::<C>(json)?));
+                let (cursor_id_str, json) = row.map_err(|e| Error::Store(e.to_string()))?;
+                out.push((decode_cursor_id(&cursor_id_str)?, decode_cursor::<C>(json)?));
             }
             Ok(out)
         })
@@ -154,22 +138,22 @@ where
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let relation = Arc::clone(&self.relation);
-        let (partition, partition_count) = encode_partition(key.partition);
+        let cursor_id = encode_cursor_id(&key.cursor_id)?;
         let group = key.scope.consumer_group_id.as_str().to_owned();
         let stream = key.scope.stream_id.as_str().to_owned();
         let cursor_json = encode_cursor(&cursor)?;
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             let sql = format!(
-                "INSERT INTO {relation} (consumer_group_id, stream_id, partition, partition_count, cursor) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) \
-                 ON CONFLICT (consumer_group_id, stream_id, partition, partition_count) \
+                "INSERT INTO {relation} (consumer_group_id, stream_id, cursor_id, cursor) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (consumer_group_id, stream_id, cursor_id) \
                  DO UPDATE SET cursor = excluded.cursor"
             );
             guard
                 .execute(
                     &sql,
-                    rusqlite::params![group, stream, partition, partition_count, cursor_json],
+                    rusqlite::params![group, stream, cursor_id, cursor_json],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             Ok(())
@@ -203,5 +187,18 @@ mod tests {
         let decoded: WrappedCursor = decode_cursor(value).unwrap();
 
         assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn cursor_id_global_serializes_as_global_string() {
+        let v: String = serde_json::to_string(&CursorId::Global).unwrap();
+        assert_eq!(v, "\"global\"");
+    }
+
+    #[test]
+    fn cursor_id_named_serializes_as_inner_string() {
+        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
+        let v: String = serde_json::to_string(&id).unwrap();
+        assert_eq!(v, "\"partition:100:17\"");
     }
 }

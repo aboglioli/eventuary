@@ -150,8 +150,11 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     );
     let rows = store2.load_scope(&scope()).await.unwrap();
     assert!(!rows.is_empty(), "expected per-lane checkpoints persisted");
-    for (partition, _cursor) in &rows {
-        assert!(partition.is_some(), "partitioned cursor must be tagged");
+    for (cursor_id, _cursor) in &rows {
+        assert!(
+            matches!(cursor_id, eventuary_core::io::CursorId::Named(_)),
+            "partitioned cursor must be tagged with a named cursor id"
+        );
     }
 }
 

@@ -1,11 +1,11 @@
-use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{PgPool, Row};
 
+use eventuary_core::io::CursorId;
 use eventuary_core::io::checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore};
-use eventuary_core::{Error, LogicalPartition, Result};
+use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
 
@@ -49,19 +49,14 @@ impl<C> PgCheckpointStore<C> {
     }
 }
 
-fn encode_partition(partition: Option<LogicalPartition>) -> (i32, i32) {
-    match partition {
-        Some(p) => (p.id() as i32, p.count() as i32),
-        None => (0, 1),
-    }
+fn encode_cursor_id(cursor_id: &CursorId) -> Result<serde_json::Value> {
+    serde_json::to_value(cursor_id)
+        .map_err(|e| Error::Serialization(format!("cursor_id encode: {e}")))
 }
 
-fn decode_partition(p: i32, count: i32) -> Option<LogicalPartition> {
-    if p == 0 && count == 1 {
-        return None;
-    }
-    let nz = NonZeroU16::new(count.max(1) as u16)?;
-    LogicalPartition::new(p as u16, nz).ok()
+fn decode_cursor_id(value: serde_json::Value) -> Result<CursorId> {
+    serde_json::from_value(value)
+        .map_err(|e| Error::Serialization(format!("cursor_id decode: {e}")))
 }
 
 fn encode_cursor<C: Serialize>(cursor: &C) -> Result<serde_json::Value> {
@@ -79,20 +74,16 @@ where
     C: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn load(&self, key: &CheckpointKey) -> Result<Option<C>> {
-        let (partition, partition_count) = encode_partition(key.partition);
+        let cursor_id = encode_cursor_id(&key.cursor_id)?;
         let sql = format!(
             "SELECT cursor FROM {relation} \
-             WHERE consumer_group_id = $1 \
-               AND stream_id   = $2 \
-               AND partition         = $3 \
-               AND partition_count   = $4",
+             WHERE consumer_group_id = $1 AND stream_id = $2 AND cursor_id = $3",
             relation = self.relation
         );
         let row = sqlx::query(&sql)
             .bind(key.scope.consumer_group_id.as_str())
             .bind(key.scope.stream_id.as_str())
-            .bind(partition)
-            .bind(partition_count)
+            .bind(cursor_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -104,12 +95,9 @@ where
         }
     }
 
-    async fn load_scope(
-        &self,
-        scope: &CheckpointScope,
-    ) -> Result<Vec<(Option<LogicalPartition>, C)>> {
+    async fn load_scope(&self, scope: &CheckpointScope) -> Result<Vec<(CursorId, C)>> {
         let sql = format!(
-            "SELECT partition, partition_count, cursor FROM {relation} \
+            "SELECT cursor_id, cursor FROM {relation} \
              WHERE consumer_group_id = $1 AND stream_id = $2",
             relation = self.relation
         );
@@ -121,30 +109,28 @@ where
             .map_err(|e| Error::Store(e.to_string()))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let p: i32 = row.get("partition");
-            let pc: i32 = row.get("partition_count");
+            let cursor_id: serde_json::Value = row.get("cursor_id");
             let cursor: serde_json::Value = row.get("cursor");
-            out.push((decode_partition(p, pc), decode_cursor::<C>(cursor)?));
+            out.push((decode_cursor_id(cursor_id)?, decode_cursor::<C>(cursor)?));
         }
         Ok(out)
     }
 
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
-        let (partition, partition_count) = encode_partition(key.partition);
+        let cursor_id = encode_cursor_id(&key.cursor_id)?;
         let cursor_json = encode_cursor(&cursor)?;
         let sql = format!(
             "INSERT INTO {relation} \
-               (consumer_group_id, stream_id, partition, partition_count, cursor) \
-             VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (consumer_group_id, stream_id, partition, partition_count) \
+               (consumer_group_id, stream_id, cursor_id, cursor) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (consumer_group_id, stream_id, cursor_id) \
              DO UPDATE SET cursor = EXCLUDED.cursor",
             relation = self.relation
         );
         sqlx::query(&sql)
             .bind(key.scope.consumer_group_id.as_str())
             .bind(key.scope.stream_id.as_str())
-            .bind(partition)
-            .bind(partition_count)
+            .bind(cursor_id)
             .bind(cursor_json)
             .execute(&self.pool)
             .await
@@ -177,5 +163,18 @@ mod tests {
         let decoded: WrappedCursor = decode_cursor(value).unwrap();
 
         assert_eq!(decoded, cursor);
+    }
+
+    #[test]
+    fn cursor_id_global_serializes_as_global_string() {
+        let v: String = serde_json::to_string(&CursorId::Global).unwrap();
+        assert_eq!(v, "\"global\"");
+    }
+
+    #[test]
+    fn cursor_id_named_serializes_as_inner_string() {
+        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
+        let v: String = serde_json::to_string(&id).unwrap();
+        assert_eq!(v, "\"partition:100:17\"");
     }
 }
