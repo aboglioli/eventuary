@@ -49,14 +49,19 @@ impl<C> PgCheckpointStore<C> {
     }
 }
 
-fn encode_cursor_id(cursor_id: &CursorId) -> Result<serde_json::Value> {
-    serde_json::to_value(cursor_id)
-        .map_err(|e| Error::Serialization(format!("cursor_id encode: {e}")))
+fn encode_cursor_id(cursor_id: &CursorId) -> &str {
+    match cursor_id {
+        CursorId::Global => "global",
+        CursorId::Named(id) => id,
+    }
 }
 
-fn decode_cursor_id(value: serde_json::Value) -> Result<CursorId> {
-    serde_json::from_value(value)
-        .map_err(|e| Error::Serialization(format!("cursor_id decode: {e}")))
+fn decode_cursor_id(value: String) -> CursorId {
+    if value == "global" {
+        CursorId::Global
+    } else {
+        CursorId::Named(Arc::from(value))
+    }
 }
 
 fn encode_cursor<C: Serialize>(cursor: &C) -> Result<serde_json::Value> {
@@ -74,7 +79,7 @@ where
     C: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn load(&self, key: &CheckpointKey) -> Result<Option<C>> {
-        let cursor_id = encode_cursor_id(&key.cursor_id)?;
+        let cursor_id = encode_cursor_id(&key.cursor_id);
         let sql = format!(
             "SELECT cursor FROM {relation} \
              WHERE consumer_group_id = $1 AND stream_id = $2 AND cursor_id = $3",
@@ -109,15 +114,15 @@ where
             .map_err(|e| Error::Store(e.to_string()))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let cursor_id: serde_json::Value = row.get("cursor_id");
+            let cursor_id: String = row.get("cursor_id");
             let cursor: serde_json::Value = row.get("cursor");
-            out.push((decode_cursor_id(cursor_id)?, decode_cursor::<C>(cursor)?));
+            out.push((decode_cursor_id(cursor_id), decode_cursor::<C>(cursor)?));
         }
         Ok(out)
     }
 
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
-        let cursor_id = encode_cursor_id(&key.cursor_id)?;
+        let cursor_id = encode_cursor_id(&key.cursor_id);
         let cursor_json = encode_cursor(&cursor)?;
         let sql = format!(
             "INSERT INTO {relation} \
@@ -166,15 +171,16 @@ mod tests {
     }
 
     #[test]
-    fn cursor_id_global_serializes_as_global_string() {
-        let v: String = serde_json::to_string(&CursorId::Global).unwrap();
-        assert_eq!(v, "\"global\"");
+    fn cursor_id_global_encodes_as_plain_string() {
+        assert_eq!(encode_cursor_id(&CursorId::Global), "global");
+        assert_eq!(decode_cursor_id("global".to_owned()), CursorId::Global);
     }
 
     #[test]
-    fn cursor_id_named_serializes_as_inner_string() {
-        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
-        let v: String = serde_json::to_string(&id).unwrap();
-        assert_eq!(v, "\"partition:100:17\"");
+    fn cursor_id_named_roundtrips_unquoted() {
+        let id = CursorId::Named(Arc::from("partition:100:17"));
+        let encoded = encode_cursor_id(&id).to_owned();
+        assert_eq!(encoded, "partition:100:17");
+        assert_eq!(decode_cursor_id(encoded), id);
     }
 }

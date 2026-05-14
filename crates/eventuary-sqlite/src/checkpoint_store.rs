@@ -49,13 +49,19 @@ impl<C> SqliteCheckpointStore<C> {
     }
 }
 
-fn encode_cursor_id(cursor_id: &CursorId) -> Result<String> {
-    serde_json::to_string(cursor_id)
-        .map_err(|e| Error::Serialization(format!("cursor_id encode: {e}")))
+fn encode_cursor_id(cursor_id: &CursorId) -> String {
+    match cursor_id {
+        CursorId::Global => "global".to_owned(),
+        CursorId::Named(id) => id.to_string(),
+    }
 }
 
-fn decode_cursor_id(value: &str) -> Result<CursorId> {
-    serde_json::from_str(value).map_err(|e| Error::Serialization(format!("cursor_id decode: {e}")))
+fn decode_cursor_id(value: &str) -> CursorId {
+    if value == "global" {
+        CursorId::Global
+    } else {
+        CursorId::Named(Arc::from(value))
+    }
 }
 
 fn encode_cursor<C: Serialize>(cursor: &C) -> Result<String> {
@@ -75,7 +81,7 @@ where
     async fn load(&self, key: &CheckpointKey) -> Result<Option<C>> {
         let conn = Arc::clone(&self.conn);
         let relation = Arc::clone(&self.relation);
-        let cursor_id = encode_cursor_id(&key.cursor_id)?;
+        let cursor_id = encode_cursor_id(&key.cursor_id);
         let group = key.scope.consumer_group_id.as_str().to_owned();
         let stream = key.scope.stream_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
@@ -127,7 +133,7 @@ where
             let mut out = Vec::new();
             for row in rows {
                 let (cursor_id_str, json) = row.map_err(|e| Error::Store(e.to_string()))?;
-                out.push((decode_cursor_id(&cursor_id_str)?, decode_cursor::<C>(json)?));
+                out.push((decode_cursor_id(&cursor_id_str), decode_cursor::<C>(json)?));
             }
             Ok(out)
         })
@@ -138,7 +144,7 @@ where
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let relation = Arc::clone(&self.relation);
-        let cursor_id = encode_cursor_id(&key.cursor_id)?;
+        let cursor_id = encode_cursor_id(&key.cursor_id);
         let group = key.scope.consumer_group_id.as_str().to_owned();
         let stream = key.scope.stream_id.as_str().to_owned();
         let cursor_json = encode_cursor(&cursor)?;
@@ -190,15 +196,16 @@ mod tests {
     }
 
     #[test]
-    fn cursor_id_global_serializes_as_global_string() {
-        let v: String = serde_json::to_string(&CursorId::Global).unwrap();
-        assert_eq!(v, "\"global\"");
+    fn cursor_id_global_encodes_as_plain_string() {
+        assert_eq!(encode_cursor_id(&CursorId::Global), "global");
+        assert_eq!(decode_cursor_id("global"), CursorId::Global);
     }
 
     #[test]
-    fn cursor_id_named_serializes_as_inner_string() {
-        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
-        let v: String = serde_json::to_string(&id).unwrap();
-        assert_eq!(v, "\"partition:100:17\"");
+    fn cursor_id_named_roundtrips_unquoted() {
+        let id = CursorId::Named(Arc::from("partition:100:17"));
+        let encoded = encode_cursor_id(&id);
+        assert_eq!(encoded, "partition:100:17");
+        assert_eq!(decode_cursor_id(&encoded), id);
     }
 }

@@ -23,7 +23,7 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON {events} (timestamp);
 CREATE TABLE IF NOT EXISTS {offsets} (
     consumer_group_id TEXT  NOT NULL,
     stream_id         TEXT  NOT NULL DEFAULT 'default',
-    cursor_id         JSONB NOT NULL,
+    cursor_id         TEXT  NOT NULL,
     cursor            JSONB NOT NULL,
     PRIMARY KEY (consumer_group_id, stream_id, cursor_id)
 );
