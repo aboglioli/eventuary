@@ -1,22 +1,11 @@
 use crate::error::Result;
 use crate::event::Event;
-use crate::io::Acker;
+use crate::io::{Acker, Cursor};
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct NoCursor;
 
-impl crate::partition::CursorPartition for NoCursor {
-    fn partition(&self) -> Option<crate::partition::LogicalPartition> {
-        None
-    }
-}
-
-impl crate::partition::CommitCursor for NoCursor {
-    type Commit = NoCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        NoCursor
-    }
-}
+impl Cursor for NoCursor {}
 
 pub struct Message<A: Acker, C = NoCursor> {
     event: Event,

@@ -3,8 +3,8 @@ use std::time::Duration;
 use aws_sdk_sqs::Client;
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
-use eventuary_core::io::{BatchedStream, Message, Reader};
-use eventuary_core::{Result, SerializedEvent};
+use eventuary_core::io::{BatchedStream, Message, NoCursor, Reader};
+use eventuary_core::{Result, SerializedEvent, StartFrom, StartableSubscription};
 
 use crate::flusher::SqsFlusher;
 use crate::reader_config::SqsReaderConfig;
@@ -16,6 +16,12 @@ pub struct SqsSubscription {
     pub visibility_timeout: Duration,
     pub max_messages: i32,
     pub limit: Option<usize>,
+}
+
+impl StartableSubscription<NoCursor> for SqsSubscription {
+    fn with_start(self, _: StartFrom<NoCursor>) -> Self {
+        self
+    }
 }
 
 pub struct SqsReader {

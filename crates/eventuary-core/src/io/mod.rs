@@ -4,6 +4,7 @@ pub mod acker;
 mod batched_stream;
 pub mod checkpoint;
 pub mod consumers;
+mod cursor;
 pub mod filters;
 mod handler;
 mod message;
@@ -14,11 +15,14 @@ mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
 pub use batched_stream::BatchedStream;
-pub use checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore, StreamId};
+pub use checkpoint::{
+    CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore, StreamId,
+};
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
 };
+pub use cursor::{Cursor, CursorId};
 pub use filters::{
     AllFilter, AndFilter, ArcFilter, BoxFilter, EventFilter, Filter, FilterExt, NotFilter, OrFilter,
 };

@@ -8,12 +8,11 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
-use eventuary_core::io::{BatchedStream, Message, Reader};
+use eventuary_core::io::{BatchedStream, Cursor, Message, Reader};
 
 use crate::flusher::KafkaFlusher;
 use eventuary_core::{
-    CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
-    SerializedEvent, StartFrom,
+    ConsumerGroupId, Error, Event, Result, SerializedEvent, StartFrom, StartableSubscription,
 };
 
 use crate::flusher::KafkaOffsetToken;
@@ -41,18 +40,7 @@ impl Ord for KafkaCursor {
     }
 }
 
-impl CursorPartition for KafkaCursor {
-    fn partition(&self) -> Option<LogicalPartition> {
-        None
-    }
-}
-
-impl CommitCursor for KafkaCursor {
-    type Commit = KafkaCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        self.clone()
-    }
-}
+impl Cursor for KafkaCursor {}
 
 #[derive(Debug, Clone)]
 pub struct KafkaSubscription {
@@ -60,6 +48,13 @@ pub struct KafkaSubscription {
     pub consumer_group_id: ConsumerGroupId,
     pub start_from: StartFrom<KafkaCursor>,
     pub limit: Option<usize>,
+}
+
+impl StartableSubscription<KafkaCursor> for KafkaSubscription {
+    fn with_start(mut self, start: StartFrom<KafkaCursor>) -> Self {
+        self.start_from = start;
+        self
+    }
 }
 
 pub struct KafkaReader {
@@ -246,5 +241,21 @@ impl Reader for KafkaReader {
                 })
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eventuary_core::io::{Cursor, CursorId};
+
+    #[test]
+    fn kafka_cursor_id_is_global() {
+        let cursor = KafkaCursor {
+            topic: "events".to_owned(),
+            partition: 0,
+            offset: 42,
+        };
+        assert_eq!(cursor.id(), CursorId::Global);
     }
 }

@@ -7,10 +7,9 @@ use rusqlite::types::Value;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::{Acker, EventFilter, Message, Reader, SpawnedStream};
+use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader, SpawnedStream};
 use eventuary_core::{
-    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
-    StartableSubscription, TopicPattern,
+    Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
 };
 
 use crate::database::SqliteConn;
@@ -34,18 +33,7 @@ impl SqliteCursor {
     }
 }
 
-impl CursorPartition for SqliteCursor {
-    fn partition(&self) -> Option<LogicalPartition> {
-        None
-    }
-}
-
-impl CommitCursor for SqliteCursor {
-    type Commit = SqliteCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        *self
-    }
-}
+impl Cursor for SqliteCursor {}
 
 #[derive(Debug, Clone)]
 pub struct SqliteSubscription {
@@ -481,4 +469,15 @@ async fn fetch_batch(
     })
     .await
     .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eventuary_core::io::{Cursor, CursorId};
+
+    #[test]
+    fn sqlite_cursor_id_is_global() {
+        assert_eq!(SqliteCursor::new(42).id(), CursorId::Global);
+    }
 }

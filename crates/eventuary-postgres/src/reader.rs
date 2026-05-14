@@ -7,10 +7,9 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::{Acker, EventFilter, Message, Reader, SpawnedStream};
+use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader, SpawnedStream};
 use eventuary_core::{
-    CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
-    StartableSubscription, TopicPattern,
+    Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
 };
 
 use crate::relation::PgRelationName;
@@ -33,18 +32,7 @@ impl PgCursor {
     }
 }
 
-impl CursorPartition for PgCursor {
-    fn partition(&self) -> Option<LogicalPartition> {
-        None
-    }
-}
-
-impl CommitCursor for PgCursor {
-    type Commit = PgCursor;
-    fn commit_cursor(&self) -> Self::Commit {
-        *self
-    }
-}
+impl Cursor for PgCursor {}
 
 #[derive(Debug, Clone)]
 pub struct PgSubscription {
@@ -412,4 +400,15 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
         return Ok(dt.with_timezone(&Utc));
     }
     DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z").map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eventuary_core::io::{Cursor, CursorId};
+
+    #[test]
+    fn pg_cursor_id_is_global() {
+        assert_eq!(PgCursor::new(42).id(), CursorId::Global);
+    }
 }

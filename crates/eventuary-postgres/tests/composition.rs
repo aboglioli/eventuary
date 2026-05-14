@@ -10,8 +10,8 @@ use tokio::time::timeout;
 use eventuary_core::io::CheckpointStore;
 use eventuary_core::io::checkpoint::{CheckpointScope, StreamId};
 use eventuary_core::io::readers::{
-    CheckpointReader, CheckpointSubscription, PartitionedReader, PartitionedReaderConfig,
-    PartitionedSubscription,
+    CheckpointReader, CheckpointSubscription, PartitionedCursor, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription,
 };
 use eventuary_core::io::{EventFilter, Reader, Writer};
 use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
@@ -172,8 +172,10 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
             ..PartitionedReaderConfig::default()
         },
     );
-    let store =
-        PgCheckpointStore::<PgCursor>::new(pool.clone(), PgCheckpointStoreConfig::default());
+    let store = PgCheckpointStore::<PartitionedCursor<PgCursor>>::new(
+        pool.clone(),
+        PgCheckpointStoreConfig::default(),
+    );
     let checkpointed = CheckpointReader::new(partitioned, store);
 
     let inner = PartitionedSubscription::new(sub_for("acme"));
@@ -191,11 +193,17 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     }
     drop(stream);
 
-    let store2 = PgCheckpointStore::<PgCursor>::new(pool, PgCheckpointStoreConfig::default());
+    let store2 = PgCheckpointStore::<PartitionedCursor<PgCursor>>::new(
+        pool,
+        PgCheckpointStoreConfig::default(),
+    );
     let rows = store2.load_scope(&scope()).await.unwrap();
     assert!(!rows.is_empty(), "expected per-lane checkpoints persisted");
-    for (partition, _cursor) in &rows {
-        assert!(partition.is_some(), "partitioned cursor must be tagged");
+    for (cursor_id, _cursor) in &rows {
+        assert!(
+            matches!(cursor_id, eventuary_core::io::CursorId::Named(_)),
+            "partitioned cursor must be tagged with a named cursor id"
+        );
     }
 }
 
