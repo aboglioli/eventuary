@@ -3,7 +3,7 @@ use std::time::Duration;
 use aws_sdk_sqs::Client;
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
-use eventuary_core::io::{BatchedStream, Message, Reader, batched_source};
+use eventuary_core::io::{BatchedStream, Message, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
 use crate::flusher::SqsFlusher;
@@ -58,7 +58,7 @@ impl Reader for SqsReader {
         let visibility_timeout = subscription.visibility_timeout;
         let limit = subscription.limit;
 
-        Ok(batched_source(
+        Ok(BatchedStream::spawn(
             SqsFlusher::new(client.clone(), queue_url.clone()),
             self.config.ack_buffer.clone(),
             (max_messages as usize) * 2,

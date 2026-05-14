@@ -47,38 +47,38 @@ impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C> 
     }
 }
 
-pub fn batched_source<
-    T: Clone + Send + Sync + 'static,
-    C: Send + 'static,
-    F: BatchFlusher<Token = T> + 'static,
->(
-    flusher: F,
-    ack_config: AckBufferConfig,
-    channel_capacity: usize,
-    source_loop: impl FnOnce(
-        mpsc::Sender<Result<Message<BatchedAcker<T>, C>>>,
-        mpsc::Sender<AckCmd<T>>,
-        CancellationToken,
-    ) -> BoxFuture<'static, ()>
-    + Send
-    + 'static,
-) -> BatchedStream<T, F, C> {
-    let ack_buffer = AckBuffer::spawn(flusher, ack_config);
-    let tx_ack = ack_buffer.sender();
-    let (tx, rx) = mpsc::channel(channel_capacity);
-    let cancel = CancellationToken::new();
+impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C: Send + 'static>
+    BatchedStream<T, F, C>
+{
+    pub fn spawn(
+        flusher: F,
+        ack_config: AckBufferConfig,
+        channel_capacity: usize,
+        source_loop: impl FnOnce(
+            mpsc::Sender<Result<Message<BatchedAcker<T>, C>>>,
+            mpsc::Sender<AckCmd<T>>,
+            CancellationToken,
+        ) -> BoxFuture<'static, ()>
+        + Send
+        + 'static,
+    ) -> Self {
+        let ack_buffer = AckBuffer::spawn(flusher, ack_config);
+        let tx_ack = ack_buffer.sender();
+        let (tx, rx) = mpsc::channel(channel_capacity);
+        let cancel = CancellationToken::new();
 
-    let cancel_for_task = cancel.clone();
-    let tx_for_task = tx.clone();
-    let handle = tokio::spawn(async move {
-        source_loop(tx_for_task, tx_ack, cancel_for_task).await;
-    });
+        let cancel_for_task = cancel.clone();
+        let tx_for_task = tx.clone();
+        let handle = tokio::spawn(async move {
+            source_loop(tx_for_task, tx_ack, cancel_for_task).await;
+        });
 
-    BatchedStream {
-        rx,
-        cancel,
-        handle: Some(handle),
-        ack: ack_buffer,
+        BatchedStream {
+            rx,
+            cancel,
+            handle: Some(handle),
+            ack: ack_buffer,
+        }
     }
 }
 
@@ -127,7 +127,7 @@ mod tests {
             flushed: Arc::clone(&flusher_count),
         };
 
-        let mut stream = batched_source(
+        let mut stream = BatchedStream::spawn(
             flusher,
             AckBufferConfig::default(),
             64,
@@ -162,7 +162,7 @@ mod tests {
             flushed: Arc::new(AtomicUsize::new(0)),
         };
 
-        let stream = batched_source(
+        let stream = BatchedStream::spawn(
             flusher,
             AckBufferConfig::default(),
             1,

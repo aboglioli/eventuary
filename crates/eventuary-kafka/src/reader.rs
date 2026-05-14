@@ -8,7 +8,7 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
-use eventuary_core::io::{BatchedStream, Message, Reader, batched_source};
+use eventuary_core::io::{BatchedStream, Message, Reader};
 
 use crate::flusher::KafkaFlusher;
 use eventuary_core::{
@@ -176,7 +176,7 @@ impl Reader for KafkaReader {
         let max_poll_records = self.config.max_poll_records;
         let limit = subscription.limit;
 
-        Ok(batched_source(
+        Ok(BatchedStream::spawn(
             KafkaFlusher::new(Arc::clone(&consumer)),
             self.config.ack_buffer.clone(),
             max_poll_records,

@@ -13,7 +13,7 @@ mod spawned_stream;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
-pub use batched_stream::{BatchedStream, batched_source};
+pub use batched_stream::BatchedStream;
 pub use checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore, StreamId};
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
