@@ -8,6 +8,7 @@ mod handler;
 mod message;
 mod reader;
 pub mod readers;
+mod spawned_stream;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
@@ -22,4 +23,5 @@ pub use filters::{
 pub use handler::{ArcHandler, BoxHandler, DynHandler, FilteredHandler, Handler, HandlerExt};
 pub use message::{Message, NoCursor};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
+pub use spawned_stream::SpawnedStream;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};

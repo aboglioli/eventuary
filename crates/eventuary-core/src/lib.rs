@@ -56,7 +56,8 @@ pub use io::{
     BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
     DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
     FilterExt, FilteredHandler, Handler, HandlerExt, Message, NoCursor, Reader, ReaderExt,
-    RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt, backoff_delay,
+    RetryAction, RetryConfig, RetryHandler, RetryPolicy, SpawnedStream,
+    Writer, WriterExt, backoff_delay,
 };
 pub use metadata::Metadata;
 pub use namespace::Namespace;
