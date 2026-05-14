@@ -53,10 +53,12 @@ pub use event::{Event, EventId};
 pub use event_key::EventKey;
 pub use io::{
     Acker, AckerExt, ArcAcker, ArcFilter, ArcHandler, ArcReader, ArcWriter, BackgroundConsumer,
-    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter, ConsumerHandle,
-    DeadLetterWriter, DefaultRetryPolicy, DynAcker, DynHandler, DynReader, DynWriter, Filter,
-    FilterExt, FilteredHandler, Handler, HandlerExt, Message, NoCursor, Reader, ReaderExt,
-    RetryAction, RetryConfig, RetryHandler, RetryPolicy, Writer, WriterExt, backoff_delay,
+    BoxAcker, BoxFilter, BoxFuture, BoxHandler, BoxReader, BoxStream, BoxWriter,
+    CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
+    CheckpointResumePolicy, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, DynAcker,
+    DynHandler, DynReader, DynWriter, Filter, FilterExt, FilteredHandler, Handler, HandlerExt,
+    Message, NoCursor, Reader, ReaderExt, RetryAction, RetryConfig, RetryHandler, RetryPolicy,
+    Writer, WriterExt, backoff_delay,
 };
 pub use metadata::Metadata;
 pub use namespace::Namespace;

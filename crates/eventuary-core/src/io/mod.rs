@@ -11,7 +11,10 @@ pub mod readers;
 mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
-pub use checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore, StreamId};
+pub use checkpoint::{
+    CheckpointKey, CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
+    CheckpointResumePolicy, CheckpointScope, CheckpointStore, StreamId,
+};
 pub use consumers::{
     BackgroundConsumer, ConsumerHandle, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
     RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
