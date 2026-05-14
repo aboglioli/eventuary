@@ -22,6 +22,6 @@ mod reader_config;
 mod writer;
 
 pub use flusher::{KafkaFlusher, KafkaOffsetToken};
-pub use reader::{KafkaCursor, KafkaReader, KafkaStream, KafkaSubscription};
+pub use reader::{KafkaCursor, KafkaReader, KafkaSubscription};
 pub use reader_config::KafkaReaderConfig;
 pub use writer::KafkaWriter;

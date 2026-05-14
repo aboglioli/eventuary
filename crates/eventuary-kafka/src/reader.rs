@@ -1,18 +1,14 @@
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rdkafka::ClientConfig;
 use rdkafka::Message as KafkaMessage;
 use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{Consumer, StreamConsumer};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
-use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
-use eventuary_core::io::{Message, Reader};
+use eventuary_core::io::acker::{Acker, BatchedAcker};
+use eventuary_core::io::{BatchedStream, Message, Reader, batched_source};
 use eventuary_core::{
     CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
     SerializedEvent, StartFrom,
@@ -113,7 +109,7 @@ impl KafkaReader {
         }
     }
 
-    pub async fn read(&self) -> Result<KafkaStream> {
+    pub async fn read(&self) -> Result<BatchedStream<KafkaOffsetToken, KafkaCursor>> {
         eventuary_core::io::Reader::read(self, self.default_subscription()).await
     }
 }
@@ -151,38 +147,11 @@ fn apply_timestamp_seek(
     Ok(())
 }
 
-pub struct KafkaStream {
-    rx: mpsc::Receiver<Result<Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>>>,
-    cancel: CancellationToken,
-    handle: Option<tokio::task::JoinHandle<()>>,
-    ack_buffer: Arc<AckBuffer<KafkaFlusher>>,
-}
-
-impl Drop for KafkaStream {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
-        let buf = Arc::clone(&self.ack_buffer);
-        tokio::spawn(async move {
-            let _ = buf.shutdown().await;
-        });
-    }
-}
-
-impl Stream for KafkaStream {
-    type Item = Result<Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>>;
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
-    }
-}
-
 impl Reader for KafkaReader {
     type Subscription = KafkaSubscription;
     type Acker = BatchedAcker<KafkaOffsetToken>;
     type Cursor = KafkaCursor;
-    type Stream = KafkaStream;
+    type Stream = BatchedStream<KafkaOffsetToken, KafkaCursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         if subscription.consumer_group_id != self.config.consumer_group_id {
@@ -202,88 +171,81 @@ impl Reader for KafkaReader {
         }
 
         let consumer = Arc::clone(&self.consumer);
-        let flusher = KafkaFlusher::new(Arc::clone(&consumer));
-        let ack_buffer = AckBuffer::spawn(flusher, self.config.ack_buffer.clone());
-        let tx_ack = ack_buffer.sender();
-
-        let (tx, rx) = mpsc::channel(self.config.max_poll_records);
-        let cancel = CancellationToken::new();
-        let cancel_for_task = cancel.clone();
+        let max_poll_records = self.config.max_poll_records;
         let limit = subscription.limit;
 
-        let handle = tokio::spawn(async move {
-            let mut delivered = 0usize;
-            let mut stream = consumer.stream();
-
-            loop {
-                if cancel_for_task.is_cancelled() {
-                    break;
-                }
-                let next = tokio::select! {
-                    n = stream.next() => n,
-                    _ = cancel_for_task.cancelled() => return,
-                };
-                let msg = match next {
-                    None => return,
-                    Some(Err(e)) => {
-                        tracing::warn!("kafka stream error: {e}");
-                        continue;
+        Ok(batched_source(
+            KafkaFlusher::new(Arc::clone(&consumer)),
+            self.config.ack_buffer.clone(),
+            max_poll_records,
+            move |tx, tx_ack, cancel| {
+                Box::pin(async move {
+                    let mut delivered = 0usize;
+                    let mut stream = consumer.stream();
+                    loop {
+                        let next = tokio::select! {
+                            n = stream.next() => n,
+                            _ = cancel.cancelled() => return,
+                        };
+                        let msg = match next {
+                            None => return,
+                            Some(Err(e)) => {
+                                tracing::warn!("kafka stream error: {e}");
+                                continue;
+                            }
+                            Some(Ok(m)) => m,
+                        };
+                        let token = KafkaOffsetToken {
+                            topic: msg.topic().to_owned(),
+                            partition: msg.partition(),
+                            offset: msg.offset(),
+                        };
+                        let body = match msg.payload() {
+                            Some(p) => p,
+                            None => {
+                                let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                                continue;
+                            }
+                        };
+                        let serialized: SerializedEvent =
+                            match serde_json::from_slice(body) {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    let _ =
+                                        BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                                    continue;
+                                }
+                            };
+                        let event: Event = match serialized.to_event() {
+                            Ok(e) => e,
+                            Err(_) => {
+                                let _ =
+                                    BatchedAcker::new(token, tx_ack.clone()).ack().await;
+                                continue;
+                            }
+                        };
+                        let cursor = KafkaCursor {
+                            topic: token.topic.clone(),
+                            partition: token.partition,
+                            offset: token.offset,
+                        };
+                        let acker = BatchedAcker::new(token, tx_ack.clone());
+                        if tx
+                            .send(Ok(Message::new(event, acker, cursor)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        delivered += 1;
+                        if let Some(l) = limit
+                            && delivered >= l
+                        {
+                            return;
+                        }
                     }
-                    Some(Ok(m)) => m,
-                };
-                let token = KafkaOffsetToken {
-                    topic: msg.topic().to_owned(),
-                    partition: msg.partition(),
-                    offset: msg.offset(),
-                };
-                let body = match msg.payload() {
-                    Some(p) => p,
-                    None => {
-                        let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                        continue;
-                    }
-                };
-                let serialized: SerializedEvent = match serde_json::from_slice(body) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                        continue;
-                    }
-                };
-                let event: Event = match serialized.to_event() {
-                    Ok(e) => e,
-                    Err(_) => {
-                        let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                        continue;
-                    }
-                };
-                let cursor = KafkaCursor {
-                    topic: token.topic.clone(),
-                    partition: token.partition,
-                    offset: token.offset,
-                };
-                let acker = BatchedAcker::new(token, tx_ack.clone());
-                if tx
-                    .send(Ok(Message::new(event, acker, cursor)))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                delivered += 1;
-                if let Some(l) = limit
-                    && delivered >= l
-                {
-                    return;
-                }
-            }
-        });
-
-        Ok(KafkaStream {
-            rx,
-            cancel,
-            handle: Some(handle),
-            ack_buffer,
-        })
+                })
+            },
+        ))
     }
 }
