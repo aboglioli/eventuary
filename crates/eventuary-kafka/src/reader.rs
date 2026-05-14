@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use eventuary_core::io::acker::{AckBuffer, Acker, BatchedAcker};
+use eventuary_core::io::checkpoint::{CheckpointResumableSubscription, CheckpointResume};
 use eventuary_core::io::{Message, Reader};
 use eventuary_core::{
     CommitCursor, ConsumerGroupId, CursorPartition, Error, Event, LogicalPartition, Result,
@@ -62,6 +63,13 @@ pub struct KafkaSubscription {
     pub consumer_group_id: ConsumerGroupId,
     pub start_from: StartFrom<KafkaCursor>,
     pub limit: Option<usize>,
+}
+
+impl CheckpointResumableSubscription<KafkaCursor> for KafkaSubscription {
+    fn with_checkpoint_resume(mut self, resume: CheckpointResume<KafkaCursor>) -> Self {
+        self.start_from = resume.start().clone();
+        self
+    }
 }
 
 pub struct KafkaReader {
@@ -285,5 +293,40 @@ impl Reader for KafkaReader {
             handle: Some(handle),
             ack_buffer,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use eventuary_core::io::checkpoint::{
+        CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
+    };
+
+    fn cursor(offset: i64) -> KafkaCursor {
+        KafkaCursor {
+            topic: "events".to_owned(),
+            partition: 0,
+            offset,
+        }
+    }
+
+    #[test]
+    fn kafka_subscription_applies_checkpoint_resume_start() {
+        let subscription = KafkaSubscription {
+            topics: vec!["events".to_owned()],
+            consumer_group_id: ConsumerGroupId::new("g").unwrap(),
+            start_from: StartFrom::Latest,
+            limit: None,
+        };
+        let resume = CheckpointResume::new(
+            StartFrom::After(cursor(42)),
+            vec![CheckpointResumePoint::new(None, cursor(42))],
+        );
+
+        let resumed = subscription.with_checkpoint_resume(resume);
+
+        assert_eq!(resumed.start_from, StartFrom::After(cursor(42)));
     }
 }

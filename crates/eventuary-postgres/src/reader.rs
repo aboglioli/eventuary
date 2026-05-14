@@ -10,6 +10,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+use eventuary_core::io::checkpoint::{CheckpointResumableSubscription, CheckpointResume};
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
     CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
@@ -72,6 +73,12 @@ impl StartableSubscription<PgCursor> for PgSubscription {
     fn with_start(mut self, start: StartFrom<PgCursor>) -> Self {
         self.start = start;
         self
+    }
+}
+
+impl CheckpointResumableSubscription<PgCursor> for PgSubscription {
+    fn with_checkpoint_resume(self, resume: CheckpointResume<PgCursor>) -> Self {
+        self.with_start(resume.start().clone())
     }
 }
 
@@ -439,4 +446,26 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
         return Ok(dt.with_timezone(&Utc));
     }
     DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z").map(|dt| dt.with_timezone(&Utc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use eventuary_core::io::checkpoint::{
+        CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
+    };
+
+    #[test]
+    fn pg_subscription_applies_checkpoint_resume_start() {
+        let subscription = PgSubscription::default();
+        let resume = CheckpointResume::new(
+            StartFrom::After(PgCursor::new(42)),
+            vec![CheckpointResumePoint::new(None, PgCursor::new(42))],
+        );
+
+        let resumed = subscription.with_checkpoint_resume(resume);
+
+        assert_eq!(resumed.start, StartFrom::After(PgCursor::new(42)));
+    }
 }

@@ -10,6 +10,7 @@ use rusqlite::types::Value;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+use eventuary_core::io::checkpoint::{CheckpointResumableSubscription, CheckpointResume};
 use eventuary_core::io::{Acker, EventFilter, Message, Reader};
 use eventuary_core::{
     CommitCursor, CursorPartition, Error, LogicalPartition, Result, SerializedEvent, StartFrom,
@@ -73,6 +74,12 @@ impl StartableSubscription<SqliteCursor> for SqliteSubscription {
     fn with_start(mut self, start: StartFrom<SqliteCursor>) -> Self {
         self.start = start;
         self
+    }
+}
+
+impl CheckpointResumableSubscription<SqliteCursor> for SqliteSubscription {
+    fn with_checkpoint_resume(self, resume: CheckpointResume<SqliteCursor>) -> Self {
+        self.with_start(resume.start().clone())
     }
 }
 
@@ -508,4 +515,26 @@ async fn fetch_batch(
     })
     .await
     .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use eventuary_core::io::checkpoint::{
+        CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
+    };
+
+    #[test]
+    fn sqlite_subscription_applies_checkpoint_resume_start() {
+        let subscription = SqliteSubscription::default();
+        let resume = CheckpointResume::new(
+            StartFrom::After(SqliteCursor::new(42)),
+            vec![CheckpointResumePoint::new(None, SqliteCursor::new(42))],
+        );
+
+        let resumed = subscription.with_checkpoint_resume(resume);
+
+        assert_eq!(resumed.start, StartFrom::After(SqliteCursor::new(42)));
+    }
 }
