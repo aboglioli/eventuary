@@ -8,12 +8,12 @@
 //! **synchronously** — store commit errors propagate to the caller and
 //! to consumers of the stream.
 //!
-//! The acker holds the cursor type the store persists: `Commit`. The
-//! delivery cursor is `R::Cursor`; `CommitCursor::commit_cursor()`
-//! produces the value the store sees. For partitioned composition
-//! (`PartitionedReader<R>`) the delivery cursor is
-//! `PartitionedCursor<R::Cursor>` and its `commit_cursor()` strips the
-//! partition envelope.
+//! The checkpoint store persists the same cursor type the inner reader
+//! emits. `CheckpointReader` uses `CursorPartition::partition()` only to
+//! build the checkpoint key; it does not transform the cursor before
+//! storing or resuming. For partitioned composition
+//! (`PartitionedReader<R>`), the persisted value is
+//! `PartitionedCursor<R::Cursor>`.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -28,7 +28,7 @@ use crate::io::checkpoint::{
     CheckpointKey, CheckpointResumePolicy, CheckpointScope, CheckpointStore,
 };
 use crate::io::{Acker, Message, Reader};
-use crate::partition::{CommitCursor, CursorPartition, LogicalPartition};
+use crate::partition::{CursorPartition, LogicalPartition};
 use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
@@ -173,17 +173,16 @@ impl<R, S> CheckpointReader<R, S> {
 impl<R, S> Reader for CheckpointReader<R, S>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: CommitCursor + CursorPartition + Send + Sync + 'static,
-    <R::Cursor as CommitCursor>::Commit: Send + Sync + 'static,
-    R::Subscription: StartableSubscription<<R::Cursor as CommitCursor>::Commit>,
+    R::Cursor: Clone + Ord + CursorPartition + Send + Sync + 'static,
+    R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
-    S: CheckpointStore<<R::Cursor as CommitCursor>::Commit>,
+    S: CheckpointStore<R::Cursor>,
 {
     type Subscription = CheckpointSubscription<R::Subscription>;
-    type Acker = CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S>;
-    type Cursor = <R::Cursor as CommitCursor>::Commit;
-    type Stream = CheckpointStream<R::Acker, <R::Cursor as CommitCursor>::Commit, S>;
+    type Acker = CheckpointAcker<R::Acker, R::Cursor, S>;
+    type Cursor = R::Cursor;
+    type Stream = CheckpointStream<R::Acker, R::Cursor, S>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let scope = subscription.scope.clone();
@@ -199,12 +198,9 @@ where
             )));
         }
 
-        let known_from_checkpoints: HashMap<
-            Option<LogicalPartition>,
-            <R::Cursor as CommitCursor>::Commit,
-        > = stored.into_iter().collect();
-        let min_cursor: Option<<R::Cursor as CommitCursor>::Commit> =
-            known_from_checkpoints.values().min().cloned();
+        let known_from_checkpoints: HashMap<Option<LogicalPartition>, R::Cursor> =
+            stored.into_iter().collect();
+        let min_cursor: Option<R::Cursor> = known_from_checkpoints.values().min().cloned();
 
         let inner_subscription = match min_cursor {
             Some(cursor) => subscription
@@ -231,16 +227,10 @@ where
             }
             Err(e) => return Err(e),
         };
-        let state: PendingMap<<R::Cursor as CommitCursor>::Commit> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let state: PendingMap<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
         let max_pending = self.config.max_pending_per_key;
         let (tx, rx) = mpsc::channel::<
-            Result<
-                Message<
-                    CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S>,
-                    <R::Cursor as CommitCursor>::Commit,
-                >,
-            >,
+            Result<Message<CheckpointAcker<R::Acker, R::Cursor, S>, R::Cursor>>,
         >(64);
         let known = Arc::new(known);
 
@@ -259,9 +249,9 @@ where
                     }
                 };
                 let cursor_partition = msg.cursor().partition();
-                let commit = msg.cursor().commit_cursor();
+                let cursor = msg.cursor().clone();
                 if let Some(stored_cursor) = known_for_stream.get(&cursor_partition)
-                    && commit <= *stored_cursor
+                    && cursor <= *stored_cursor
                 {
                     let _ = msg.ack().await;
                     continue;
@@ -284,18 +274,17 @@ where
                     let entry = state_guard
                         .entry(cursor_partition)
                         .or_insert_with(PendingState::new);
-                    entry.record(commit.clone())
+                    entry.record(cursor.clone())
                 };
-                let acker: CheckpointAcker<R::Acker, <R::Cursor as CommitCursor>::Commit, S> =
-                    CheckpointAcker {
-                        inner: inner_acker,
-                        scope: scope_for_stream.clone(),
-                        partition: cursor_partition,
-                        index,
-                        state: Arc::clone(&state_for_stream),
-                        store: store_for_stream.clone(),
-                    };
-                let out = Message::new(event, acker, commit);
+                let acker: CheckpointAcker<R::Acker, R::Cursor, S> = CheckpointAcker {
+                    inner: inner_acker,
+                    scope: scope_for_stream.clone(),
+                    partition: cursor_partition,
+                    index,
+                    state: Arc::clone(&state_for_stream),
+                    store: store_for_stream.clone(),
+                };
+                let out = Message::new(event, acker, cursor);
                 if tx.send(Ok(out)).await.is_err() {
                     return;
                 }
@@ -366,12 +355,6 @@ mod tests {
     impl CursorPartition for TestCursor {
         fn partition(&self) -> Option<LogicalPartition> {
             None
-        }
-    }
-    impl CommitCursor for TestCursor {
-        type Commit = TestCursor;
-        fn commit_cursor(&self) -> Self::Commit {
-            *self
         }
     }
 
