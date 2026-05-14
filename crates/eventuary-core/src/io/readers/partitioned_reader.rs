@@ -34,9 +34,11 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::io::checkpoint::{
+    CheckpointResumableSubscription, CheckpointResume, CheckpointResumePoint,
+};
 use crate::io::{Acker, Message, Reader};
 use crate::partition::{CommitCursor, CursorPartition, LogicalPartition, partition_for};
-use crate::start_from::StartableSubscription;
 
 #[derive(Debug, Clone)]
 pub struct PartitionedReaderConfig {
@@ -64,27 +66,33 @@ pub enum LaneScheduling {
 }
 
 #[derive(Debug, Clone)]
-pub struct PartitionedSubscription<S> {
+pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
     pub inner: S,
+    resume_points: Vec<CheckpointResumePoint<C>>,
 }
 
-impl<S> PartitionedSubscription<S> {
+impl<S, C> PartitionedSubscription<S, C> {
     pub fn new(inner: S) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            resume_points: Vec::new(),
+        }
+    }
+
+    pub fn resume_points(&self) -> &[CheckpointResumePoint<C>] {
+        &self.resume_points
     }
 }
 
-/// `PartitionedSubscription` resumes from a checkpoint by delegating to
-/// the inner subscription with the same cursor — the partition envelope
-/// is stripped by `CheckpointReader` via `CommitCursor`.
-impl<S, C> StartableSubscription<C> for PartitionedSubscription<S>
+impl<S, C> CheckpointResumableSubscription<C> for PartitionedSubscription<S, C>
 where
-    S: StartableSubscription<C>,
+    S: Clone + Send + 'static,
+    C: Clone + Send + 'static,
 {
-    fn with_start(self, start: crate::start_from::StartFrom<C>) -> Self {
-        Self {
-            inner: self.inner.with_start(start),
-        }
+    fn with_checkpoint_resume(mut self, resume: CheckpointResume<C>) -> Self {
+        let (_start, points) = resume.into_parts();
+        self.resume_points = points;
+        self
     }
 }
 
@@ -226,12 +234,16 @@ impl<R> PartitionedReader<R> {
 impl<R> Reader for PartitionedReader<R>
 where
     R: Reader + Send + Sync + 'static,
-    R::Subscription: Send + 'static,
+    R::Subscription: Clone + Send + 'static,
     R::Stream: Send + 'static,
     R::Acker: Acker + Send + Sync + 'static,
     R::Cursor: Clone + Send + Sync + 'static,
+    R::Cursor: CommitCursor,
+    <R::Cursor as CommitCursor>::Commit: Clone + Ord + Send + Sync + 'static,
+    R::Subscription: CheckpointResumableSubscription<<R::Cursor as CommitCursor>::Commit>,
 {
-    type Subscription = PartitionedSubscription<R::Subscription>;
+    type Subscription =
+        PartitionedSubscription<R::Subscription, <R::Cursor as CommitCursor>::Commit>;
     type Acker = PartitionAcker<R::Cursor>;
     type Cursor = PartitionedCursor<R::Cursor>;
     type Stream = PartitionedStream<R::Cursor>;
@@ -483,8 +495,42 @@ mod tests {
     use crate::payload::Payload;
     use std::time::Duration;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
     struct TestCursor(i64);
+
+    impl crate::partition::CursorPartition for TestCursor {
+        fn partition(&self) -> Option<LogicalPartition> {
+            None
+        }
+    }
+
+    impl crate::partition::CommitCursor for TestCursor {
+        type Commit = TestCursor;
+
+        fn commit_cursor(&self) -> Self::Commit {
+            *self
+        }
+    }
+
+    impl CheckpointResumableSubscription<TestCursor> for () {
+        fn with_checkpoint_resume(self, _: CheckpointResume<TestCursor>) -> Self {
+            self
+        }
+    }
+
+    #[test]
+    fn partitioned_subscription_stores_checkpoint_resume_metadata_without_rewriting_inner() {
+        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let subscription =
+            PartitionedSubscription::new(()).with_checkpoint_resume(CheckpointResume::new(
+                crate::start_from::StartFrom::After(TestCursor(10)),
+                vec![CheckpointResumePoint::new(Some(partition), TestCursor(10))],
+            ));
+
+        assert_eq!(subscription.resume_points().len(), 1);
+        assert_eq!(subscription.resume_points()[0].partition(), Some(partition));
+        assert_eq!(*subscription.resume_points()[0].cursor(), TestCursor(10));
+    }
 
     struct VecReader {
         events: std::sync::Mutex<Option<Vec<Event>>>,
