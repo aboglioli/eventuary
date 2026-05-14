@@ -1,7 +1,9 @@
 use std::num::{NonZeroU16, NonZeroU32};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::io::CursorId;
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -40,11 +42,14 @@ impl LogicalPartition {
     pub fn count_nz(&self) -> NonZeroU16 {
         self.count
     }
-}
 
-/// Cursor extension: report which logical partition a cursor belongs to.
-pub trait CursorPartition {
-    fn partition(&self) -> Option<LogicalPartition>;
+    pub fn to_cursor_id(&self) -> CursorId {
+        CursorId::Named(Arc::from(format!(
+            "partition:{}:{}",
+            self.count(),
+            self.id()
+        )))
+    }
 }
 
 /// Canonical event → partition mapping.
@@ -76,7 +81,10 @@ pub fn fnv1a_u64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::io::CursorId;
     use crate::{EventKey, Payload};
 
     fn ev_with_key(key: &str) -> Event {
@@ -108,6 +116,13 @@ mod tests {
         let p = LogicalPartition::new(3, count).unwrap();
         assert_eq!(p.id(), 3);
         assert_eq!(p.count(), 8);
+    }
+
+    #[test]
+    fn logical_partition_to_cursor_id_produces_stable_named_id() {
+        let partition = LogicalPartition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
+        let id = partition.to_cursor_id();
+        assert_eq!(id, CursorId::Named(Arc::from("partition:100:17")));
     }
 
     #[test]
