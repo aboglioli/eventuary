@@ -526,6 +526,28 @@ adds clarity.
 - Internal `crate::` paths: import. Never write `crate::a::b::C` in a type
   position or expression.
 
+### Re-export Layering
+
+Each crate exposes only its **base abstractions** and **cross-cutting value types** at the top-level public path. **Implementations**, wrappers, and their auxiliary types are accessed via the submodule path that owns them.
+
+**`eventuary-core`:**
+
+| Layer | Path | Examples |
+|---|---|---|
+| Base trait + companions (`Dyn`/`Box`/`Arc`/`Ext`) | `eventuary_core::*` or `eventuary_core::io::*` | `Acker`, `Reader`, `Writer`, `Handler`, `Filter`, `Cursor` |
+| Cross-cutting value type | `eventuary_core::*` or `eventuary_core::io::*` | `Message`, `NoCursor`, `CursorId`, `StreamId`, `ConsumerGroupId`, `BoxFuture` |
+| Trait implementation / wrapper | `eventuary_core::io::<module>::*` | `io::reader::CheckpointReader`, `io::handler::RetryHandler`, `io::consumer::BackgroundConsumer`, `io::stream::BatchedStream`, `io::acker::OnceAcker`, `io::filter::EventFilter` |
+| Auxiliary type of an implementation | same submodule as the implementation | `io::reader::CheckpointKey`, `io::reader::PartitionedCursor`, `io::handler::RetryPolicy` |
+
+**Backend crates** (`eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`, `eventuary-sqs`, `eventuary-kafka`):
+
+| Layer | Path | Examples |
+|---|---|---|
+| Primary entry-point type (the `Reader` / `Writer` / `CheckpointStore` implementation) | crate root | `eventuary_postgres::PgReader`, `eventuary_sqlite::SqliteCheckpointStore` |
+| Auxiliary type (cursor, acker, subscription, config, flusher, relation name, database utility) | submodule path | `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::database::SqliteDatabaseConfig` |
+
+This layering keeps the "first-discovered" public surface small and forces deeper imports to be explicit about which module owns the type. Module submodules carrying impls are declared `pub mod` so the submodule path is reachable; the trait file is private since the trait is already re-exported flat by its parent module.
+
 ## Decisions Log
 
 Worth knowing when changing the codebase:

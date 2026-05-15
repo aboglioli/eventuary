@@ -673,7 +673,7 @@ mod tests {
         // Stored cursor < VecReader's emitted TestCursor(1) so the
         // CheckpointReader skip-already-stored guard does not swallow
         // the resumed event if partition assignment happens to match.
-        use crate::io::{
+        use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
         use crate::partition::LogicalPartition;
@@ -731,7 +731,7 @@ mod tests {
     async fn checkpoint_reader_over_old_partitions_only_falls_back() {
         // Stored row is incompatible (partition_count=8 vs configured=4);
         // test exercises the fallback path.
-        use crate::io::{
+        use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
         use crate::partition::LogicalPartition;

@@ -7,11 +7,12 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
-use eventuary_core::io::{
+use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::reader::{
     CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription, PartitionedCursor,
-    PartitionedReader, PartitionedReaderConfig, PartitionedSubscription, StreamId,
+    PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
-use eventuary_core::io::{EventFilter, Reader, Writer};
+use eventuary_core::io::{Reader, StreamId, Writer};
 use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
 use eventuary_postgres::{
     PgCheckpointStore, PgCheckpointStoreConfig, PgCursor, PgDatabase, PgEventWriter, PgReader,

@@ -7,7 +7,9 @@ use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::{Acker, Cursor, EventFilter, Message, Reader, SpawnedStream};
+use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::stream::SpawnedStream;
+use eventuary_core::io::{Acker, Cursor, Message, Reader};
 use eventuary_core::{
     Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
 };

@@ -4,7 +4,8 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::time::timeout;
 
-use eventuary_core::io::{EventFilter, Reader, Writer};
+use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::{Reader, Writer};
 use eventuary_core::{
     Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, Topic,
     TopicPattern,

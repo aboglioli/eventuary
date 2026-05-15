@@ -212,9 +212,9 @@ mod tests {
     }
 }
 
-pub(super) mod checkpoint;
-pub(super) mod filtered;
-pub(super) mod partitioned;
+pub mod checkpoint;
+pub mod filtered;
+pub mod partitioned;
 
 pub use checkpoint::{
     CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig,

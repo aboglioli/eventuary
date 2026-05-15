@@ -3,7 +3,8 @@ use std::time::Duration;
 use aws_sdk_sqs::Client;
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
-use eventuary_core::io::{BatchedStream, Message, NoCursor, Reader};
+use eventuary_core::io::stream::BatchedStream;
+use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Result, SerializedEvent, StartFrom, StartableSubscription};
 
 use crate::flusher::SqsFlusher;

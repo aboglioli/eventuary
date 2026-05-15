@@ -1,3 +1,3 @@
-mod background;
+pub mod background;
 
 pub use background::{BackgroundConsumer, ConsumerHandle};

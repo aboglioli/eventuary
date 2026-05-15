@@ -179,7 +179,7 @@ mod tests {
         let reader = VecReader::new(vec![Ok(msg(ev("acme", "k0"), acker.clone(), 42))]);
         let filtered = FilteredReader::new(
             reader,
-            crate::io::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
+            crate::io::filter::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         );
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();
@@ -201,7 +201,7 @@ mod tests {
         ]);
         let filtered = FilteredReader::new(
             reader,
-            crate::io::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
+            crate::io::filter::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         );
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();
@@ -225,7 +225,7 @@ mod tests {
         ]);
         let filtered = FilteredReader::new(
             reader,
-            crate::io::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
+            crate::io::filter::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         );
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();
@@ -245,7 +245,7 @@ mod tests {
         let reader = VecReader::new(vec![Err(Error::Store("inner failed".to_owned()))]);
         let filtered = FilteredReader::new(
             reader,
-            crate::io::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
+            crate::io::filter::EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         );
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();

@@ -1,5 +1,5 @@
-pub(super) mod batched;
-pub(super) mod spawned;
+pub mod batched;
+pub mod spawned;
 
 pub use batched::BatchedStream;
 pub use spawned::SpawnedStream;

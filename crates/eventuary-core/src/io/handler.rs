@@ -142,8 +142,8 @@ mod tests {
     }
 }
 
-pub(super) mod filtered;
-pub(super) mod retry;
+pub mod filtered;
+pub mod retry;
 
 pub use filtered::FilteredHandler;
 pub use retry::{
