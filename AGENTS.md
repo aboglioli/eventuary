@@ -59,7 +59,6 @@ crates/
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
-│       ├── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
 │       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
@@ -69,23 +68,34 @@ crates/
 │       ├── serialization.rs # SerializedEvent wire format
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
-│           ├── writer.rs   # Writer trait + DynWriter / BoxWriter / ArcWriter
-│           ├── reader.rs   # Reader trait (assoc Subscription/Acker/Cursor/Stream)
-│           ├── handler.rs  # Handler + dyn bridges; handlers borrow &Event
-│           ├── message.rs  # Message<A, C> (event + acker + cursor), NoCursor
-│           ├── filters.rs  # Filter trait, EventFilter, AllFilter, TopicFilter, NamespacePrefixFilter
-│           ├── checkpoint.rs # CheckpointStore trait, CheckpointKey/Scope, StreamId
-│           ├── readers/
-│           │   ├── partitioned_reader.rs # PartitionedReader lane scheduler + PartitionedCursor
-│           │   └── checkpoint_reader.rs  # CheckpointReader + CheckpointAcker
+│           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt
+│           ├── reader.rs   # Reader trait + Dyn/Box/Arc + ReaderExt + BoxStream + submod owner
+│           ├── reader/
+│           │   ├── checkpoint.rs  # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope/ResumePolicy
+│           │   ├── partitioned.rs # PartitionedReader lane scheduler + PartitionedCursor + AckMode + LaneScheduling
+│           │   └── filtered.rs    # FilteredReader + FilteredStream
+│           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
 │           │   ├── noop.rs      # NoopAcker
 │           │   ├── once.rs      # OnceAcker (single-shot wrapper)
 │           │   ├── batched.rs   # BatchedAcker + AckBuffer + BatchFlusher
 │           │   └── either.rs    # Re-exports Either for variant ackers
-│           └── consumers/
-│               ├── background.rs # BackgroundConsumer + ConsumerHandle
-│               └── retry.rs      # RetryHandler, RetryPolicy, DeadLetterWriter
+│           ├── handler.rs  # Handler trait + Dyn/Box/Arc + HandlerExt + submod owner
+│           ├── handler/
+│           │   ├── filtered.rs # FilteredHandler
+│           │   └── retry.rs    # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
+│           ├── consumer.rs # BackgroundConsumer + ConsumerHandle re-exports (submod owner)
+│           ├── consumer/
+│           │   └── background.rs # BackgroundConsumer + ConsumerHandle
+│           ├── stream.rs   # BatchedStream + SpawnedStream re-exports (submod owner)
+│           ├── stream/
+│           │   ├── batched.rs # BatchedStream
+│           │   └── spawned.rs # SpawnedStream
+│           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter (single file)
+│           ├── cursor.rs   # Cursor trait + CursorId
+│           ├── message.rs  # Message<A, C> (event + acker + cursor), NoCursor
+│           ├── stream_id.rs       # StreamId
+│           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor
 ├── eventuary-sqlite/       # rusqlite source reader/writer + SqliteCheckpointStore
@@ -270,7 +280,7 @@ preserving the original event plus failure metadata.
 
 Backend readers (`PgReader`, `SqliteReader`, etc.) deliver events from a
 single source. Cross-cutting concerns live in generic core wrappers in
-`eventuary-core/src/io/readers/`:
+`eventuary-core/src/io/reader/`:
 
 - `PartitionedReader<R>` is an in-process lane scheduler. It routes inner
   messages into `LogicalPartition`s derived from `partition_for(event,
