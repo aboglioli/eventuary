@@ -548,6 +548,60 @@ Each crate exposes only its **base abstractions** and **cross-cutting value type
 
 This layering keeps the "first-discovered" public surface small and forces deeper imports to be explicit about which module owns the type. Module submodules carrying impls are declared `pub mod` so the submodule path is reachable; the trait file is private since the trait is already re-exported flat by its parent module.
 
+### Import Paths Mental Model
+
+Each path segment in eventuary tells you what layer the type belongs to. Users learn the structure once, then read imports as a map.
+
+**Through the umbrella crate (recommended for end users):**
+
+```rust
+// Domain values — crate root
+use eventuary::{Event, EventId, Topic, Namespace, OrganizationId, Payload};
+
+// IO base abstractions (traits + companions)
+use eventuary::io::{Reader, Writer, Handler, Acker, Filter, Message};
+
+// IO wrappers / implementations (auxiliaries colocated with their wrapper)
+use eventuary::io::reader::{CheckpointReader, PartitionedReader, FilteredReader};
+use eventuary::io::handler::{RetryHandler, FilteredHandler, DeadLetterWriter};
+use eventuary::io::consumer::BackgroundConsumer;
+use eventuary::io::stream::{BatchedStream, SpawnedStream};
+use eventuary::io::acker::{OnceAcker, NoopAcker, BatchedAcker};
+use eventuary::io::filter::{EventFilter, AllFilter, AndFilter};
+
+// Backend primary entry-point types — feature-gated, at backend crate root
+use eventuary::postgres::{PgReader, PgWriter, PgCheckpointStore};
+
+// Backend auxiliary types — at their owning submodule
+use eventuary::postgres::reader::{PgCursor, PgSubscription, PgReaderConfig};
+use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
+use eventuary::postgres::relation::PgRelationName;
+```
+
+**Through sub-crates (backend authoring or alternative facades):**
+
+```rust
+use eventuary_core::{Event, Payload};                   // domain
+use eventuary_core::io::Reader;                         // IO base
+use eventuary_core::io::reader::CheckpointReader;       // IO wrapper
+use eventuary_postgres::PgReader;                       // backend primary
+use eventuary_postgres::reader::PgCursor;               // backend auxiliary
+```
+
+The two routes are interchangeable — the umbrella does `pub use eventuary_core::*;` and `pub use eventuary_postgres as postgres;` (feature-gated), so the module tree is identical, just under a different prefix.
+
+**Layer cheatsheet:**
+
+| Path shape | Layer | Examples |
+|---|---|---|
+| `<crate>::Type` | Domain value | `Event`, `Topic`, `Payload` |
+| `<crate>::io::Type` | IO base abstraction | `Reader`, `Acker`, `Message` |
+| `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::handler::RetryPolicy` |
+| `<crate>::<backend>::Type` | Backend primary | `postgres::PgReader` |
+| `<crate>::<backend>::<module>::Type` | Backend auxiliary | `postgres::reader::PgCursor` |
+
+No `prelude` module is provided by design — importing through these paths is the learning surface for the structure. Once the layering is understood, users may write personal preludes in their own crates.
+
 ## Decisions Log
 
 Worth knowing when changing the codebase:
