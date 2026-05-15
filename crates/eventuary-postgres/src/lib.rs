@@ -16,4 +16,4 @@ pub mod writer;
 
 pub use checkpoint_store::PgCheckpointStore;
 pub use reader::PgReader;
-pub use writer::PgEventWriter;
+pub use writer::PgWriter;

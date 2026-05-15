@@ -16,4 +16,4 @@ pub mod writer;
 
 pub use checkpoint_store::SqliteCheckpointStore;
 pub use reader::SqliteReader;
-pub use writer::SqliteEventWriter;
+pub use writer::SqliteWriter;

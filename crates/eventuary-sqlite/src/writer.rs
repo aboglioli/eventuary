@@ -19,12 +19,12 @@ impl Default for SqliteWriterConfig {
     }
 }
 
-pub struct SqliteEventWriter {
+pub struct SqliteWriter {
     conn: SqliteConn,
     insert_sql: Arc<String>,
 }
 
-impl SqliteEventWriter {
+impl SqliteWriter {
     pub fn new(conn: SqliteConn) -> Self {
         Self::new_with_config(conn, SqliteWriterConfig::default())
     }
@@ -42,7 +42,7 @@ impl SqliteEventWriter {
     }
 }
 
-impl Writer for SqliteEventWriter {
+impl Writer for SqliteWriter {
     async fn write(&self, event: &Event) -> Result<()> {
         let conn = Arc::clone(&self.conn);
         let event = event.clone();
