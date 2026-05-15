@@ -8,14 +8,15 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
-use eventuary_core::io::{EventFilter, Reader, Writer};
+use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::{Reader, Writer};
 use eventuary_core::{
     Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, Topic,
     TopicPattern,
 };
-use eventuary_postgres::{
-    PgCursor, PgDatabase, PgEventWriter, PgReader, PgReaderConfig, PgSubscription,
-};
+use eventuary_postgres::database::PgDatabase;
+use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
+use eventuary_postgres::writer::PgWriter;
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
@@ -64,7 +65,7 @@ fn fast_config() -> PgReaderConfig {
 #[tokio::test]
 async fn write_read_roundtrip() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     let event = ev("acme", "/x", "thing.happened", "k0");
     writer.write(&event).await.unwrap();
 
@@ -82,7 +83,7 @@ async fn write_read_roundtrip() {
 #[tokio::test]
 async fn reader_roundtrips_lineage_fields() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     let parent_id = EventId::new();
     let event = Event::builder(
         "acme",
@@ -118,7 +119,7 @@ async fn reader_roundtrips_lineage_fields() {
 #[tokio::test]
 async fn postgres_reader_advances_after_ack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -150,7 +151,7 @@ async fn postgres_reader_advances_after_ack() {
 #[tokio::test]
 async fn postgres_reader_redelivers_after_nack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -179,7 +180,7 @@ async fn postgres_reader_redelivers_after_nack() {
 #[tokio::test]
 async fn start_from_after_cursor_resumes() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     for i in 0..4 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -218,7 +219,7 @@ async fn start_from_after_cursor_resumes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_from_latest_skips_existing_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("old{i}")))
@@ -251,7 +252,7 @@ async fn start_from_latest_skips_existing_events() {
 #[tokio::test]
 async fn start_from_timestamp_filters_old_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "before"))
         .await
@@ -283,7 +284,7 @@ async fn start_from_timestamp_filters_old_events() {
 #[tokio::test]
 async fn topic_filter() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     writer
         .write(&ev("acme", "/x", "task.created", "t1"))
         .await
@@ -326,7 +327,7 @@ async fn topic_filter() {
 #[tokio::test]
 async fn namespace_filter() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     writer
         .write(&ev("acme", "/backend", "thing.happened", "b1"))
         .await

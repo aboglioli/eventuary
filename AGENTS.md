@@ -59,7 +59,6 @@ crates/
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
-│       ├── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
 │       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
@@ -69,23 +68,34 @@ crates/
 │       ├── serialization.rs # SerializedEvent wire format
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
-│           ├── writer.rs   # Writer trait + DynWriter / BoxWriter / ArcWriter
-│           ├── reader.rs   # Reader trait (assoc Subscription/Acker/Cursor/Stream)
-│           ├── handler.rs  # Handler + dyn bridges; handlers borrow &Event
-│           ├── message.rs  # Message<A, C> (event + acker + cursor), NoCursor
-│           ├── filters.rs  # Filter trait, EventFilter, AllFilter, TopicFilter, NamespacePrefixFilter
-│           ├── checkpoint.rs # CheckpointStore trait, CheckpointKey/Scope, StreamId
-│           ├── readers/
-│           │   ├── partitioned_reader.rs # PartitionedReader lane scheduler + PartitionedCursor
-│           │   └── checkpoint_reader.rs  # CheckpointReader + CheckpointAcker
+│           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt
+│           ├── reader.rs   # Reader trait + Dyn/Box/Arc + ReaderExt + BoxStream + submod owner
+│           ├── reader/
+│           │   ├── checkpoint.rs  # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope/ResumePolicy
+│           │   ├── partitioned.rs # PartitionedReader lane scheduler + PartitionedCursor + AckMode + LaneScheduling
+│           │   └── filtered.rs    # FilteredReader + FilteredStream
+│           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
 │           │   ├── noop.rs      # NoopAcker
 │           │   ├── once.rs      # OnceAcker (single-shot wrapper)
 │           │   ├── batched.rs   # BatchedAcker + AckBuffer + BatchFlusher
 │           │   └── either.rs    # Re-exports Either for variant ackers
-│           └── consumers/
-│               ├── background.rs # BackgroundConsumer + ConsumerHandle
-│               └── retry.rs      # RetryHandler, RetryPolicy, DeadLetterWriter
+│           ├── handler.rs  # Handler trait + Dyn/Box/Arc + HandlerExt + submod owner
+│           ├── handler/
+│           │   ├── filtered.rs # FilteredHandler
+│           │   └── retry.rs    # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
+│           ├── consumer.rs # BackgroundConsumer + ConsumerHandle re-exports (submod owner)
+│           ├── consumer/
+│           │   └── background.rs # BackgroundConsumer + ConsumerHandle
+│           ├── stream.rs   # BatchedStream + SpawnedStream re-exports (submod owner)
+│           ├── stream/
+│           │   ├── batched.rs # BatchedStream
+│           │   └── spawned.rs # SpawnedStream
+│           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter (single file)
+│           ├── cursor.rs   # Cursor trait + CursorId
+│           ├── message.rs  # Message<A, C> (event + acker + cursor), NoCursor
+│           ├── stream_id.rs       # StreamId
+│           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor
 ├── eventuary-sqlite/       # rusqlite source reader/writer + SqliteCheckpointStore
@@ -270,7 +280,7 @@ preserving the original event plus failure metadata.
 
 Backend readers (`PgReader`, `SqliteReader`, etc.) deliver events from a
 single source. Cross-cutting concerns live in generic core wrappers in
-`eventuary-core/src/io/readers/`:
+`eventuary-core/src/io/reader/`:
 
 - `PartitionedReader<R>` is an in-process lane scheduler. It routes inner
   messages into `LogicalPartition`s derived from `partition_for(event,
@@ -515,6 +525,81 @@ adds clarity.
   `sqlx::query(...)` qualified; shorten `Utc::now()`, `Value::String(...)`.
 - Internal `crate::` paths: import. Never write `crate::a::b::C` in a type
   position or expression.
+
+### Re-export Layering
+
+Each crate exposes only its **base abstractions** and **cross-cutting value types** at the top-level public path. **Implementations**, wrappers, and their auxiliary types are accessed via the submodule path that owns them.
+
+**`eventuary-core`:**
+
+| Layer | Path | Examples |
+|---|---|---|
+| Base trait + companions (`Dyn`/`Box`/`Arc`/`Ext`) | `eventuary_core::*` or `eventuary_core::io::*` | `Acker`, `Reader`, `Writer`, `Handler`, `Filter`, `Cursor` |
+| Cross-cutting value type | `eventuary_core::*` or `eventuary_core::io::*` | `Message`, `NoCursor`, `CursorId`, `StreamId`, `ConsumerGroupId`, `BoxFuture` |
+| Trait implementation / wrapper | `eventuary_core::io::<module>::*` | `io::reader::CheckpointReader`, `io::handler::RetryHandler`, `io::consumer::BackgroundConsumer`, `io::stream::BatchedStream`, `io::acker::OnceAcker`, `io::filter::EventFilter` |
+| Auxiliary type of an implementation | same submodule as the implementation | `io::reader::CheckpointKey`, `io::reader::PartitionedCursor`, `io::handler::RetryPolicy` |
+
+**Backend crates** (`eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`, `eventuary-sqs`, `eventuary-kafka`):
+
+| Layer | Path | Examples |
+|---|---|---|
+| All implementation and auxiliary types | submodule path | `eventuary_postgres::reader::PgReader`, `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::database::SqliteDatabaseConfig` |
+
+Backend `lib.rs` files contain only `pub mod` declarations. No flat re-exports. The submodule name (`reader`, `writer`, `checkpoint_store`, `database`, `relation`, `flusher`, `reader_config`) tells the user what role the type plays.
+
+This makes the rule uniform across all crates: implementations and their auxiliaries always live at `<crate>::<module>::*`. Only `eventuary-core` keeps flat re-exports — for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and for IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
+
+### Import Paths Mental Model
+
+Each path segment in eventuary tells you what layer the type belongs to. Users learn the structure once, then read imports as a map.
+
+**Through the umbrella crate (recommended for end users):**
+
+```rust
+// Domain values — crate root
+use eventuary::{Event, EventId, Topic, Namespace, OrganizationId, Payload};
+
+// IO base abstractions (traits + companions)
+use eventuary::io::{Reader, Writer, Handler, Acker, Filter, Message};
+
+// IO wrappers / implementations (auxiliaries colocated with their wrapper)
+use eventuary::io::reader::{CheckpointReader, PartitionedReader, FilteredReader};
+use eventuary::io::handler::{RetryHandler, FilteredHandler, DeadLetterWriter};
+use eventuary::io::consumer::BackgroundConsumer;
+use eventuary::io::stream::{BatchedStream, SpawnedStream};
+use eventuary::io::acker::{OnceAcker, NoopAcker, BatchedAcker};
+use eventuary::io::filter::{EventFilter, AllFilter, AndFilter};
+
+// Backend types — feature-gated, all at submodule path
+use eventuary::postgres::reader::{PgReader, PgCursor, PgSubscription, PgReaderConfig};
+use eventuary::postgres::writer::{PgWriter, PgWriterConfig};
+use eventuary::postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
+use eventuary::postgres::relation::PgRelationName;
+```
+
+**Through sub-crates (backend authoring or alternative facades):**
+
+```rust
+use eventuary_core::{Event, Payload};                   // domain
+use eventuary_core::io::Reader;                         // IO base
+use eventuary_core::io::reader::CheckpointReader;       // IO wrapper
+use eventuary_postgres::reader::PgReader;               // backend implementation
+use eventuary_postgres::reader::PgCursor;               // backend auxiliary
+```
+
+The two routes are interchangeable — the umbrella does `pub use eventuary_core::*;` and `pub use eventuary_postgres as postgres;` (feature-gated), so the module tree is identical, just under a different prefix.
+
+**Layer cheatsheet:**
+
+| Path shape | Layer | Examples |
+|---|---|---|
+| `<crate>::Type` | Domain value | `Event`, `Topic`, `Payload` |
+| `<crate>::io::Type` | IO base abstraction | `Reader`, `Acker`, `Message` |
+| `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::handler::RetryPolicy` |
+| `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor` |
+
+No `prelude` module is provided by design — importing through these paths is the learning surface for the structure. Once the layering is understood, users may write personal preludes in their own crates.
 
 ## Decisions Log
 

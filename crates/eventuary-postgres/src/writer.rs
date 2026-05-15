@@ -18,12 +18,12 @@ impl Default for PgWriterConfig {
     }
 }
 
-pub struct PgEventWriter {
+pub struct PgWriter {
     pool: PgPool,
     insert_sql: String,
 }
 
-impl PgEventWriter {
+impl PgWriter {
     pub fn new(pool: PgPool) -> Self {
         Self::new_with_config(pool, PgWriterConfig::default())
     }
@@ -38,7 +38,7 @@ impl PgEventWriter {
     }
 }
 
-impl Writer for PgEventWriter {
+impl Writer for PgWriter {
     async fn write(&self, event: &Event) -> Result<()> {
         let row = EventRow::from_event(event)?;
 

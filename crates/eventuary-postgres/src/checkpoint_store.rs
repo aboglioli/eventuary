@@ -4,7 +4,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{PgPool, Row};
 
 use eventuary_core::io::CursorId;
-use eventuary_core::io::checkpoint::{CheckpointKey, CheckpointScope, CheckpointStore};
+use eventuary_core::io::reader::{CheckpointKey, CheckpointScope, CheckpointStore};
 use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;

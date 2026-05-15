@@ -211,3 +211,18 @@ mod tests {
         fn _take(_: BoxReader<TestSub, NoCursor>) {}
     }
 }
+
+pub mod checkpoint;
+pub mod filtered;
+pub mod partitioned;
+
+pub use checkpoint::{
+    CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig,
+    CheckpointResumePolicy, CheckpointScope, CheckpointStore, CheckpointStream,
+    CheckpointSubscription,
+};
+pub use filtered::{FilteredReader, FilteredStream};
+pub use partitioned::{
+    LaneScheduling, PartitionAcker, PartitionedAckMode, PartitionedCursor, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription,
+};

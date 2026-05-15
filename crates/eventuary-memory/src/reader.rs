@@ -20,11 +20,11 @@ impl StartableSubscription<NoCursor> for MemorySubscription {
     }
 }
 
-pub struct InmemReader {
+pub struct MemoryReader {
     rx: Arc<Mutex<mpsc::Receiver<Event>>>,
 }
 
-impl InmemReader {
+impl MemoryReader {
     pub fn new(rx: mpsc::Receiver<Event>) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
@@ -60,7 +60,7 @@ impl Stream for InmemStream {
     }
 }
 
-impl Reader for InmemReader {
+impl Reader for MemoryReader {
     type Subscription = MemorySubscription;
     type Acker = NoopAcker;
     type Cursor = NoCursor;
@@ -98,7 +98,7 @@ mod tests {
     #[tokio::test]
     async fn reader_reads_one_event() {
         let (tx, rx) = mpsc::channel(1);
-        let reader = InmemReader::new(rx);
+        let reader = MemoryReader::new(rx);
 
         let mut stream = reader.read(subscription()).await.unwrap();
         tx.send(ev()).await.unwrap();
@@ -111,7 +111,7 @@ mod tests {
     #[tokio::test]
     async fn reader_reads_multiple_events() {
         let (tx, rx) = mpsc::channel(2);
-        let reader = InmemReader::new(rx);
+        let reader = MemoryReader::new(rx);
 
         let mut stream = reader.read(subscription()).await.unwrap();
 
@@ -130,7 +130,7 @@ mod tests {
     #[tokio::test]
     async fn reader_into_boxed_yields_box_reader() {
         let (tx, rx) = mpsc::channel(1);
-        let reader: BoxReader<MemorySubscription, NoCursor> = InmemReader::new(rx).into_boxed();
+        let reader: BoxReader<MemorySubscription, NoCursor> = MemoryReader::new(rx).into_boxed();
 
         tx.send(ev()).await.unwrap();
 
@@ -143,7 +143,7 @@ mod tests {
     #[tokio::test]
     async fn reader_does_not_filter_by_event_predicate() {
         let (tx, rx) = mpsc::channel(2);
-        let reader = InmemReader::new(rx);
+        let reader = MemoryReader::new(rx);
 
         let mut stream = reader.read(subscription()).await.unwrap();
 
@@ -175,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn reader_honors_limit() {
         let (tx, rx) = mpsc::channel(3);
-        let reader = InmemReader::new(rx);
+        let reader = MemoryReader::new(rx);
 
         let mut stream = reader
             .read(MemorySubscription { limit: Some(2) })

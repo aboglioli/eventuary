@@ -8,12 +8,12 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
-use eventuary_core::io::{BatchedStream, Cursor, Message, Reader};
+use eventuary_core::io::stream::BatchedStream;
+use eventuary_core::io::{Cursor, Message, Reader};
 
 use crate::flusher::KafkaFlusher;
-use eventuary_core::{
-    ConsumerGroupId, Error, Event, Result, SerializedEvent, StartFrom, StartableSubscription,
-};
+use eventuary_core::io::ConsumerGroupId;
+use eventuary_core::{Error, Event, Result, SerializedEvent, StartFrom, StartableSubscription};
 
 use crate::flusher::KafkaOffsetToken;
 use crate::reader_config::KafkaReaderConfig;

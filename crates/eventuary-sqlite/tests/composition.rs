@@ -3,18 +3,20 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::time::timeout;
 
-use eventuary_core::io::CheckpointStore;
-use eventuary_core::io::checkpoint::{CheckpointScope, StreamId};
-use eventuary_core::io::readers::{
-    CheckpointReader, CheckpointSubscription, PartitionedCursor, PartitionedReader,
-    PartitionedReaderConfig, PartitionedSubscription,
+use eventuary_core::io::ConsumerGroupId;
+use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::reader::{
+    CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription, PartitionedCursor,
+    PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
-use eventuary_core::io::{EventFilter, Reader, Writer};
-use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
-use eventuary_sqlite::{
-    SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteDatabase, SqliteEventWriter,
-    SqliteReader, SqliteReaderConfig, SqliteSubscription,
+use eventuary_core::io::{Reader, StreamId, Writer};
+use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
+use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
+use eventuary_sqlite::database::SqliteDatabase;
+use eventuary_sqlite::reader::{
+    SqliteCursor, SqliteReader, SqliteReaderConfig, SqliteSubscription,
 };
+use eventuary_sqlite::writer::SqliteWriter;
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
     Event::builder(org, ns, topic, Payload::from_string("p"))
@@ -51,7 +53,7 @@ fn scope() -> CheckpointScope {
 #[tokio::test]
 async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
     let db = SqliteDatabase::open_in_memory().unwrap();
-    let writer = SqliteEventWriter::new(db.conn());
+    let writer = SqliteWriter::new(db.conn());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -59,7 +61,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
             .unwrap();
     }
 
-    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -87,7 +89,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
     drop(stream);
 
     let source2 = SqliteReader::new(db.conn(), fast_config());
-    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store2 = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -107,7 +109,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
 #[tokio::test]
 async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     let db = SqliteDatabase::open_in_memory().unwrap();
-    let writer = SqliteEventWriter::new(db.conn());
+    let writer = SqliteWriter::new(db.conn());
     for i in 0..6 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -123,7 +125,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
             ..PartitionedReaderConfig::default()
         },
     );
-    let store = SqliteCheckpointStore::<PartitionedCursor<eventuary_sqlite::SqliteCursor>>::new(
+    let store = SqliteCheckpointStore::<PartitionedCursor<SqliteCursor>>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -144,7 +146,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     }
     drop(stream);
 
-    let store2 = SqliteCheckpointStore::<PartitionedCursor<eventuary_sqlite::SqliteCursor>>::new(
+    let store2 = SqliteCheckpointStore::<PartitionedCursor<SqliteCursor>>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -161,14 +163,14 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
 #[tokio::test]
 async fn checkpoint_reader_no_advance_on_nack() {
     let db = SqliteDatabase::open_in_memory().unwrap();
-    let writer = SqliteEventWriter::new(db.conn());
+    let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
         .unwrap();
 
     let source = SqliteReader::new(db.conn(), fast_config());
-    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -186,7 +188,7 @@ async fn checkpoint_reader_no_advance_on_nack() {
     m0.nack().await.unwrap();
     drop(stream);
 
-    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store2 = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -204,7 +206,7 @@ async fn checkpoint_reader_no_advance_on_nack() {
 #[tokio::test]
 async fn partitioned_reader_tags_partition_on_cursor() {
     let db = SqliteDatabase::open_in_memory().unwrap();
-    let writer = SqliteEventWriter::new(db.conn());
+    let writer = SqliteWriter::new(db.conn());
     for i in 0..8 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))

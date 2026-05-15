@@ -7,18 +7,18 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
-use eventuary_core::io::CheckpointStore;
-use eventuary_core::io::checkpoint::{CheckpointScope, StreamId};
-use eventuary_core::io::readers::{
-    CheckpointReader, CheckpointSubscription, PartitionedCursor, PartitionedReader,
-    PartitionedReaderConfig, PartitionedSubscription,
+use eventuary_core::io::ConsumerGroupId;
+use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::reader::{
+    CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription, PartitionedCursor,
+    PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
-use eventuary_core::io::{EventFilter, Reader, Writer};
-use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
-use eventuary_postgres::{
-    PgCheckpointStore, PgCheckpointStoreConfig, PgCursor, PgDatabase, PgEventWriter, PgReader,
-    PgReaderConfig, PgSubscription,
-};
+use eventuary_core::io::{Reader, StreamId, Writer};
+use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
+use eventuary_postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+use eventuary_postgres::database::PgDatabase;
+use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
+use eventuary_postgres::writer::PgWriter;
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
@@ -74,7 +74,7 @@ fn scope() -> CheckpointScope {
 #[tokio::test]
 async fn checkpoint_reader_over_pg_reader_resumes_after_ack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -125,7 +125,7 @@ async fn checkpoint_reader_over_pg_reader_resumes_after_ack() {
 #[tokio::test]
 async fn checkpoint_reader_over_pg_reader_no_advance_on_nack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -156,7 +156,7 @@ async fn checkpoint_reader_over_pg_reader_no_advance_on_nack() {
 #[tokio::test]
 async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     for i in 0..6 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -210,7 +210,7 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
 #[tokio::test]
 async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgEventWriter::new(pool.clone());
+    let writer = PgWriter::new(pool.clone());
     for i in 0..16 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))

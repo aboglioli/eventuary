@@ -1,17 +1,17 @@
 use eventuary_core::io::Writer;
 use eventuary_core::{Error, Event, Result};
 
-pub struct InmemWriter {
+pub struct MemoryWriter {
     tx: tokio::sync::mpsc::Sender<Event>,
 }
 
-impl InmemWriter {
+impl MemoryWriter {
     pub fn new(tx: tokio::sync::mpsc::Sender<Event>) -> Self {
         Self { tx }
     }
 }
 
-impl Writer for InmemWriter {
+impl Writer for MemoryWriter {
     async fn write(&self, event: &Event) -> Result<()> {
         self.tx
             .send(event.clone())
@@ -38,7 +38,7 @@ mod tests {
     #[tokio::test]
     async fn write_one_event_and_receive_it() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let writer = InmemWriter::new(tx);
+        let writer = MemoryWriter::new(tx);
         let event = ev();
 
         writer.write(&event).await.unwrap();
@@ -54,7 +54,7 @@ mod tests {
     #[tokio::test]
     async fn write_all_sends_multiple_events() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(3);
-        let writer = InmemWriter::new(tx);
+        let writer = MemoryWriter::new(tx);
         let events = vec![ev(), ev(), ev()];
 
         writer.write_all(&events).await.unwrap();
@@ -67,7 +67,7 @@ mod tests {
     #[tokio::test]
     async fn writer_into_boxed_yields_box_writer() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let writer: BoxWriter = InmemWriter::new(tx).into_boxed();
+        let writer: BoxWriter = MemoryWriter::new(tx).into_boxed();
 
         writer.write(&ev()).await.unwrap();
 
