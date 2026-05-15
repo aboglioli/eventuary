@@ -1,7 +1,8 @@
 use std::time::Duration;
 
+use eventuary_core::io::ConsumerGroupId;
 use eventuary_core::io::acker::AckBufferConfig;
-use eventuary_core::{ConsumerGroupId, Error, Result, StartFrom};
+use eventuary_core::{Error, Result, StartFrom};
 
 const SQS_MAX_MESSAGES_LIMIT: i32 = 10;
 const SQS_MAX_WAIT_TIME: Duration = Duration::from_secs(20);

@@ -26,8 +26,8 @@ use futures::{Stream, StreamExt};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use crate::ConsumerGroupId;
 use crate::error::{Error, Result};
+use crate::io::ConsumerGroupId;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 use crate::start_from::{StartFrom, StartableSubscription};
@@ -352,7 +352,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ConsumerGroupId;
     use crate::event::Event;
     use crate::io::Message;
     use crate::io::StreamId;

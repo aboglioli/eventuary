@@ -3,13 +3,14 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::time::timeout;
 
+use eventuary_core::io::ConsumerGroupId;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::reader::{
     CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription, PartitionedCursor,
     PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
 use eventuary_core::io::{Reader, StreamId, Writer};
-use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
+use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
 use eventuary_sqlite::checkpoint_store::SqliteCheckpointStoreConfig;
 use eventuary_sqlite::database::SqliteDatabase;
 use eventuary_sqlite::reader::{SqliteCursor, SqliteReaderConfig, SqliteSubscription};
