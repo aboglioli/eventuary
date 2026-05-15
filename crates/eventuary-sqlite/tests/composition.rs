@@ -10,10 +10,10 @@ use eventuary_core::io::reader::{
 };
 use eventuary_core::io::{Reader, StreamId, Writer};
 use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
-use eventuary_sqlite::{
-    SqliteCheckpointStore, SqliteCheckpointStoreConfig, SqliteDatabase, SqliteEventWriter,
-    SqliteReader, SqliteReaderConfig, SqliteSubscription,
-};
+use eventuary_sqlite::checkpoint_store::SqliteCheckpointStoreConfig;
+use eventuary_sqlite::database::SqliteDatabase;
+use eventuary_sqlite::reader::{SqliteCursor, SqliteReaderConfig, SqliteSubscription};
+use eventuary_sqlite::{SqliteCheckpointStore, SqliteEventWriter, SqliteReader};
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
     Event::builder(org, ns, topic, Payload::from_string("p"))
@@ -58,7 +58,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
             .unwrap();
     }
 
-    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -86,7 +86,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
     drop(stream);
 
     let source2 = SqliteReader::new(db.conn(), fast_config());
-    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store2 = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -122,7 +122,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
             ..PartitionedReaderConfig::default()
         },
     );
-    let store = SqliteCheckpointStore::<PartitionedCursor<eventuary_sqlite::SqliteCursor>>::new(
+    let store = SqliteCheckpointStore::<PartitionedCursor<SqliteCursor>>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -143,7 +143,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     }
     drop(stream);
 
-    let store2 = SqliteCheckpointStore::<PartitionedCursor<eventuary_sqlite::SqliteCursor>>::new(
+    let store2 = SqliteCheckpointStore::<PartitionedCursor<SqliteCursor>>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -167,7 +167,7 @@ async fn checkpoint_reader_no_advance_on_nack() {
         .unwrap();
 
     let source = SqliteReader::new(db.conn(), fast_config());
-    let store = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );
@@ -185,7 +185,7 @@ async fn checkpoint_reader_no_advance_on_nack() {
     m0.nack().await.unwrap();
     drop(stream);
 
-    let store2 = SqliteCheckpointStore::<eventuary_sqlite::SqliteCursor>::new(
+    let store2 = SqliteCheckpointStore::<SqliteCursor>::new(
         db.conn(),
         SqliteCheckpointStoreConfig::default(),
     );

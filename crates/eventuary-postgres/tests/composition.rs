@@ -14,10 +14,10 @@ use eventuary_core::io::reader::{
 };
 use eventuary_core::io::{Reader, StreamId, Writer};
 use eventuary_core::{ConsumerGroupId, Event, OrganizationId, Payload, StartFrom};
-use eventuary_postgres::{
-    PgCheckpointStore, PgCheckpointStoreConfig, PgCursor, PgDatabase, PgEventWriter, PgReader,
-    PgReaderConfig, PgSubscription,
-};
+use eventuary_postgres::checkpoint_store::PgCheckpointStoreConfig;
+use eventuary_postgres::database::PgDatabase;
+use eventuary_postgres::reader::{PgCursor, PgReaderConfig, PgSubscription};
+use eventuary_postgres::{PgCheckpointStore, PgEventWriter, PgReader};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

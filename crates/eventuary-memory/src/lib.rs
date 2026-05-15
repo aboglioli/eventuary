@@ -4,8 +4,8 @@
 //! channels. Events emit `Message<NoopAcker>`, so ack/nack are no-ops. Suitable
 //! for development, tests, and single-process use.
 
-mod reader;
-mod writer;
+pub mod reader;
+pub mod writer;
 
-pub use reader::{InmemReader, MemorySubscription};
+pub use reader::InmemReader;
 pub use writer::InmemWriter;

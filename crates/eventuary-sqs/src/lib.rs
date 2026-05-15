@@ -11,12 +11,10 @@
 //! ack issues `DeleteMessageBatch`; nack issues `ChangeMessageVisibilityBatch`
 //! with timeout zero. Both inspect per-entry failures.
 
-mod flusher;
-mod reader;
-mod reader_config;
-mod writer;
+pub mod flusher;
+pub mod reader;
+pub mod reader_config;
+pub mod writer;
 
-pub use flusher::SqsFlusher;
-pub use reader::{SqsReader, SqsSubscription};
-pub use reader_config::SqsReaderConfig;
+pub use reader::SqsReader;
 pub use writer::SqsWriter;

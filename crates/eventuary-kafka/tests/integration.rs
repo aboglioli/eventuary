@@ -13,7 +13,8 @@ use eventuary_core::io::Writer;
 use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{ConsumerGroupId, Error, Event, Payload, StartFrom};
 
-use eventuary_kafka::{KafkaReader, KafkaReaderConfig, KafkaWriter};
+use eventuary_kafka::reader_config::KafkaReaderConfig;
+use eventuary_kafka::{KafkaReader, KafkaWriter};
 
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka";
 const KAFKA_TAG: &str = "7.6.0";

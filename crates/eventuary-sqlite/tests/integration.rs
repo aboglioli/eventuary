@@ -10,9 +10,9 @@ use eventuary_core::{
     Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, Topic,
     TopicPattern,
 };
-use eventuary_sqlite::{
-    SqliteDatabase, SqliteEventWriter, SqliteReader, SqliteReaderConfig, SqliteSubscription,
-};
+use eventuary_sqlite::database::SqliteDatabase;
+use eventuary_sqlite::reader::{SqliteReaderConfig, SqliteSubscription};
+use eventuary_sqlite::{SqliteEventWriter, SqliteReader};
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
     Event::builder(org, ns, topic, Payload::from_string("payload"))

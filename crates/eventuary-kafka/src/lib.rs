@@ -16,12 +16,10 @@
 //! Building requires `cmake`, `libssl-dev`, `libcurl4-openssl-dev`,
 //! `libsasl2-dev`, `zlib1g-dev`, and `pkg-config`.
 
-mod flusher;
-mod reader;
-mod reader_config;
-mod writer;
+pub mod flusher;
+pub mod reader;
+pub mod reader_config;
+pub mod writer;
 
-pub use flusher::{KafkaFlusher, KafkaOffsetToken};
-pub use reader::{KafkaCursor, KafkaReader, KafkaSubscription};
-pub use reader_config::KafkaReaderConfig;
+pub use reader::KafkaReader;
 pub use writer::KafkaWriter;
