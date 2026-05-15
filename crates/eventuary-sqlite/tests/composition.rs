@@ -11,10 +11,12 @@ use eventuary_core::io::reader::{
 };
 use eventuary_core::io::{Reader, StreamId, Writer};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
-use eventuary_sqlite::checkpoint_store::SqliteCheckpointStoreConfig;
+use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::SqliteDatabase;
-use eventuary_sqlite::reader::{SqliteCursor, SqliteReaderConfig, SqliteSubscription};
-use eventuary_sqlite::{SqliteCheckpointStore, SqliteReader, SqliteWriter};
+use eventuary_sqlite::reader::{
+    SqliteCursor, SqliteReader, SqliteReaderConfig, SqliteSubscription,
+};
+use eventuary_sqlite::writer::SqliteWriter;
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
     Event::builder(org, ns, topic, Payload::from_string("p"))

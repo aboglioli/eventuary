@@ -14,8 +14,9 @@ use eventuary_core::io::Writer;
 use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{Error, Event, Payload, StartFrom};
 
+use eventuary_kafka::reader::KafkaReader;
 use eventuary_kafka::reader_config::KafkaReaderConfig;
-use eventuary_kafka::{KafkaReader, KafkaWriter};
+use eventuary_kafka::writer::KafkaWriter;
 
 const KAFKA_IMAGE: &str = "confluentinc/cp-kafka";
 const KAFKA_TAG: &str = "7.6.0";

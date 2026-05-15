@@ -13,7 +13,3 @@ pub mod database;
 pub mod reader;
 pub mod relation;
 pub mod writer;
-
-pub use checkpoint_store::SqliteCheckpointStore;
-pub use reader::SqliteReader;
-pub use writer::SqliteWriter;

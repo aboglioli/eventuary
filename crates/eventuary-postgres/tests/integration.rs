@@ -15,8 +15,8 @@ use eventuary_core::{
     TopicPattern,
 };
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::reader::{PgCursor, PgReaderConfig, PgSubscription};
-use eventuary_postgres::{PgReader, PgWriter};
+use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
+use eventuary_postgres::writer::PgWriter;
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

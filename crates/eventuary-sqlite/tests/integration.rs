@@ -11,8 +11,8 @@ use eventuary_core::{
     TopicPattern,
 };
 use eventuary_sqlite::database::SqliteDatabase;
-use eventuary_sqlite::reader::{SqliteReaderConfig, SqliteSubscription};
-use eventuary_sqlite::{SqliteReader, SqliteWriter};
+use eventuary_sqlite::reader::{SqliteReader, SqliteReaderConfig, SqliteSubscription};
+use eventuary_sqlite::writer::SqliteWriter;
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
     Event::builder(org, ns, topic, Payload::from_string("payload"))

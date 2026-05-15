@@ -543,10 +543,11 @@ Each crate exposes only its **base abstractions** and **cross-cutting value type
 
 | Layer | Path | Examples |
 |---|---|---|
-| Primary entry-point type (the `Reader` / `Writer` / `CheckpointStore` implementation) | crate root | `eventuary_postgres::PgReader`, `eventuary_sqlite::SqliteCheckpointStore` |
-| Auxiliary type (cursor, acker, subscription, config, flusher, relation name, database utility) | submodule path | `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::database::SqliteDatabaseConfig` |
+| All implementation and auxiliary types | submodule path | `eventuary_postgres::reader::PgReader`, `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::database::SqliteDatabaseConfig` |
 
-This layering keeps the "first-discovered" public surface small and forces deeper imports to be explicit about which module owns the type. Module submodules carrying impls are declared `pub mod` so the submodule path is reachable; the trait file is private since the trait is already re-exported flat by its parent module.
+Backend `lib.rs` files contain only `pub mod` declarations. No flat re-exports. The submodule name (`reader`, `writer`, `checkpoint_store`, `database`, `relation`, `flusher`, `reader_config`) tells the user what role the type plays.
+
+This makes the rule uniform across all crates: implementations and their auxiliaries always live at `<crate>::<module>::*`. Only `eventuary-core` keeps flat re-exports — for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and for IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
 
 ### Import Paths Mental Model
 
@@ -569,11 +570,10 @@ use eventuary::io::stream::{BatchedStream, SpawnedStream};
 use eventuary::io::acker::{OnceAcker, NoopAcker, BatchedAcker};
 use eventuary::io::filter::{EventFilter, AllFilter, AndFilter};
 
-// Backend primary entry-point types — feature-gated, at backend crate root
-use eventuary::postgres::{PgReader, PgWriter, PgCheckpointStore};
-
-// Backend auxiliary types — at their owning submodule
-use eventuary::postgres::reader::{PgCursor, PgSubscription, PgReaderConfig};
+// Backend types — feature-gated, all at submodule path
+use eventuary::postgres::reader::{PgReader, PgCursor, PgSubscription, PgReaderConfig};
+use eventuary::postgres::writer::{PgWriter, PgWriterConfig};
+use eventuary::postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
 use eventuary::postgres::relation::PgRelationName;
 ```
@@ -584,7 +584,7 @@ use eventuary::postgres::relation::PgRelationName;
 use eventuary_core::{Event, Payload};                   // domain
 use eventuary_core::io::Reader;                         // IO base
 use eventuary_core::io::reader::CheckpointReader;       // IO wrapper
-use eventuary_postgres::PgReader;                       // backend primary
+use eventuary_postgres::reader::PgReader;               // backend implementation
 use eventuary_postgres::reader::PgCursor;               // backend auxiliary
 ```
 
@@ -597,8 +597,7 @@ The two routes are interchangeable — the umbrella does `pub use eventuary_core
 | `<crate>::Type` | Domain value | `Event`, `Topic`, `Payload` |
 | `<crate>::io::Type` | IO base abstraction | `Reader`, `Acker`, `Message` |
 | `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::handler::RetryPolicy` |
-| `<crate>::<backend>::Type` | Backend primary | `postgres::PgReader` |
-| `<crate>::<backend>::<module>::Type` | Backend auxiliary | `postgres::reader::PgCursor` |
+| `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor` |
 
 No `prelude` module is provided by design — importing through these paths is the learning surface for the structure. Once the layering is understood, users may write personal preludes in their own crates.
 

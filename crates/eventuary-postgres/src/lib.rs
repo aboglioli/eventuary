@@ -13,7 +13,3 @@ pub mod database;
 pub mod reader;
 pub mod relation;
 pub mod writer;
-
-pub use checkpoint_store::PgCheckpointStore;
-pub use reader::PgReader;
-pub use writer::PgWriter;

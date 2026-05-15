@@ -20,6 +20,3 @@ pub mod flusher;
 pub mod reader;
 pub mod reader_config;
 pub mod writer;
-
-pub use reader::KafkaReader;
-pub use writer::KafkaWriter;
