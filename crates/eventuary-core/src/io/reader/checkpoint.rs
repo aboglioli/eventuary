@@ -19,15 +19,15 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
+use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 use crate::start_from::{StartFrom, StartableSubscription};
@@ -196,8 +196,7 @@ where
     }
 }
 
-pub type CheckpointStream<A, C, S> =
-    Pin<Box<dyn Stream<Item = Result<Message<CheckpointAcker<A, C, S>, C>>> + Send>>;
+pub type CheckpointStream<A, C, S> = SpawnedStream<CheckpointAcker<A, C, S>, C>;
 
 pub struct CheckpointReader<R, S> {
     inner: R,
@@ -342,10 +341,7 @@ where
             }
         });
 
-        let stream = futures::stream::unfold((rx, Some(handle)), |(mut rx, handle)| async move {
-            rx.recv().await.map(|item| (item, (rx, handle)))
-        });
-        Ok(Box::pin(stream))
+        Ok(SpawnedStream::new(rx, handle))
     }
 }
 
@@ -827,5 +823,34 @@ mod tests {
         let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
         let key = CheckpointKey::new(scope, id.clone());
         assert_eq!(key.cursor_id, id);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_stream_drop_aborts_forwarder_when_inner_stream_is_pending() {
+        struct PendingReader;
+        impl Reader for PendingReader {
+            type Subscription = TestSub;
+            type Acker = NoopAcker;
+            type Cursor = TestCursor;
+            type Stream =
+                Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+            async fn read(&self, _: TestSub) -> Result<Self::Stream> {
+                Ok(Box::pin(futures::stream::pending()))
+            }
+        }
+
+        let store = PreloadedStore::<TestCursor>::default();
+        let cr = CheckpointReader::new(PendingReader, store);
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+
+        let stream = cr
+            .read(CheckpointSubscription::new(TestSub, scope))
+            .await
+            .unwrap();
+        drop(stream);
     }
 }
