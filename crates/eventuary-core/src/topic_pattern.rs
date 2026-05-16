@@ -21,8 +21,6 @@ impl TopicPattern {
 mod tests {
     use super::*;
 
-    use crate::payload::Payload;
-
     #[test]
     fn exact_matches_identical_topic() {
         let pattern = TopicPattern::exact(Topic::new("invoice.created").unwrap());

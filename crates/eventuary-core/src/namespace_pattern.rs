@@ -21,8 +21,6 @@ impl NamespacePattern {
 mod tests {
     use super::*;
 
-    use crate::payload::Payload;
-
     #[test]
     fn prefix_matches_descendants() {
         let pattern = NamespacePattern::prefix(Namespace::new("/billing").unwrap());

@@ -214,9 +214,12 @@ mod tests {
 
 pub mod checkpoint;
 pub mod filtered;
+pub mod concurrency_limit;
 pub mod inspect;
 pub mod map;
 pub mod partitioned;
+pub mod rate_limit;
+pub mod recover;
 pub mod timeout;
 
 pub use checkpoint::{
@@ -224,6 +227,7 @@ pub use checkpoint::{
     CheckpointScope, CheckpointStore, CheckpointStream,
     CheckpointSubscription, MissingCheckpointPolicy, InvalidCursorPolicy,
 };
+pub use concurrency_limit::ConcurrencyLimitReader;
 pub use filtered::{FilteredReader, FilteredStream};
 pub use inspect::{InspectHooks, InspectReader};
 pub use map::MapReader;
@@ -231,4 +235,6 @@ pub use partitioned::{
     LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader,
     PartitionedReaderConfig, PartitionedSubscription,
 };
+pub use rate_limit::{RateLimit, RateLimitReader};
+pub use recover::{RecoverConfig, RecoverReader};
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};

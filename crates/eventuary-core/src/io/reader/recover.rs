@@ -1,0 +1,202 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::StreamExt;
+use tokio::sync::mpsc;
+
+use crate::error::Result;
+use crate::io::stream::SpawnedStream;
+use crate::io::{Message, Reader};
+
+#[derive(Debug, Clone)]
+pub struct RecoverConfig {
+    pub max_retries: usize,
+    pub backoff: Duration,
+    pub backoff_multiplier: f64,
+}
+
+impl Default for RecoverConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            backoff: Duration::from_millis(100),
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+pub struct RecoverReader<R> {
+    inner: Arc<R>,
+    config: RecoverConfig,
+}
+
+impl<R> RecoverReader<R> {
+    pub fn new(inner: R, config: RecoverConfig) -> Self {
+        Self {
+            inner: Arc::new(inner),
+            config,
+        }
+    }
+}
+
+impl<R> Reader for RecoverReader<R>
+where
+    R: Reader + Send + Sync + 'static,
+    R::Subscription: Clone + Send + 'static,
+    R::Acker: Send + Sync + 'static,
+    R::Cursor: Send + Sync + 'static,
+    R::Stream: Send + 'static,
+{
+    type Subscription = R::Subscription;
+    type Acker = R::Acker;
+    type Cursor = R::Cursor;
+    type Stream = SpawnedStream<R::Acker, R::Cursor>;
+
+    async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        let inner_reader = Arc::clone(&self.inner);
+        let config = self.config.clone();
+        let (tx, rx) = mpsc::channel(64);
+
+        let handle = tokio::spawn(async move {
+            let mut retries = 0usize;
+            let mut backoff = config.backoff;
+            let mut stream = match inner_reader.read(subscription.clone()).await {
+                Ok(s) => Box::pin(s),
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+
+            loop {
+                match stream.next().await {
+                    Some(Ok(msg)) => {
+                        retries = 0;
+                        backoff = config.backoff;
+                        if tx.send(Ok(msg)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        if retries >= config.max_retries {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                        retries += 1;
+                        tokio::time::sleep(backoff).await;
+                        backoff = Duration::from_secs_f64(
+                            backoff.as_secs_f64() * config.backoff_multiplier,
+                        );
+                        match inner_reader.read(subscription.clone()).await {
+                            Ok(s) => stream = Box::pin(s),
+                            Err(read_err) => {
+                                // Retry the read next iteration
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        // Inner stream ended cleanly
+                        let _ = tx.send(Err(crate::Error::Store("recover: inner stream ended".into()))).await;
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(SpawnedStream::new(rx, handle))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use futures::{Stream, StreamExt, stream};
+
+    use super::*;
+    use crate::event::Event;
+    use crate::io::acker::NoopAcker;
+    use crate::payload::Payload;
+
+    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    struct TestCursor(u64);
+
+    struct AlternatingReader {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl Reader for AlternatingReader {
+        type Subscription = ();
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let items: Vec<Result<Message<NoopAcker, TestCursor>>> = if call < 2 {
+                // First two reads: error
+                vec![Err(crate::Error::Store("transient".into()))]
+            } else {
+                // Third read: success
+                vec![Ok(Message::new(
+                    Event::create("org", "/x", "test", Payload::from_string("p")).unwrap(),
+                    NoopAcker,
+                    TestCursor(0),
+                ))]
+            };
+            Ok(Box::pin(stream::iter(items)))
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_and_then_produces_message() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let reader = AlternatingReader {
+            call_count: Arc::clone(&call_count),
+        };
+        let config = RecoverConfig {
+            max_retries: 3,
+            backoff: Duration::from_millis(1),
+            backoff_multiplier: 1.0,
+        };
+        let recover = RecoverReader::new(reader, config);
+        let mut stream = recover.read(()).await.unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(*msg.cursor(), TestCursor(0));
+        // First read + 2 retries = 3 calls
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn stops_after_max_retries() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let reader = AlternatingReader {
+            call_count: Arc::clone(&call_count),
+        };
+        let config = RecoverConfig {
+            max_retries: 1,
+            backoff: Duration::from_millis(1),
+            backoff_multiplier: 1.0,
+        };
+        let recover = RecoverReader::new(reader, config);
+        let mut stream = recover.read(()).await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap();
+
+        assert!(result.unwrap().is_err());
+        // First read + 1 retry = 2 calls
+        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+}
