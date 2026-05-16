@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Message, Reader};
+use crate::io::Reader;
 
 #[derive(Debug, Clone)]
 pub struct RecoverConfig {
@@ -89,7 +89,7 @@ where
                         );
                         match inner_reader.read(subscription.clone()).await {
                             Ok(s) => stream = Box::pin(s),
-                            Err(read_err) => {
+                            Err(_read_err) => {
                                 // Retry the read next iteration
                                 continue;
                             }
@@ -116,6 +116,7 @@ mod tests {
     use std::time::Duration;
 
     use futures::{Stream, StreamExt, stream};
+    use crate::io::{Message, Cursor};
 
     use super::*;
     use crate::event::Event;

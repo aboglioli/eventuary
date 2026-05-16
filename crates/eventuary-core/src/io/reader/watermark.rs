@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -7,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Message, Reader};
+use crate::io::{Reader};
 
 pub trait WatermarkStore: Clone + Send + Sync + 'static {
     fn load_watermark(
@@ -100,6 +99,7 @@ where
 mod tests {
     use std::pin::Pin;
     use std::sync::Mutex;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use chrono::TimeDelta;
@@ -108,6 +108,7 @@ mod tests {
     use super::*;
     use crate::event::{Event, EventId};
     use crate::io::acker::NoopAcker;
+    use crate::io::{Cursor, Message};
     use crate::metadata::Metadata;
     use crate::namespace::Namespace;
     use crate::organization::OrganizationId;

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Message, Reader};
+use crate::io::{Reader};
 
 pub trait DedupeStore: Clone + Send + Sync + 'static {
     fn exists(&self, event_id: &str) -> impl Future<Output = Result<bool>> + Send;
@@ -117,6 +117,7 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::io::acker::NoopAcker;
+    use crate::io::{Cursor, Message};
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
