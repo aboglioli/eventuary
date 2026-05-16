@@ -217,6 +217,7 @@ pub mod filtered;
 pub mod inspect;
 pub mod map;
 pub mod partitioned;
+pub mod timeout;
 
 pub use checkpoint::{
     CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig,
@@ -230,3 +231,4 @@ pub use partitioned::{
     LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader,
     PartitionedReaderConfig, PartitionedSubscription,
 };
+pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};

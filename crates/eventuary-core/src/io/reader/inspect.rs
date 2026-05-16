@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::io::acker::NoopAcker;
-    use crate::io::{Acker, Cursor, Reader};
+    use crate::io::{Cursor, Reader};
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
