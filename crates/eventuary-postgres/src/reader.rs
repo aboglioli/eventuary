@@ -5,6 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use eventuary_core::io::filter::EventFilter;
@@ -84,6 +85,7 @@ impl Default for PgReaderConfig {
 #[derive(Clone)]
 pub struct PgCursorAcker {
     state: Arc<Mutex<CursorState>>,
+    notify: Arc<Notify>,
     sequence: i64,
 }
 
@@ -99,12 +101,14 @@ impl Acker for PgCursorAcker {
             state.last_acked = self.sequence;
         }
         state.pending_nack = false;
+        self.notify.notify_waiters();
         Ok(())
     }
 
     async fn nack(&self) -> Result<()> {
         let mut state = self.state.lock().await;
         state.pending_nack = true;
+        self.notify.notify_waiters();
         Ok(())
     }
 }
@@ -152,6 +156,7 @@ impl Reader for PgReader {
             last_acked: after_seq,
             pending_nack: false,
         }));
+        let notify = Arc::new(Notify::new());
 
         let handle = tokio::spawn(async move {
             let mut delivered = 0usize;
@@ -206,6 +211,7 @@ impl Reader for PgReader {
                     }
                     let acker = PgCursorAcker {
                         state: Arc::clone(&state),
+                        notify: Arc::clone(&notify),
                         sequence,
                     };
                     let cursor = PgCursor { sequence };
@@ -219,23 +225,21 @@ impl Reader for PgReader {
                     delivered += 1;
 
                     loop {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        let guard = state.lock().await;
-                        if guard.last_acked >= sequence {
-                            after_seq = sequence;
-                            drop(guard);
-                            buffer.pop_front();
-                            break;
+                        {
+                            let guard = state.lock().await;
+                            if guard.last_acked >= sequence {
+                                after_seq = sequence;
+                                buffer.pop_front();
+                                break;
+                            }
+                            if guard.pending_nack {
+                                break;
+                            }
+                            if tx.is_closed() {
+                                return;
+                            }
                         }
-                        if guard.pending_nack {
-                            drop(guard);
-                            let mut g = state.lock().await;
-                            g.pending_nack = false;
-                            break;
-                        }
-                        if tx.is_closed() {
-                            return;
-                        }
+                        notify.notified().await;
                     }
                 }
             }
