@@ -214,14 +214,18 @@ mod tests {
 
 pub mod batch;
 pub mod checkpoint;
-pub mod filtered;
 pub mod concurrency_limit;
+pub mod dedupe;
+pub mod filtered;
 pub mod inspect;
 pub mod map;
+pub mod merge;
 pub mod partitioned;
 pub mod rate_limit;
 pub mod recover;
+pub mod replay_then_live;
 pub mod timeout;
+pub mod watermark;
 pub mod window;
 
 pub use batch::{BatchAcker, BatchCursor, BatchReader};
@@ -242,3 +246,7 @@ pub use rate_limit::{RateLimit, RateLimitReader};
 pub use recover::{RecoverConfig, RecoverReader};
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
 pub use window::WindowReader;
+pub use dedupe::{DedupeReader, DedupeStore, InMemoryDedupeStore};
+pub use merge::MergeReader;
+pub use replay_then_live::ReplayThenLiveReader;
+pub use watermark::{WatermarkReader, WatermarkStore};
