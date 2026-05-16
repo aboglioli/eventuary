@@ -214,6 +214,7 @@ mod tests {
 
 pub mod checkpoint;
 pub mod filtered;
+pub mod inspect;
 pub mod map;
 pub mod partitioned;
 
@@ -223,6 +224,7 @@ pub use checkpoint::{
     CheckpointSubscription, MissingCheckpointPolicy, InvalidCursorPolicy,
 };
 pub use filtered::{FilteredReader, FilteredStream};
+pub use inspect::{InspectHooks, InspectReader};
 pub use map::MapReader;
 pub use partitioned::{
     LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader,
