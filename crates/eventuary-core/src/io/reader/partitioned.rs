@@ -52,7 +52,7 @@ use crate::event::Event;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 use crate::partition::{LogicalPartition, partition_for};
-use crate::start_from::{StartFrom, StartableSubscription};
+use crate::io::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
 pub struct PartitionedReaderConfig {

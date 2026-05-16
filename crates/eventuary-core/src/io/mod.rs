@@ -4,6 +4,7 @@ pub mod acker;
 pub mod consumer;
 pub mod consumer_group_id;
 mod cursor;
+pub mod start_from;
 pub mod filter;
 pub mod handler;
 mod message;

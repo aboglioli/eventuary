@@ -41,7 +41,6 @@ mod partition;
 mod payload;
 mod serialization;
 mod snapshot;
-mod start_from;
 mod topic;
 mod topic_pattern;
 
@@ -57,6 +56,6 @@ pub use partition::{LogicalPartition, fnv1a_u64, partition_for};
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};
-pub use start_from::{StartFrom, StartableSubscription};
+pub use io::start_from::{StartFrom, StartableSubscription};
 pub use topic::Topic;
 pub use topic_pattern::TopicPattern;

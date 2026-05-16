@@ -30,7 +30,7 @@ use crate::io::ConsumerGroupId;
 use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
-use crate::start_from::{StartFrom, StartableSubscription};
+use crate::io::start_from::{StartFrom, StartableSubscription};
 
 pub trait CheckpointStore<C>: Clone + Send + Sync + 'static {
     fn load<'a>(
@@ -352,8 +352,8 @@ mod tests {
     use crate::io::Message;
     use crate::io::StreamId;
     use crate::io::acker::NoopAcker;
+    use crate::io::start_from::{StartFrom, StartableSubscription};
     use crate::payload::Payload;
-    use crate::start_from::{StartFrom, StartableSubscription};
     use futures::Stream;
     use std::pin::Pin;
     use tokio::sync::Mutex as TokioMutex;
