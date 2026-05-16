@@ -212,6 +212,7 @@ mod tests {
     }
 }
 
+pub mod batch;
 pub mod checkpoint;
 pub mod filtered;
 pub mod concurrency_limit;
@@ -221,7 +222,9 @@ pub mod partitioned;
 pub mod rate_limit;
 pub mod recover;
 pub mod timeout;
+pub mod window;
 
+pub use batch::{BatchAcker, BatchCursor, BatchReader};
 pub use checkpoint::{
     CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig,
     CheckpointScope, CheckpointStore, CheckpointStream,
@@ -238,3 +241,4 @@ pub use partitioned::{
 pub use rate_limit::{RateLimit, RateLimitReader};
 pub use recover::{RecoverConfig, RecoverReader};
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
+pub use window::WindowReader;
