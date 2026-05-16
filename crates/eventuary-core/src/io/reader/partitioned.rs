@@ -1,6 +1,6 @@
 //! Partitioned reader: in-process lane scheduler over any inner reader.
 //!
-//! Routes inner messages into N lanes by `partition_for(event, count)`.
+//! Routes inner messages into N lanes by `Event::partition(count)`.
 //! Each lane buffers up to `lane_capacity` events. Downstream redelivery
 //! is in-memory only: a downstream `ack` clears the lane's in-flight slot
 //! so the merged emit task can serve the next event from that lane (or any
@@ -51,7 +51,7 @@ use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
-use crate::partition::{LogicalPartition, partition_for};
+use crate::event_key::Partition;
 use crate::io::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
@@ -129,11 +129,11 @@ where
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct PartitionedCursor<C> {
     inner: C,
-    partition: LogicalPartition,
+    partition: Partition,
 }
 
 impl<C> PartitionedCursor<C> {
-    pub fn new(inner: C, partition: LogicalPartition) -> Self {
+    pub fn new(inner: C, partition: Partition) -> Self {
         Self { inner, partition }
     }
 
@@ -145,14 +145,18 @@ impl<C> PartitionedCursor<C> {
         self.inner
     }
 
-    pub fn partition(&self) -> LogicalPartition {
+    pub fn partition(&self) -> Partition {
         self.partition
     }
 }
 
 impl<C> Cursor for PartitionedCursor<C> {
     fn id(&self) -> CursorId {
-        self.partition.to_cursor_id()
+        CursorId::Named(Arc::from(format!(
+            "partition:{}:{}",
+            self.partition.count(),
+            self.partition.id(),
+        )))
     }
 }
 
@@ -314,7 +318,6 @@ where
         let inner_stream = self.inner.read(inner_subscription).await?;
         let count_nz = self.config.partition_count;
         let count = count_nz.get() as usize;
-        let count_u32 = std::num::NonZeroU32::new(count_nz.get() as u32).unwrap();
         let lane_capacity = self.config.lane_capacity.get();
         let scheduling = self.config.scheduling;
         let ack_mode = self.config.ack_mode;
@@ -367,7 +370,7 @@ where
                         continue;
                     }
                 };
-                let lane_id = partition_for(msg.event(), count_u32) as usize;
+                let lane_id = msg.event().partition(count_nz).id() as usize;
                 let mut msg_holder = Some(msg);
                 loop {
                     let lanes = intake_state.lock().await;
@@ -505,7 +508,7 @@ where
                 match pick {
                     Some((lane_id, id, event, inner_acker, cursor)) => {
                         let partition =
-                            LogicalPartition::new(lane_id as u16, count_nz).expect("valid lane");
+                            Partition::new(lane_id as u16, count_nz).expect("valid lane");
                         let acker = PartitionAcker {
                             state: Arc::clone(&emit_state),
                             notify: Arc::clone(&emit_notify),
@@ -581,7 +584,7 @@ mod tests {
 
     #[test]
     fn partitioned_cursor_id_is_named_with_partition() {
-        let partition = LogicalPartition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
+        let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
         assert_eq!(
             cursor.id(),
@@ -591,7 +594,7 @@ mod tests {
 
     #[test]
     fn partitioned_cursor_roundtrip_preserves_partition_and_inner() {
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(42), partition);
 
         let value = serde_json::to_value(&cursor).unwrap();
@@ -602,7 +605,7 @@ mod tests {
 
     #[test]
     fn partitioned_subscription_stores_start_after_cursor() {
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), partition);
         let subscription = PartitionedSubscription::<(), TestCursor>::new(())
             .with_start(StartFrom::After(cursor.clone()));
@@ -612,7 +615,7 @@ mod tests {
 
     #[test]
     fn partitioned_subscription_stores_starts_from_with_starts() {
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let starts = vec![StartFrom::After(PartitionedCursor::new(
             TestCursor(10),
             partition,
@@ -628,7 +631,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
         let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let old_partition = LogicalPartition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
+        let old_partition = Partition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), old_partition);
         let subscription =
             PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
@@ -648,7 +651,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
         let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), partition);
         let subscription =
             PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));

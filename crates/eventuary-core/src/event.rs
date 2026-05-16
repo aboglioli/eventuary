@@ -229,6 +229,20 @@ impl Event {
     pub fn key(&self) -> Option<&EventKey> {
         self.key.as_ref()
     }
+
+    /// Determine the partition for this event within a given count.
+    /// Uses the event key if present, falls back to event id bytes.
+    pub fn partition(&self, count: std::num::NonZeroU16) -> crate::event_key::Partition {
+        match self.key() {
+            Some(key) => key.partition_for(count),
+            None => {
+                let id = (crate::event_key::fnv1a_u64(self.id().as_uuid().as_bytes())
+                    % count.get() as u64) as u16;
+                crate::event_key::Partition::new(id, count)
+                    .expect("id < count by modulo")
+            }
+        }
+    }
     pub fn parent_id(&self) -> Option<EventId> {
         self.parent_id
     }

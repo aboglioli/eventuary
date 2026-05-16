@@ -671,12 +671,12 @@ mod tests {
         use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
-        use crate::partition::LogicalPartition;
+        use crate::event_key::Partition;
         use futures::StreamExt;
         use std::num::NonZeroU16;
 
-        let old_partition = LogicalPartition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
-        let current_partition = LogicalPartition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+        let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let current_partition = Partition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
 
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![
@@ -729,11 +729,11 @@ mod tests {
         use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
-        use crate::partition::LogicalPartition;
+        use crate::event_key::Partition;
         use futures::StreamExt;
         use std::num::NonZeroU16;
 
-        let old_partition = LogicalPartition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![(
             CursorId::Named(std::sync::Arc::from("partition:8:0")),
