@@ -119,39 +119,48 @@ impl<S> CheckpointSubscription<S> {
     }
 }
 
+use std::collections::VecDeque;
+
+struct Pending<C> {
+    cursor: C,
+    completed: bool,
+}
+
 struct PendingState<C> {
-    delivered: Vec<C>,
-    completed: std::collections::HashSet<usize>,
-    next_to_commit: usize,
+    queue: VecDeque<Pending<C>>,
+    offset: usize,
 }
 
 impl<C: Clone> PendingState<C> {
     fn new() -> Self {
         Self {
-            delivered: Vec::new(),
-            completed: std::collections::HashSet::new(),
-            next_to_commit: 0,
+            queue: VecDeque::new(),
+            offset: 0,
         }
     }
 
     fn record(&mut self, cursor: C) -> usize {
-        let idx = self.delivered.len();
-        self.delivered.push(cursor);
+        let idx = self.offset + self.queue.len();
+        self.queue.push_back(Pending {
+            cursor,
+            completed: false,
+        });
         idx
     }
 
     fn complete(&mut self, idx: usize) -> Option<C> {
-        self.completed.insert(idx);
-        let mut advanced: Option<C> = None;
-        while self.completed.remove(&self.next_to_commit) {
-            advanced = Some(self.delivered[self.next_to_commit].clone());
-            self.next_to_commit += 1;
+        let adjusted = idx.wrapping_sub(self.offset);
+        self.queue[adjusted].completed = true;
+        let mut latest: Option<C> = None;
+        while self.queue.front().map(|p| p.completed).unwrap_or(false) {
+            latest = Some(self.queue.pop_front().unwrap().cursor);
+            self.offset += 1;
         }
-        advanced
+        latest
     }
 
     fn pending_count(&self) -> usize {
-        self.delivered.len() - self.next_to_commit
+        self.queue.len()
     }
 }
 
