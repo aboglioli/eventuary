@@ -78,7 +78,14 @@ impl CheckpointKey {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-pub enum CheckpointResumePolicy {
+pub enum MissingCheckpointPolicy {
+    #[default]
+    UseInitialStart,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum InvalidCursorPolicy {
     #[default]
     UseInitialStart,
     Error,
@@ -101,7 +108,8 @@ impl Default for CheckpointReaderConfig {
 pub struct CheckpointSubscription<S> {
     pub inner: S,
     pub scope: CheckpointScope,
-    pub resume_policy: CheckpointResumePolicy,
+    pub on_missing: MissingCheckpointPolicy,
+    pub on_invalid: InvalidCursorPolicy,
 }
 
 impl<S> CheckpointSubscription<S> {
@@ -109,12 +117,18 @@ impl<S> CheckpointSubscription<S> {
         Self {
             inner,
             scope,
-            resume_policy: CheckpointResumePolicy::UseInitialStart,
+            on_missing: MissingCheckpointPolicy::UseInitialStart,
+            on_invalid: InvalidCursorPolicy::UseInitialStart,
         }
     }
 
-    pub fn with_resume_policy(mut self, policy: CheckpointResumePolicy) -> Self {
-        self.resume_policy = policy;
+    pub fn on_missing(mut self, policy: MissingCheckpointPolicy) -> Self {
+        self.on_missing = policy;
+        self
+    }
+
+    pub fn on_invalid(mut self, policy: InvalidCursorPolicy) -> Self {
+        self.on_invalid = policy;
         self
     }
 }
@@ -250,7 +264,7 @@ where
         let store = self.store.clone();
         let stored = store.load_scope(&scope).await?;
 
-        if stored.is_empty() && matches!(subscription.resume_policy, CheckpointResumePolicy::Error)
+        if stored.is_empty() && matches!(subscription.on_missing, MissingCheckpointPolicy::Error)
         {
             return Err(Error::InvalidCursor(format!(
                 "checkpoint reader: no checkpoint found for consumer group `{}` and stream `{}`",
@@ -273,8 +287,8 @@ where
             }
             Err(Error::InvalidCursor(reason))
                 if matches!(
-                    subscription.resume_policy,
-                    CheckpointResumePolicy::UseInitialStart
+                    subscription.on_invalid,
+                    InvalidCursorPolicy::UseInitialStart
                 ) =>
             {
                 tracing::warn!(
@@ -589,7 +603,7 @@ mod tests {
         );
 
         let subscription = CheckpointSubscription::new(TestSub, scope)
-            .with_resume_policy(CheckpointResumePolicy::Error);
+            .on_missing(MissingCheckpointPolicy::Error);
 
         let err = match cr.read(subscription).await {
             Ok(_) => panic!("expected missing checkpoint error"),
@@ -660,7 +674,7 @@ mod tests {
         let err = match cr
             .read(
                 CheckpointSubscription::new(TestSub, scope)
-                    .with_resume_policy(CheckpointResumePolicy::Error),
+                    .on_invalid(InvalidCursorPolicy::Error),
             )
             .await
         {
@@ -702,7 +716,7 @@ mod tests {
         let inner_reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(
+        let partitioned = PartitionedReader::source(
             inner_reader,
             PartitionedReaderConfig {
                 partition_count: NonZeroU16::new(4).unwrap(),
@@ -752,7 +766,7 @@ mod tests {
         let inner_reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(
+        let partitioned = PartitionedReader::source(
             inner_reader,
             PartitionedReaderConfig {
                 partition_count: NonZeroU16::new(4).unwrap(),
@@ -806,10 +820,18 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_resume_policy_defaults_to_use_initial_start() {
+    fn missing_checkpoint_policy_defaults_to_use_initial_start() {
         assert_eq!(
-            CheckpointResumePolicy::default(),
-            CheckpointResumePolicy::UseInitialStart
+            MissingCheckpointPolicy::default(),
+            MissingCheckpointPolicy::UseInitialStart
+        );
+    }
+
+    #[test]
+    fn invalid_cursor_policy_defaults_to_use_initial_start() {
+        assert_eq!(
+            InvalidCursorPolicy::default(),
+            InvalidCursorPolicy::UseInitialStart
         );
     }
 
