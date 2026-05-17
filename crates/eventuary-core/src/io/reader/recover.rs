@@ -4,15 +4,42 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::io::Reader;
 use crate::io::stream::SpawnedStream;
 
 #[derive(Debug, Clone)]
 pub struct RecoverConfig {
-    pub max_retries: usize,
-    pub backoff: Duration,
-    pub backoff_multiplier: f64,
+    max_retries: usize,
+    backoff: Duration,
+    backoff_multiplier: f64,
+}
+
+impl RecoverConfig {
+    pub fn new(max_retries: usize, backoff: Duration, backoff_multiplier: f64) -> Result<Self> {
+        if !backoff_multiplier.is_finite() || backoff_multiplier < 1.0 {
+            return Err(Error::Config(format!(
+                "recover backoff_multiplier must be finite and >= 1.0, got {backoff_multiplier}"
+            )));
+        }
+        Ok(Self {
+            max_retries,
+            backoff,
+            backoff_multiplier,
+        })
+    }
+
+    pub fn max_retries(&self) -> usize {
+        self.max_retries
+    }
+
+    pub fn backoff(&self) -> Duration {
+        self.backoff
+    }
+
+    pub fn backoff_multiplier(&self) -> f64 {
+        self.backoff_multiplier
+    }
 }
 
 impl Default for RecoverConfig {
@@ -148,11 +175,7 @@ mod tests {
         let reader = AlternatingReader {
             call_count: Arc::clone(&call_count),
         };
-        let config = RecoverConfig {
-            max_retries: 3,
-            backoff: Duration::from_millis(1),
-            backoff_multiplier: 1.0,
-        };
+        let config = RecoverConfig::new(3, Duration::from_millis(1), 1.0).unwrap();
         let recover = RecoverReader::new(reader, config);
         let mut stream = recover.read(()).await.unwrap();
 
@@ -172,11 +195,7 @@ mod tests {
         let reader = AlternatingReader {
             call_count: Arc::clone(&call_count),
         };
-        let config = RecoverConfig {
-            max_retries: 1,
-            backoff: Duration::from_millis(1),
-            backoff_multiplier: 1.0,
-        };
+        let config = RecoverConfig::new(1, Duration::from_millis(1), 1.0).unwrap();
         let recover = RecoverReader::new(reader, config);
         let mut stream = recover.read(()).await.unwrap();
 
@@ -186,5 +205,16 @@ mod tests {
 
         assert!(result.unwrap().is_err());
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn recover_config_rejects_subunit_multiplier() {
+        assert!(RecoverConfig::new(3, Duration::from_millis(1), 0.5).is_err());
+    }
+
+    #[test]
+    fn recover_config_rejects_non_finite_multiplier() {
+        assert!(RecoverConfig::new(3, Duration::from_millis(1), f64::NAN).is_err());
+        assert!(RecoverConfig::new(3, Duration::from_millis(1), f64::INFINITY).is_err());
     }
 }
