@@ -1,18 +1,39 @@
 use std::pin::Pin;
 
+use futures::stream::{PollNext, select_with_strategy};
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum MergeStrategy {
+    #[default]
+    Fair,
+    LeftPriority,
+}
+
 pub struct MergeReader<R1, R2> {
     r1: R1,
     r2: R2,
+    strategy: MergeStrategy,
 }
 
 impl<R1, R2> MergeReader<R1, R2> {
     pub fn new(r1: R1, r2: R2) -> Self {
-        Self { r1, r2 }
+        Self {
+            r1,
+            r2,
+            strategy: MergeStrategy::Fair,
+        }
+    }
+
+    pub fn with_left_priority(r1: R1, r2: R2) -> Self {
+        Self {
+            r1,
+            r2,
+            strategy: MergeStrategy::LeftPriority,
+        }
     }
 }
 
@@ -39,21 +60,26 @@ where
         let stream1 = self.r1.read(sub1).await?;
         let stream2 = self.r2.read(sub2).await?;
 
-        let s1 = Box::pin(stream1.map(|item| {
+        let s1 = stream1.map(|item| {
             item.map(|msg| {
                 let (event, acker, cursor) = msg.into_parts();
                 Message::new(event, MergeAcker::Left(acker), MergeCursor::Left(cursor))
             })
-        }));
-
-        let s2 = Box::pin(stream2.map(|item| {
+        });
+        let s2 = stream2.map(|item| {
             item.map(|msg| {
                 let (event, acker, cursor) = msg.into_parts();
                 Message::new(event, MergeAcker::Right(acker), MergeCursor::Right(cursor))
             })
-        }));
+        });
 
-        Ok(Box::pin(futures::stream::select(s1, s2)))
+        let merged: Self::Stream = match self.strategy {
+            MergeStrategy::Fair => Box::pin(futures::stream::select(s1, s2)),
+            MergeStrategy::LeftPriority => {
+                Box::pin(select_with_strategy(s1, s2, |_: &mut ()| PollNext::Left))
+            }
+        };
+        Ok(merged)
     }
 }
 
@@ -129,17 +155,17 @@ mod tests {
         }
     }
 
-    fn ev() -> Event {
-        Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap()
+    fn ev(topic: &str) -> Event {
+        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
     }
 
     #[tokio::test]
     async fn merges_two_readers() {
         let reader1 = VecReader {
-            events: Mutex::new(Some(vec![ev(), ev(), ev()])),
+            events: Mutex::new(Some(vec![ev("a"), ev("a"), ev("a")])),
         };
         let reader2 = VecReader {
-            events: Mutex::new(Some(vec![ev(), ev()])),
+            events: Mutex::new(Some(vec![ev("b"), ev("b")])),
         };
         let merged = MergeReader::new(reader1, reader2);
         let mut stream = merged.read(((), ())).await.unwrap();
@@ -157,6 +183,29 @@ mod tests {
         assert_eq!(count, 5);
         let end = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
         assert!(end.is_err() || end.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn left_priority_drains_left_before_right() {
+        let left = VecReader {
+            events: Mutex::new(Some(vec![ev("a"), ev("a"), ev("a")])),
+        };
+        let right = VecReader {
+            events: Mutex::new(Some(vec![ev("b"), ev("b")])),
+        };
+        let merged = MergeReader::with_left_priority(left, right);
+        let mut stream = merged.read(((), ())).await.unwrap();
+        let mut topics: Vec<String> = Vec::new();
+        for _ in 0..5 {
+            let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            topics.push(msg.event().topic().as_str().to_owned());
+            msg.ack().await.unwrap();
+        }
+        assert_eq!(topics, vec!["a", "a", "a", "b", "b"]);
     }
 
     #[tokio::test]
