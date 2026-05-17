@@ -1,4 +1,4 @@
-use std::vec::Vec;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -23,7 +23,7 @@ impl<R> Reader for BatchReader<R>
 where
     R: Reader + Send + Sync + 'static,
     R::Subscription: Send + 'static,
-    R::Acker: Clone + Send + Sync + 'static,
+    R::Acker: 'static,
     R::Cursor: Clone + Send + Sync + 'static,
     R::Stream: Send + 'static,
 {
@@ -41,93 +41,117 @@ where
             let mut inner = Box::pin(inner);
             let mut buffer: Vec<(Event, R::Acker, R::Cursor)> = Vec::with_capacity(max_batch);
 
-            async fn flush<A, C>(
-                buffer: &mut Vec<(Event, A, C)>,
-                tx: &mpsc::Sender<Result<Message<BatchAcker<A>, BatchCursor<C>>>>,
-            ) where
-                A: Acker + Clone + Send + Sync + 'static,
-                C: Clone + Send + Sync + 'static,
-            {
-                if buffer.is_empty() {
-                    return;
-                }
-                let batch_ackers: Vec<A> = buffer.iter().map(|(_, a, _)| a.clone()).collect();
-                let batch_cursors: Vec<C> = buffer.iter().map(|(_, _, c)| c.clone()).collect();
-                // Deliver each event with the shared batch acker/cursor
-                let acker = BatchAcker(batch_ackers);
-                let cursor = BatchCursor(batch_cursors);
-                for (event, _, _) in buffer.drain(..) {
-                    if tx
-                        .send(Ok(Message::new(event, acker.clone(), cursor.clone())))
-                        .await
-                        .is_err()
-                    {
+            while let Some(item) = inner.next().await {
+                match item {
+                    Ok(msg) => {
+                        let (event, acker, cursor) = msg.into_parts();
+                        buffer.push((event, acker, cursor));
+                        if buffer.len() >= max_batch && !flush_batch(&mut buffer, &tx).await {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        flush_batch(&mut buffer, &tx).await;
+                        let _ = tx.send(Err(e)).await;
                         return;
                     }
                 }
             }
-
-            loop {
-                tokio::select! {
-                    item = inner.next() => {
-                        match item {
-                            Some(Ok(msg)) => {
-                                let (event, acker, cursor) = msg.into_parts();
-                                buffer.push((event, acker, cursor));
-                                if buffer.len() >= max_batch {
-                                    flush(&mut buffer, &tx).await;
-                                    if tx.is_closed() { return; }
-                                }
-                            }
-                            Some(Err(e)) => {
-                                // Flush remaining before error
-                                flush(&mut buffer, &tx).await;
-                                let _ = tx.send(Err(e)).await;
-                                return;
-                            }
-                            None => {
-                                flush(&mut buffer, &tx).await;
-                                return;
-                            }
-                        }
-                    }
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(3600)) => {
-                        // Periodic wake-up for windowed batch (used by WindowReader)
-                        unreachable!();
-                    }
-                }
-            }
+            flush_batch(&mut buffer, &tx).await;
         });
 
         Ok(SpawnedStream::new(rx, handle))
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct BatchAcker<A: Acker>(pub Vec<A>);
+pub(crate) async fn flush_batch<A, C>(
+    buffer: &mut Vec<(Event, A, C)>,
+    tx: &mpsc::Sender<Result<Message<BatchAcker<A>, BatchCursor<C>>>>,
+) -> bool
+where
+    A: Acker + 'static,
+    C: Clone + Send + Sync + 'static,
+{
+    if buffer.is_empty() {
+        return !tx.is_closed();
+    }
+    let mut ackers: Vec<A> = Vec::with_capacity(buffer.len());
+    let mut cursors: Vec<C> = Vec::with_capacity(buffer.len());
+    let mut events: Vec<Event> = Vec::with_capacity(buffer.len());
+    for (event, acker, cursor) in buffer.drain(..) {
+        events.push(event);
+        ackers.push(acker);
+        cursors.push(cursor);
+    }
+    let acker = BatchAcker {
+        inner: Arc::new(ackers),
+    };
+    let cursor = BatchCursor {
+        inner: Arc::new(cursors),
+    };
+    for event in events {
+        if tx
+            .send(Ok(Message::new(event, acker.clone(), cursor.clone())))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[derive(Debug)]
+pub struct BatchAcker<A> {
+    inner: Arc<Vec<A>>,
+}
+
+impl<A> Clone for BatchAcker<A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
 
 impl<A: Acker> Acker for BatchAcker<A> {
     async fn ack(&self) -> Result<()> {
-        for a in &self.0 {
+        for a in self.inner.iter() {
             a.ack().await?;
         }
         Ok(())
     }
 
     async fn nack(&self) -> Result<()> {
-        for a in &self.0 {
+        for a in self.inner.iter() {
             a.nack().await?;
         }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct BatchCursor<C>(pub Vec<C>);
+#[derive(Debug)]
+pub struct BatchCursor<C> {
+    inner: Arc<Vec<C>>,
+}
+
+impl<C> BatchCursor<C> {
+    pub fn cursors(&self) -> &[C] {
+        &self.inner
+    }
+}
+
+impl<C> Clone for BatchCursor<C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
 
 impl<C: Cursor> Cursor for BatchCursor<C> {
     fn id(&self) -> CursorId {
-        self.0
+        self.inner
             .first()
             .map(|c| c.id())
             .unwrap_or(CursorId::Global)
@@ -163,9 +187,10 @@ mod tests {
 
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let events = self.events.lock().unwrap().take().unwrap_or_default();
-            let iter = events.into_iter().enumerate().map(|(i, e)| {
-                Ok(Message::new(e, NoopAcker, TestCursor(i as i64 + 1)))
-            });
+            let iter = events
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as i64 + 1))));
             Ok(Box::pin(stream::iter(iter)))
         }
     }
@@ -187,62 +212,32 @@ mod tests {
         };
         let batched = BatchReader::new(reader, 2);
         let mut stream = batched.read(()).await.unwrap();
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k0");
-        msg.ack().await.unwrap();
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k1");
-        // Acking this also acks k0 (same batch)
-        msg.ack().await.unwrap();
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k2");
-        msg.ack().await.unwrap();
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k3");
-        msg.ack().await.unwrap();
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k4");
-        msg.ack().await.unwrap();
-
-        // Stream should end
+        for i in 0..5 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(msg.event().key().unwrap().as_str(), &format!("k{i}"));
+            msg.ack().await.unwrap();
+        }
         let end = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
         assert!(matches!(end, Ok(None)));
     }
 
     #[tokio::test]
     async fn batch_cursor_first_cursor_id() {
-        let cursor = BatchCursor(vec![TestCursor(10), TestCursor(20)]);
+        let cursor = BatchCursor {
+            inner: Arc::new(vec![TestCursor(10), TestCursor(20)]),
+        };
         assert_eq!(cursor.id(), TestCursor(10).id());
     }
 
     #[tokio::test]
     async fn batch_cursor_empty_global() {
-        let cursor: BatchCursor<TestCursor> = BatchCursor(vec![]);
+        let cursor: BatchCursor<TestCursor> = BatchCursor {
+            inner: Arc::new(vec![]),
+        };
         assert_eq!(cursor.id(), CursorId::Global);
     }
 }
