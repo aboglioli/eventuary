@@ -1,5 +1,5 @@
+use std::marker::Unpin;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use futures::Stream;
@@ -10,15 +10,12 @@ use crate::io::{Message, Reader};
 
 pub struct TryMapReader<R, F> {
     inner: R,
-    f: Arc<F>,
+    f: F,
 }
 
 impl<R, F> TryMapReader<R, F> {
     pub fn new(inner: R, f: F) -> Self {
-        Self {
-            inner,
-            f: Arc::new(f),
-        }
+        Self { inner, f }
     }
 }
 
@@ -29,7 +26,7 @@ where
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: 'static,
-    F: Fn(Event) -> Result<Event> + Send + Sync + 'static,
+    F: Fn(Event) -> Result<Event> + Clone + Unpin + Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = R::Acker;
@@ -40,20 +37,20 @@ where
         let inner = self.inner.read(subscription).await?;
         Ok(TryMapStream {
             inner: Box::pin(inner),
-            f: Arc::clone(&self.f),
+            f: self.f.clone(),
         })
     }
 }
 
 pub struct TryMapStream<R: Reader, F> {
     inner: Pin<Box<R::Stream>>,
-    f: Arc<F>,
+    f: F,
 }
 
 impl<R, F> Stream for TryMapStream<R, F>
 where
     R: Reader,
-    F: Fn(Event) -> Result<Event>,
+    F: Fn(Event) -> Result<Event> + Unpin,
 {
     type Item = Result<Message<R::Acker, R::Cursor>>;
 
@@ -61,7 +58,8 @@ where
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(msg))) => {
                 let (event, acker, cursor) = msg.into_parts();
-                match (self.f)(event) {
+                let f = &self.f;
+                match f(event) {
                     Ok(mapped) => Poll::Ready(Some(Ok(Message::new(mapped, acker, cursor)))),
                     Err(e) => Poll::Ready(Some(Err(e))),
                 }

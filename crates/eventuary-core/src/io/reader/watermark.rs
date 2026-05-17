@@ -24,22 +24,36 @@ pub trait WatermarkStore: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
-pub type KeyFn = dyn Fn(&Event) -> String + Send + Sync;
+enum WatermarkKey {
+    Static(Arc<str>),
+    Dynamic(Arc<dyn Fn(&Event) -> String + Send + Sync>),
+}
+
+impl WatermarkKey {
+    fn resolve(&self, event: &Event) -> (String, Arc<str>) {
+        match self {
+            WatermarkKey::Static(key) => (key.to_string(), Arc::clone(key)),
+            WatermarkKey::Dynamic(f) => {
+                let s = f(event);
+                let key: Arc<str> = Arc::from(s.clone());
+                (s, key)
+            }
+        }
+    }
+}
 
 pub struct WatermarkReader<R, S> {
     inner: R,
     store: S,
-    key_fn: Arc<KeyFn>,
+    key_fn: WatermarkKey,
 }
 
 impl<R, S> WatermarkReader<R, S> {
     pub fn with_static_key(inner: R, store: S, key: impl Into<String>) -> Self {
-        let key: Arc<str> = Arc::from(key.into());
-        let owned = Arc::clone(&key);
         Self {
             inner,
             store,
-            key_fn: Arc::new(move |_| owned.to_string()),
+            key_fn: WatermarkKey::Static(Arc::from(key.into())),
         }
     }
 
@@ -50,7 +64,7 @@ impl<R, S> WatermarkReader<R, S> {
         Self {
             inner,
             store,
-            key_fn: Arc::new(key_fn),
+            key_fn: WatermarkKey::Dynamic(Arc::new(key_fn)),
         }
     }
 
@@ -78,7 +92,7 @@ where
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
         let store = self.store.clone();
-        let key_fn = Arc::clone(&self.key_fn);
+        let key_fn = self.key_fn.clone();
         let cache: WatermarkCache = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = mpsc::channel(64);
 
@@ -95,7 +109,7 @@ where
                         return;
                     }
                 };
-                let key = (key_fn)(msg.event());
+                let (key, acker_key) = key_fn.resolve(msg.event());
                 let event_ts = msg.event().timestamp();
 
                 let current = {
@@ -132,7 +146,7 @@ where
                         inner: inner_acker,
                         store: store.clone(),
                         cache: Arc::clone(&intake_cache),
-                        key: Arc::from(key),
+                        key: acker_key,
                         event_ts,
                     },
                     cursor,
@@ -170,6 +184,15 @@ impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
 
     async fn nack(&self) -> Result<()> {
         self.inner.nack().await
+    }
+}
+
+impl Clone for WatermarkKey {
+    fn clone(&self) -> Self {
+        match self {
+            WatermarkKey::Static(key) => WatermarkKey::Static(Arc::clone(key)),
+            WatermarkKey::Dynamic(f) => WatermarkKey::Dynamic(Arc::clone(f)),
+        }
     }
 }
 
