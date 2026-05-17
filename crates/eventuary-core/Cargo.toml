@@ -11,6 +11,7 @@ repository.workspace = true
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 either.workspace = true
 futures.workspace = true

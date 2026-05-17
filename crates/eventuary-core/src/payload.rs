@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +44,7 @@ impl FromStr for ContentType {
 
 #[derive(Debug, Clone)]
 pub struct Payload {
-    data: Vec<u8>,
+    data: Bytes,
     content_type: ContentType,
 }
 
@@ -51,27 +52,30 @@ impl Payload {
     pub fn from_json<T: Serialize>(val: &T) -> Result<Self> {
         let data = serde_json::to_vec(val).map_err(|e| Error::Serialization(e.to_string()))?;
         Ok(Self {
-            data,
+            data: Bytes::from(data),
             content_type: ContentType::Json,
         })
     }
 
     pub fn from_string(s: impl Into<String>) -> Self {
         Self {
-            data: s.into().into_bytes(),
+            data: Bytes::from(s.into().into_bytes()),
             content_type: ContentType::PlainText,
         }
     }
 
-    pub fn from_bytes(data: Vec<u8>) -> Self {
+    pub fn from_bytes(data: impl Into<Bytes>) -> Self {
         Self {
-            data,
+            data: data.into(),
             content_type: ContentType::Binary,
         }
     }
 
-    pub fn from_raw(data: Vec<u8>, content_type: ContentType) -> Self {
-        Self { data, content_type }
+    pub fn from_raw(data: impl Into<Bytes>, content_type: ContentType) -> Self {
+        Self {
+            data: data.into(),
+            content_type,
+        }
     }
 
     pub fn to_json<T: DeserializeOwned>(&self) -> Result<T> {
@@ -120,6 +124,19 @@ mod tests {
         let payload = Payload::from_bytes(bytes.clone());
         assert_eq!(payload.content_type(), ContentType::Binary);
         assert_eq!(payload.data(), bytes.as_slice());
+    }
+
+    #[test]
+    fn from_bytes_accepts_static_slice() {
+        let payload = Payload::from_bytes(Bytes::from_static(b"\x00\x01\x02"));
+        assert_eq!(payload.data(), &[0x00, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn clone_does_not_copy_data() {
+        let payload = Payload::from_bytes(vec![1u8; 1024]);
+        let cloned = payload.clone();
+        assert_eq!(payload.data().as_ptr(), cloned.data().as_ptr());
     }
 
     #[test]
