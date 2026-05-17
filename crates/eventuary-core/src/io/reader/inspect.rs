@@ -87,15 +87,13 @@ where
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(msg))) => {
                 self.hooks.on_deliver(msg.event());
-                let (event, inner_acker, cursor) = msg.into_parts();
-                let event_arc = Arc::new(event);
+                let (event_arc, inner_acker, cursor) = msg.into_parts_arc();
                 let acker = InspectAcker {
                     inner: inner_acker,
                     hooks: Arc::clone(&self.hooks),
                     event: Arc::clone(&event_arc),
                 };
-                let out_event = (*event_arc).clone();
-                Poll::Ready(Some(Ok(Message::new(out_event, acker, cursor))))
+                Poll::Ready(Some(Ok(Message::from_arc(event_arc, acker, cursor))))
             }
             Poll::Ready(Some(Err(e))) => {
                 self.hooks.on_error(&e);

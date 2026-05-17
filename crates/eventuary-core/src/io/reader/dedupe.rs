@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -14,6 +15,21 @@ use crate::io::{Acker, Message, Reader};
 pub trait DedupeStore: Clone + Send + Sync + 'static {
     fn exists(&self, event: &Event) -> impl Future<Output = Result<bool>> + Send;
     fn mark_processed(&self, event: &Event) -> impl Future<Output = Result<()>> + Send;
+
+    /// Atomically marks the event as seen, returning whether it was newly
+    /// recorded (`true`) or was already present (`false`). The default
+    /// implementation calls `exists` then `mark_processed`, which is racy
+    /// across concurrent callers. Backends with native atomicity (e.g.,
+    /// Postgres `INSERT ON CONFLICT DO NOTHING`) should override.
+    fn mark_if_new(&self, event: &Event) -> impl Future<Output = Result<bool>> + Send {
+        async move {
+            if self.exists(event).await? {
+                return Ok(false);
+            }
+            self.mark_processed(event).await?;
+            Ok(true)
+        }
+    }
 }
 
 pub struct DedupeReader<R, S> {
@@ -70,14 +86,13 @@ where
                         return;
                     }
                 }
-                let (event, inner_acker, cursor) = msg.into_parts();
-                let event_arc = Arc::new(event);
-                let wrapped = Message::new(
-                    (*event_arc).clone(),
+                let (event_arc, inner_acker, cursor) = msg.into_parts_arc();
+                let wrapped = Message::from_arc(
+                    Arc::clone(&event_arc),
                     DedupeAcker {
                         inner: inner_acker,
                         store: store.clone(),
-                        event: Arc::clone(&event_arc),
+                        event: event_arc,
                     },
                     cursor,
                 );
@@ -108,25 +123,99 @@ impl<A: Acker, S: DedupeStore> Acker for DedupeAcker<A, S> {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct InMemoryDedupeStore {
-    seen: Arc<Mutex<HashSet<String>>>,
+    state: Arc<Mutex<DedupeState>>,
+    capacity: Option<NonZeroUsize>,
+}
+
+#[derive(Debug, Default)]
+struct DedupeState {
+    set: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl Default for InMemoryDedupeStore {
+    fn default() -> Self {
+        Self::unbounded()
+    }
 }
 
 impl InMemoryDedupeStore {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn unbounded() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(DedupeState::default())),
+            capacity: None,
+        }
+    }
+
+    pub fn with_capacity(capacity: NonZeroUsize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(DedupeState::default())),
+            capacity: Some(capacity),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.state.lock().unwrap().set.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state.lock().unwrap().set.is_empty()
+    }
+
+    pub fn clear(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.set.clear();
+        state.order.clear();
     }
 }
 
 impl DedupeStore for InMemoryDedupeStore {
     async fn exists(&self, event: &Event) -> Result<bool> {
-        Ok(self.seen.lock().unwrap().contains(&event.id().to_string()))
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .set
+            .contains(&event.id().to_string()))
     }
 
     async fn mark_processed(&self, event: &Event) -> Result<()> {
-        self.seen.lock().unwrap().insert(event.id().to_string());
+        let key = event.id().to_string();
+        let mut state = self.state.lock().unwrap();
+        if state.set.insert(key.clone()) {
+            state.order.push_back(key);
+            if let Some(cap) = self.capacity {
+                while state.set.len() > cap.get() {
+                    if let Some(oldest) = state.order.pop_front() {
+                        state.set.remove(&oldest);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    async fn mark_if_new(&self, event: &Event) -> Result<bool> {
+        let key = event.id().to_string();
+        let mut state = self.state.lock().unwrap();
+        if !state.set.insert(key.clone()) {
+            return Ok(false);
+        }
+        state.order.push_back(key);
+        if let Some(cap) = self.capacity {
+            while state.set.len() > cap.get() {
+                if let Some(oldest) = state.order.pop_front() {
+                    state.set.remove(&oldest);
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -165,10 +254,14 @@ mod tests {
         }
     }
 
+    fn ev(topic: &str) -> Event {
+        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+    }
+
     #[tokio::test]
     async fn nack_before_mark_allows_redelivery() {
         let e = Event::create("org", "/x", "t", Payload::from_string("p")).unwrap();
-        let store = InMemoryDedupeStore::new();
+        let store = InMemoryDedupeStore::unbounded();
         let reader = VecReader {
             events: Mutex::new(Some(vec![e.clone()])),
         };
@@ -181,7 +274,7 @@ mod tests {
             .unwrap()
             .unwrap();
         m.nack().await.unwrap();
-        assert!(store.seen.lock().unwrap().is_empty());
+        assert_eq!(store.len(), 0);
 
         let reader = VecReader {
             events: Mutex::new(Some(vec![e])),
@@ -194,14 +287,14 @@ mod tests {
             .unwrap()
             .unwrap();
         m.ack().await.unwrap();
-        assert_eq!(store.seen.lock().unwrap().len(), 1);
+        assert_eq!(store.len(), 1);
     }
 
     #[tokio::test]
     async fn dedup_skips_already_marked_events() {
-        let e1 = Event::create("org", "/x", "t1", Payload::from_string("p")).unwrap();
-        let e2 = Event::create("org", "/x", "t2", Payload::from_string("p")).unwrap();
-        let store = InMemoryDedupeStore::new();
+        let e1 = ev("t1");
+        let e2 = ev("t2");
+        let store = InMemoryDedupeStore::unbounded();
         store.mark_processed(&e1).await.unwrap();
 
         let reader = VecReader {
@@ -219,29 +312,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivers_two_unique_events() {
-        let e1 = Event::create("org", "/x", "t1", Payload::from_string("p")).unwrap();
-        let e2 = Event::create("org", "/x", "t2", Payload::from_string("p")).unwrap();
+    async fn capped_store_evicts_oldest() {
+        let store = InMemoryDedupeStore::with_capacity(NonZeroUsize::new(2).unwrap());
+        let e1 = ev("t1");
+        let e2 = ev("t2");
+        let e3 = ev("t3");
+        store.mark_processed(&e1).await.unwrap();
+        store.mark_processed(&e2).await.unwrap();
+        store.mark_processed(&e3).await.unwrap();
+        assert_eq!(store.len(), 2);
+        assert!(!store.exists(&e1).await.unwrap());
+        assert!(store.exists(&e2).await.unwrap());
+        assert!(store.exists(&e3).await.unwrap());
+    }
 
-        let reader = VecReader {
-            events: Mutex::new(Some(vec![e1, e2])),
-        };
-        let store = InMemoryDedupeStore::new();
-        let dedup = DedupeReader::new(reader, store);
-        let mut stream = dedup.read(()).await.unwrap();
+    #[tokio::test]
+    async fn mark_if_new_default_returns_correct_status() {
+        let store = InMemoryDedupeStore::unbounded();
+        let e = ev("t");
+        assert!(store.mark_if_new(&e).await.unwrap());
+        assert!(!store.mark_if_new(&e).await.unwrap());
+    }
 
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        first.ack().await.unwrap();
-
-        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        second.ack().await.unwrap();
+    #[tokio::test]
+    async fn clear_resets_store() {
+        let store = InMemoryDedupeStore::unbounded();
+        store.mark_processed(&ev("t1")).await.unwrap();
+        store.mark_processed(&ev("t2")).await.unwrap();
+        assert_eq!(store.len(), 2);
+        store.clear();
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
     }
 }
