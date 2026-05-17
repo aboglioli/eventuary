@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -15,19 +13,20 @@ use crate::organization::OrganizationId;
 use crate::payload::{ContentType, Payload};
 use crate::topic::Topic;
 
+/// Wire-format representation of an [`Event`]. Field order matches
+/// `Event` so the JSON shape is predictable and self-documenting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedEvent {
     pub id: String,
     pub organization: String,
     pub namespace: String,
     pub topic: String,
-    #[serde(default)]
-    pub key: Option<String>,
-    pub payload: serde_json::Value,
-    pub content_type: String,
+    pub payload: SerializedPayload,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub version: u64,
+    #[serde(default)]
+    pub key: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
     #[serde(default)]
@@ -36,33 +35,93 @@ pub struct SerializedEvent {
     pub causation_id: Option<String>,
 }
 
+/// Wire-format representation of a [`Payload`].
+///
+/// Each variant carries the payload bytes in the natural shape for its
+/// content type:
+/// - `Json` carries the parsed `serde_json::Value` so the wire format
+///   stays human-readable and `jq`-friendly.
+/// - `PlainText` carries the text as a raw JSON string.
+/// - `Binary` carries the raw bytes base64-encoded.
+///
+/// The wire tag is the content-type string, so the JSON shape is
+/// `{"content_type": "...", "data": ...}` regardless of variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "content_type", content = "data")]
+pub enum SerializedPayload {
+    #[serde(rename = "application/json")]
+    Json(serde_json::Value),
+    #[serde(rename = "text/plain")]
+    PlainText(String),
+    #[serde(rename = "application/octet-stream")]
+    Binary(#[serde(with = "base64_bytes")] Vec<u8>),
+}
+
+impl SerializedPayload {
+    pub fn content_type(&self) -> ContentType {
+        match self {
+            Self::Json(_) => ContentType::Json,
+            Self::PlainText(_) => ContentType::PlainText,
+            Self::Binary(_) => ContentType::Binary,
+        }
+    }
+
+    pub fn from_payload(payload: &Payload) -> Result<Self> {
+        match payload.content_type() {
+            ContentType::Json => {
+                let value = serde_json::from_slice(payload.data())
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
+                Ok(Self::Json(value))
+            }
+            ContentType::PlainText => {
+                let text = std::str::from_utf8(payload.data())
+                    .map_err(|e| Error::Serialization(e.to_string()))?;
+                Ok(Self::PlainText(text.to_owned()))
+            }
+            ContentType::Binary => Ok(Self::Binary(payload.data().to_vec())),
+        }
+    }
+
+    pub fn into_payload(self) -> Result<Payload> {
+        match self {
+            Self::Json(value) => {
+                let bytes =
+                    serde_json::to_vec(&value).map_err(|e| Error::Serialization(e.to_string()))?;
+                Ok(Payload::from_raw(bytes, ContentType::Json))
+            }
+            Self::PlainText(text) => Ok(Payload::from_string(text)),
+            Self::Binary(bytes) => Ok(Payload::from_bytes(bytes)),
+        }
+    }
+}
+
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&BASE64.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(d)?;
+        BASE64.decode(encoded).map_err(serde::de::Error::custom)
+    }
+}
+
 impl SerializedEvent {
     pub fn from_event(event: &Event) -> Result<Self> {
-        let payload_value = match event.payload().content_type() {
-            ContentType::Json => serde_json::from_slice(event.payload().data())
-                .map_err(|e| Error::Serialization(e.to_string()))?,
-            ContentType::PlainText => {
-                let text = std::str::from_utf8(event.payload().data())
-                    .map_err(|e| Error::Serialization(e.to_string()))?;
-                serde_json::Value::String(text.to_owned())
-            }
-            ContentType::Binary => {
-                let encoded = BASE64.encode(event.payload().data());
-                serde_json::Value::String(encoded)
-            }
-        };
-
         Ok(Self {
             id: event.id().to_string(),
             organization: event.organization().to_string(),
             namespace: event.namespace().to_string(),
             topic: event.topic().to_string(),
-            key: event.key().map(|key| key.to_string()),
-            payload: payload_value,
-            content_type: event.payload().content_type().to_string(),
+            payload: SerializedPayload::from_payload(event.payload())?,
             metadata: event.metadata().as_map().clone(),
             timestamp: event.timestamp(),
             version: event.version(),
+            key: event.key().map(|key| key.to_string()),
             parent_id: event.parent_id().map(|id| id.to_string()),
             correlation_id: event.correlation_id().map(|id| id.to_string()),
             causation_id: event.causation_id().map(|id| id.to_string()),
@@ -70,30 +129,7 @@ impl SerializedEvent {
     }
 
     pub fn to_event(&self) -> Result<Event> {
-        let content_type: ContentType = self
-            .content_type
-            .parse()
-            .map_err(|e: Error| Error::Serialization(e.to_string()))?;
-
-        let data = match content_type {
-            ContentType::Json => serde_json::to_vec(&self.payload)
-                .map_err(|e| Error::Serialization(e.to_string()))?,
-            ContentType::PlainText => {
-                let text = self.payload.as_str().ok_or_else(|| {
-                    Error::Serialization("plain text payload must be a JSON string".to_owned())
-                })?;
-                text.as_bytes().to_vec()
-            }
-            ContentType::Binary => {
-                let encoded = self.payload.as_str().ok_or_else(|| {
-                    Error::Serialization("binary payload must be a base64 JSON string".to_owned())
-                })?;
-                BASE64
-                    .decode(encoded)
-                    .map_err(|e| Error::Serialization(e.to_string()))?
-            }
-        };
-
+        let payload = self.payload.clone().into_payload()?;
         let key = self.key.as_deref().map(EventKey::new).transpose()?;
         let parent_id = self
             .parent_id
@@ -117,7 +153,7 @@ impl SerializedEvent {
             OrganizationId::new(&self.organization)?,
             Namespace::new(&self.namespace)?,
             Topic::new(&self.topic)?,
-            Payload::from_raw(data, content_type),
+            payload,
             Metadata::from(self.metadata.clone()),
             self.timestamp,
             self.version,
@@ -187,6 +223,35 @@ mod tests {
     }
 
     #[test]
+    fn field_order_matches_event() {
+        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
+            .unwrap()
+            .key("k")
+            .unwrap()
+            .build()
+            .unwrap();
+        let serialized = SerializedEvent::from_event(&event).unwrap();
+        let json = serialized.to_json_string().unwrap();
+        let id_pos = json.find("\"id\"").unwrap();
+        let org_pos = json.find("\"organization\"").unwrap();
+        let ns_pos = json.find("\"namespace\"").unwrap();
+        let topic_pos = json.find("\"topic\"").unwrap();
+        let payload_pos = json.find("\"payload\"").unwrap();
+        let metadata_pos = json.find("\"metadata\"").unwrap();
+        let timestamp_pos = json.find("\"timestamp\"").unwrap();
+        let version_pos = json.find("\"version\"").unwrap();
+        let key_pos = json.find("\"key\"").unwrap();
+        assert!(id_pos < org_pos);
+        assert!(org_pos < ns_pos);
+        assert!(ns_pos < topic_pos);
+        assert!(topic_pos < payload_pos);
+        assert!(payload_pos < metadata_pos);
+        assert!(metadata_pos < timestamp_pos);
+        assert!(timestamp_pos < version_pos);
+        assert!(version_pos < key_pos);
+    }
+
+    #[test]
     fn optional_key_can_be_absent() {
         let event = Event::create(
             "acme",
@@ -202,14 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_roundtrip_preserves_string() {
+    fn plain_text_payload_is_a_raw_json_string() {
         let event = event_with_key(Payload::from_string("hello world"), "k");
-
         let serialized = SerializedEvent::from_event(&event).unwrap();
-        assert_eq!(
-            serialized.payload,
-            serde_json::Value::String("hello world".to_owned())
-        );
+        match &serialized.payload {
+            SerializedPayload::PlainText(text) => assert_eq!(text, "hello world"),
+            other => panic!("expected PlainText, got {other:?}"),
+        }
+        let json = serialized.to_json_string().unwrap();
+        assert!(json.contains("\"content_type\":\"text/plain\""));
+        assert!(json.contains("\"data\":\"hello world\""));
 
         let restored = serialized.to_event().unwrap();
         assert_eq!(restored.payload().data(), b"hello world");
@@ -217,16 +284,38 @@ mod tests {
     }
 
     #[test]
-    fn binary_payload_base64_round_trip_preserves_bytes() {
+    fn binary_payload_is_base64_in_data_field() {
         let bytes = vec![0xff, 0x00, 0x01, 0xfe, 0x80, 0x7f, 0x10];
         let event = event_with_key(Payload::from_bytes(bytes.clone()), "k");
-
         let serialized = SerializedEvent::from_event(&event).unwrap();
-        assert!(serialized.payload.is_string());
+        match &serialized.payload {
+            SerializedPayload::Binary(b) => assert_eq!(b, &bytes),
+            other => panic!("expected Binary, got {other:?}"),
+        }
+        let json = serialized.to_json_string().unwrap();
+        assert!(json.contains("\"content_type\":\"application/octet-stream\""));
 
         let restored = serialized.to_event().unwrap();
         assert_eq!(restored.payload().data(), bytes.as_slice());
         assert_eq!(restored.payload().content_type(), ContentType::Binary);
+    }
+
+    #[test]
+    fn json_payload_stays_human_readable() {
+        let event = event_with_key(
+            Payload::from_json(&serde_json::json!({"k": "v"})).unwrap(),
+            "k",
+        );
+        let serialized = SerializedEvent::from_event(&event).unwrap();
+        match &serialized.payload {
+            SerializedPayload::Json(value) => {
+                assert_eq!(value, &serde_json::json!({"k": "v"}));
+            }
+            other => panic!("expected Json, got {other:?}"),
+        }
+        let json = serialized.to_json_string().unwrap();
+        assert!(json.contains("\"content_type\":\"application/json\""));
+        assert!(json.contains("\"data\":{\"k\":\"v\"}"));
     }
 
     #[test]
@@ -249,7 +338,7 @@ mod tests {
 
         assert_eq!(parsed.id, serialized.id);
         assert_eq!(parsed.topic, serialized.topic);
-        assert_eq!(parsed.payload, serialized.payload);
+        assert_eq!(parsed.payload.content_type(), ContentType::Json);
     }
 
     #[test]
@@ -295,7 +384,7 @@ mod tests {
 
         assert_eq!(parsed.id, serialized.id);
         assert_eq!(parsed.topic, serialized.topic);
-        assert_eq!(parsed.payload, serialized.payload);
+        assert_eq!(parsed.payload.content_type(), ContentType::Json);
     }
 
     #[test]

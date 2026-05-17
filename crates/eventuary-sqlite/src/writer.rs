@@ -80,6 +80,7 @@ impl Writer for SqliteWriter {
 
 fn insert_event(conn: &rusqlite::Connection, sql: &str, event: &Event) -> Result<()> {
     let serialized = SerializedEvent::from_event(event)?;
+    let content_type = serialized.payload.content_type().to_string();
     let payload = serde_json::to_string(&serialized.payload)
         .map_err(|e| Error::Store(format!("encode payload: {e}")))?;
     let metadata = serde_json::to_string(&serialized.metadata)
@@ -93,7 +94,7 @@ fn insert_event(conn: &rusqlite::Connection, sql: &str, event: &Event) -> Result
             serialized.topic,
             serialized.key,
             payload,
-            serialized.content_type,
+            content_type,
             metadata,
             serialized.timestamp.to_rfc3339(),
             serialized.version as i64,

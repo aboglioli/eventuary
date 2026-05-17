@@ -12,7 +12,8 @@ use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Message, Reader};
 use eventuary_core::{
-    Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
+    Error, Result, SerializedEvent, SerializedPayload, StartFrom, StartableSubscription,
+    TopicPattern,
 };
 
 use crate::database::SqliteConn;
@@ -445,8 +446,9 @@ async fn fetch_batch(
                 causation_id,
             ) = row.map_err(|e| Error::Store(e.to_string()))?;
 
-            let payload: serde_json::Value = serde_json::from_str(&payload_str)
+            let payload: SerializedPayload = serde_json::from_str(&payload_str)
                 .map_err(|e| Error::Serialization(format!("decode payload: {e}")))?;
+            let _ = content_type;
             let metadata: HashMap<String, String> = serde_json::from_str(&metadata_str)
                 .map_err(|e| Error::Serialization(format!("decode metadata: {e}")))?;
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
@@ -458,12 +460,11 @@ async fn fetch_batch(
                     organization,
                     namespace,
                     topic,
-                    key,
                     payload,
-                    content_type,
                     metadata,
                     timestamp,
                     version: version as u64,
+                    key,
                     parent_id,
                     correlation_id,
                     causation_id,

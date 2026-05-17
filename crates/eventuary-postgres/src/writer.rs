@@ -116,6 +116,7 @@ struct EventRow {
 impl EventRow {
     fn from_event(event: &Event) -> Result<Self> {
         let serialized = SerializedEvent::from_event(event)?;
+        let content_type = serialized.payload.content_type().to_string();
         let payload = serde_json::to_string(&serialized.payload)
             .map_err(|e| Error::Store(format!("encode payload: {e}")))?;
         let metadata = serde_json::to_string(&serialized.metadata)
@@ -127,7 +128,7 @@ impl EventRow {
             topic: serialized.topic,
             key: serialized.key,
             payload,
-            content_type: serialized.content_type,
+            content_type,
             metadata,
             timestamp: serialized.timestamp.to_rfc3339(),
             version: serialized.version as i64,

@@ -12,7 +12,8 @@ use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Message, Reader};
 use eventuary_core::{
-    Error, Result, SerializedEvent, StartFrom, StartableSubscription, TopicPattern,
+    Error, Result, SerializedEvent, SerializedPayload, StartFrom, StartableSubscription,
+    TopicPattern,
 };
 
 use crate::relation::PgRelationName;
@@ -372,7 +373,7 @@ async fn fetch_batch(
             let sequence: i64 = row.get("sequence");
             let id: String = row.get("id_text");
             let payload_str: String = row.get("payload_text");
-            let payload: serde_json::Value = serde_json::from_str(&payload_str)
+            let payload: SerializedPayload = serde_json::from_str(&payload_str)
                 .map_err(|e| Error::Serialization(format!("decode payload: {e}")))?;
             let metadata_str: String = row.get("metadata_text");
             let metadata: HashMap<String, String> = serde_json::from_str(&metadata_str)
@@ -386,12 +387,11 @@ async fn fetch_batch(
                 organization: row.get("organization"),
                 namespace: row.get("namespace"),
                 topic: row.get("topic"),
-                key: row.get("event_key"),
                 payload,
-                content_type: row.get("content_type"),
                 metadata,
                 timestamp,
                 version: row.get::<i64, _>("version") as u64,
+                key: row.get("event_key"),
                 parent_id: row.get("parent_id_text"),
                 correlation_id: row.get("correlation_id"),
                 causation_id: row.get("causation_id"),
