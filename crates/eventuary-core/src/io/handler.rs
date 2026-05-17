@@ -143,9 +143,13 @@ mod tests {
 }
 
 pub mod filtered;
+pub mod multiplexer;
 pub mod retry;
 
 pub use filtered::FilteredHandler;
+pub use multiplexer::{
+    InMemoryMultiplexerStore, MultiplexerKey, MultiplexerStore, NoMultiplexerStore, SubscriberId,
+};
 pub use retry::{
     DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler, RetryPolicy,
     backoff_delay,
