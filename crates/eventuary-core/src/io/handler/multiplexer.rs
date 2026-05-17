@@ -160,20 +160,6 @@ impl MultiplexerStore for InMemoryMultiplexerStore {
     }
 }
 
-async fn run_subscriber(
-    subscriber_id: SubscriberId,
-    handler: ArcHandler,
-    event: &Event,
-) -> std::result::Result<(), MultiplexerFailure> {
-    match handler.handle(event).await {
-        Ok(()) => Ok(()),
-        Err(error) => Err(MultiplexerFailure {
-            subscriber_id,
-            error: Box::new(error),
-        }),
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum NoMatchPolicy {
     #[default]
@@ -304,7 +290,6 @@ impl<S: MultiplexerStore> MultiplexerBuilder<S> {
 pub struct Multiplexer<S = NoMultiplexerStore> {
     id: String,
     routes: Vec<MultiplexerRoute>,
-    #[allow(dead_code)]
     store: S,
     concurrency: NonZeroUsize,
     no_match: NoMatchPolicy,
@@ -313,6 +298,43 @@ pub struct Multiplexer<S = NoMultiplexerStore> {
 impl Multiplexer<NoMultiplexerStore> {
     pub fn builder() -> MultiplexerBuilder<NoMultiplexerStore> {
         MultiplexerBuilder::default()
+    }
+}
+
+impl<S: MultiplexerStore> Multiplexer<S> {
+    async fn run_subscriber(
+        &self,
+        subscriber_id: SubscriberId,
+        handler: ArcHandler,
+        event: &Event,
+    ) -> std::result::Result<(), MultiplexerFailure> {
+        let key = MultiplexerKey::new(event.id(), subscriber_id.clone());
+        match self.store.is_completed(&key).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(MultiplexerFailure {
+                    subscriber_id,
+                    error: Box::new(error),
+                });
+            }
+        }
+
+        if let Err(error) = handler.handle(event).await {
+            return Err(MultiplexerFailure {
+                subscriber_id,
+                error: Box::new(error),
+            });
+        }
+
+        if let Err(error) = self.store.mark_completed(&key).await {
+            return Err(MultiplexerFailure {
+                subscriber_id,
+                error: Box::new(error),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -347,7 +369,7 @@ impl<S: MultiplexerStore> Handler for Multiplexer<S> {
 
         for _ in 0..concurrency {
             if let Some((subscriber_id, handler)) = iter.next() {
-                in_flight.push(run_subscriber(subscriber_id, handler, event));
+                in_flight.push(self.run_subscriber(subscriber_id, handler, event));
             } else {
                 break;
             }
@@ -358,7 +380,7 @@ impl<S: MultiplexerStore> Handler for Multiplexer<S> {
                 failures.push(failure);
             }
             if let Some((subscriber_id, handler)) = iter.next() {
-                in_flight.push(run_subscriber(subscriber_id, handler, event));
+                in_flight.push(self.run_subscriber(subscriber_id, handler, event));
             }
         }
 
@@ -633,6 +655,102 @@ mod tests {
 
         outer.handle(&event()).await.unwrap();
         assert_eq!(inner_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn store_skips_completed_subscribers_on_redelivery() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let multiplexer = Multiplexer::builder()
+            .route(
+                "first",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "first-handler".to_owned(),
+                    count: Arc::clone(&first),
+                },
+            )
+            .unwrap()
+            .route(
+                "second",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "second-handler".to_owned(),
+                    count: Arc::clone(&second),
+                },
+            )
+            .unwrap()
+            .store(InMemoryMultiplexerStore::unbounded())
+            .build()
+            .unwrap();
+        let event = event();
+
+        multiplexer.handle(&event).await.unwrap();
+        multiplexer.handle(&event).await.unwrap();
+
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn redelivery_runs_only_subscriber_that_did_not_complete() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let multiplexer = Multiplexer::builder()
+            .route(
+                "completed",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "completed-handler".to_owned(),
+                    count: Arc::clone(&completed),
+                },
+            )
+            .unwrap()
+            .route("failing", EventFilter::default(), FailingHandler)
+            .unwrap()
+            .store(InMemoryMultiplexerStore::unbounded())
+            .build()
+            .unwrap();
+        let event = event();
+
+        assert!(multiplexer.handle(&event).await.is_err());
+        assert!(multiplexer.handle(&event).await.is_err());
+
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Clone)]
+    struct MarkFailsStore;
+
+    impl MultiplexerStore for MarkFailsStore {
+        async fn is_completed(&self, _: &MultiplexerKey) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn mark_completed(&self, _: &MultiplexerKey) -> Result<()> {
+            Err(Error::Store("mark failed".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_completed_failure_surfaces_as_handler_error() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let multiplexer = Multiplexer::builder()
+            .route(
+                "sub",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "h".to_owned(),
+                    count: Arc::clone(&count),
+                },
+            )
+            .unwrap()
+            .store(MarkFailsStore)
+            .build()
+            .unwrap();
+
+        let err = multiplexer.handle(&event()).await.unwrap_err();
+        assert!(matches!(err, Error::Handler(_)));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
