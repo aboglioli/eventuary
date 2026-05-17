@@ -1,10 +1,9 @@
 use std::pin::Pin;
 
-use either::Either;
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
-use crate::io::{Acker, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
 pub struct MergeReader<R1, R2> {
     r1: R1,
@@ -25,16 +24,15 @@ where
     R2::Subscription: Send + 'static,
     R1::Acker: Send + Sync + 'static,
     R2::Acker: Send + Sync + 'static,
-    R1::Cursor: Send + Sync + 'static,
-    R2::Cursor: Send + Sync + 'static,
+    R1::Cursor: Cursor + Send + Sync + 'static,
+    R2::Cursor: Cursor + Send + Sync + 'static,
     R1::Stream: Send + 'static,
     R2::Stream: Send + 'static,
 {
     type Subscription = (R1::Subscription, R2::Subscription);
-    type Acker = EitherAcker<R1::Acker, R2::Acker>;
-    type Cursor = Either<R1::Cursor, R2::Cursor>;
-    type Stream =
-        Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, Self::Cursor>>> + Send>>;
+    type Acker = MergeAcker<R1::Acker, R2::Acker>;
+    type Cursor = MergeCursor<R1::Cursor, R2::Cursor>;
+    type Stream = Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, Self::Cursor>>> + Send>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let (sub1, sub2) = subscription;
@@ -44,46 +42,53 @@ where
         let s1 = Box::pin(stream1.map(|item| {
             item.map(|msg| {
                 let (event, acker, cursor) = msg.into_parts();
-                Message::new(
-                    event,
-                    EitherAcker { inner: Either::Left(acker) },
-                    Either::Left(cursor),
-                )
+                Message::new(event, MergeAcker::Left(acker), MergeCursor::Left(cursor))
             })
         }));
 
         let s2 = Box::pin(stream2.map(|item| {
             item.map(|msg| {
                 let (event, acker, cursor) = msg.into_parts();
-                Message::new(
-                    event,
-                    EitherAcker { inner: Either::Right(acker) },
-                    Either::Right(cursor),
-                )
+                Message::new(event, MergeAcker::Right(acker), MergeCursor::Right(cursor))
             })
         }));
 
-        let merged = futures::stream::select(s1, s2);
-        Ok(Box::pin(merged))
+        Ok(Box::pin(futures::stream::select(s1, s2)))
     }
 }
 
-pub struct EitherAcker<A1: Acker, A2: Acker> {
-    inner: Either<A1, A2>,
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum MergeCursor<C1, C2> {
+    Left(C1),
+    Right(C2),
 }
 
-impl<A1: Acker, A2: Acker> Acker for EitherAcker<A1, A2> {
+impl<C1: Cursor, C2: Cursor> Cursor for MergeCursor<C1, C2> {
+    fn id(&self) -> CursorId {
+        match self {
+            Self::Left(c) => c.id(),
+            Self::Right(c) => c.id(),
+        }
+    }
+}
+
+pub enum MergeAcker<A1, A2> {
+    Left(A1),
+    Right(A2),
+}
+
+impl<A1: Acker, A2: Acker> Acker for MergeAcker<A1, A2> {
     async fn ack(&self) -> Result<()> {
-        match &self.inner {
-            Either::Left(a) => a.ack().await,
-            Either::Right(a) => a.ack().await,
+        match self {
+            Self::Left(a) => a.ack().await,
+            Self::Right(a) => a.ack().await,
         }
     }
 
     async fn nack(&self) -> Result<()> {
-        match &self.inner {
-            Either::Left(a) => a.nack().await,
-            Either::Right(a) => a.nack().await,
+        match self {
+            Self::Left(a) => a.nack().await,
+            Self::Right(a) => a.nack().await,
         }
     }
 }
@@ -101,10 +106,10 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
     struct TestCursor(u64);
 
-    impl crate::io::Cursor for TestCursor {}
+    impl Cursor for TestCursor {}
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -118,11 +123,9 @@ mod tests {
 
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let events = self.events.lock().unwrap().take().unwrap_or_default();
-            Ok(Box::pin(stream::iter(
-                events.into_iter().enumerate().map(|(i, e)| {
-                    Ok(Message::new(e, NoopAcker, TestCursor(i as u64)))
-                }),
-            )))
+            Ok(Box::pin(stream::iter(events.into_iter().enumerate().map(
+                |(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as u64))),
+            ))))
         }
     }
 
@@ -152,8 +155,15 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 5);
-        // Stream should be exhausted
         let end = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
         assert!(end.is_err() || end.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn merge_cursor_id_delegates_to_inner() {
+        let left: MergeCursor<TestCursor, TestCursor> = MergeCursor::Left(TestCursor(1));
+        let right: MergeCursor<TestCursor, TestCursor> = MergeCursor::Right(TestCursor(2));
+        assert_eq!(left.id(), TestCursor(1).id());
+        assert_eq!(right.id(), TestCursor(2).id());
     }
 }
