@@ -10,8 +10,8 @@ use crate::io::{Acker, Message, Reader};
 
 pub trait InspectHooks: Send + Sync {
     fn on_deliver(&self, _event: &Event) {}
-    fn on_ack(&self) {}
-    fn on_nack(&self) {}
+    fn on_ack(&self, _event: &Event) {}
+    fn on_nack(&self, _event: &Event) {}
     fn on_error(&self, _error: &Error) {}
 }
 
@@ -55,16 +55,17 @@ where
 pub struct InspectAcker<A: Acker, H: InspectHooks> {
     inner: A,
     hooks: Arc<H>,
+    event: Arc<Event>,
 }
 
 impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
     async fn ack(&self) -> Result<()> {
-        self.hooks.on_ack();
+        self.hooks.on_ack(&self.event);
         self.inner.ack().await
     }
 
     async fn nack(&self) -> Result<()> {
-        self.hooks.on_nack();
+        self.hooks.on_nack(&self.event);
         self.inner.nack().await
     }
 }
@@ -87,11 +88,14 @@ where
             Poll::Ready(Some(Ok(msg))) => {
                 self.hooks.on_deliver(msg.event());
                 let (event, inner_acker, cursor) = msg.into_parts();
+                let event_arc = Arc::new(event);
                 let acker = InspectAcker {
                     inner: inner_acker,
                     hooks: Arc::clone(&self.hooks),
+                    event: Arc::clone(&event_arc),
                 };
-                Poll::Ready(Some(Ok(Message::new(event, acker, cursor))))
+                let out_event = (*event_arc).clone();
+                Poll::Ready(Some(Ok(Message::new(out_event, acker, cursor))))
             }
             Poll::Ready(Some(Err(e))) => {
                 self.hooks.on_error(&e);
@@ -112,7 +116,7 @@ mod tests {
     use futures::{Stream, StreamExt, stream};
 
     use super::*;
-    use crate::event::Event;
+    use crate::event::{Event, EventId};
     use crate::io::Reader;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
@@ -138,34 +142,23 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct CountingHooks {
-        delivers: Arc<AtomicUsize>,
-        acks: Arc<AtomicUsize>,
-        nacks: Arc<AtomicUsize>,
+    #[derive(Clone, Default)]
+    struct RecordingHooks {
+        delivered: Arc<Mutex<Vec<EventId>>>,
+        acked: Arc<Mutex<Vec<EventId>>>,
+        nacked: Arc<Mutex<Vec<EventId>>>,
         errors: Arc<AtomicUsize>,
     }
 
-    impl CountingHooks {
-        fn new() -> Self {
-            Self {
-                delivers: Arc::new(AtomicUsize::new(0)),
-                acks: Arc::new(AtomicUsize::new(0)),
-                nacks: Arc::new(AtomicUsize::new(0)),
-                errors: Arc::new(AtomicUsize::new(0)),
-            }
+    impl InspectHooks for RecordingHooks {
+        fn on_deliver(&self, event: &Event) {
+            self.delivered.lock().unwrap().push(event.id());
         }
-    }
-
-    impl InspectHooks for CountingHooks {
-        fn on_deliver(&self, _: &Event) {
-            self.delivers.fetch_add(1, Ordering::SeqCst);
+        fn on_ack(&self, event: &Event) {
+            self.acked.lock().unwrap().push(event.id());
         }
-        fn on_ack(&self) {
-            self.acks.fetch_add(1, Ordering::SeqCst);
-        }
-        fn on_nack(&self) {
-            self.nacks.fetch_add(1, Ordering::SeqCst);
+        fn on_nack(&self, event: &Event) {
+            self.nacked.lock().unwrap().push(event.id());
         }
         fn on_error(&self, _: &Error) {
             self.errors.fetch_add(1, Ordering::SeqCst);
@@ -177,36 +170,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_reader_counts_delivers_and_acks() {
-        let hooks = CountingHooks::new();
+    async fn inspect_reader_passes_event_to_ack_hook() {
+        let hooks = RecordingHooks::default();
+        let event = ev();
+        let event_id = event.id();
         let reader = VecReader {
-            items: Mutex::new(Some(vec![Ok(Message::new(ev(), NoopAcker, TestCursor(1)))])),
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                event,
+                NoopAcker,
+                TestCursor(1),
+            ))])),
         };
         let inspect = InspectReader::new(reader, hooks.clone());
         let mut stream = inspect.read(()).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
-        assert_eq!(hooks.delivers.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.delivered.lock().unwrap().as_slice(), &[event_id]);
         msg.ack().await.unwrap();
-        assert_eq!(hooks.acks.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.acked.lock().unwrap().as_slice(), &[event_id]);
     }
 
     #[tokio::test]
-    async fn inspect_reader_counts_nacks() {
-        let hooks = CountingHooks::new();
+    async fn inspect_reader_passes_event_to_nack_hook() {
+        let hooks = RecordingHooks::default();
+        let event = ev();
+        let event_id = event.id();
         let reader = VecReader {
-            items: Mutex::new(Some(vec![Ok(Message::new(ev(), NoopAcker, TestCursor(1)))])),
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                event,
+                NoopAcker,
+                TestCursor(1),
+            ))])),
         };
         let inspect = InspectReader::new(reader, hooks.clone());
         let mut stream = inspect.read(()).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
         msg.nack().await.unwrap();
-        assert_eq!(hooks.nacks.load(Ordering::SeqCst), 1);
-        assert_eq!(hooks.acks.load(Ordering::SeqCst), 0);
+        assert_eq!(hooks.nacked.lock().unwrap().as_slice(), &[event_id]);
+        assert!(hooks.acked.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn inspect_reader_calls_on_error() {
-        let hooks = CountingHooks::new();
+        let hooks = RecordingHooks::default();
         let reader = VecReader {
             items: Mutex::new(Some(vec![Err(Error::Store("fail".into()))])),
         };

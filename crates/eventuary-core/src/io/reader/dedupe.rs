@@ -7,12 +7,13 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
+use crate::event::Event;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
 
 pub trait DedupeStore: Clone + Send + Sync + 'static {
-    fn exists(&self, event_id: &str) -> impl Future<Output = Result<bool>> + Send;
-    fn mark_processed(&self, event_id: &str) -> impl Future<Output = Result<()>> + Send;
+    fn exists(&self, event: &Event) -> impl Future<Output = Result<bool>> + Send;
+    fn mark_processed(&self, event: &Event) -> impl Future<Output = Result<()>> + Send;
 }
 
 pub struct DedupeReader<R, S> {
@@ -55,8 +56,7 @@ where
                         return;
                     }
                 };
-                let event_id: Arc<str> = Arc::from(msg.event().id().to_string());
-                match store.exists(&event_id).await {
+                match store.exists(msg.event()).await {
                     Ok(true) => {
                         if let Err(e) = msg.ack().await {
                             let _ = tx.send(Err(e)).await;
@@ -71,12 +71,13 @@ where
                     }
                 }
                 let (event, inner_acker, cursor) = msg.into_parts();
+                let event_arc = Arc::new(event);
                 let wrapped = Message::new(
-                    event,
+                    (*event_arc).clone(),
                     DedupeAcker {
                         inner: inner_acker,
                         store: store.clone(),
-                        event_id,
+                        event: Arc::clone(&event_arc),
                     },
                     cursor,
                 );
@@ -93,12 +94,12 @@ where
 pub struct DedupeAcker<A: Acker, S: DedupeStore> {
     inner: A,
     store: S,
-    event_id: Arc<str>,
+    event: Arc<Event>,
 }
 
 impl<A: Acker, S: DedupeStore> Acker for DedupeAcker<A, S> {
     async fn ack(&self) -> Result<()> {
-        self.store.mark_processed(&self.event_id).await?;
+        self.store.mark_processed(&self.event).await?;
         self.inner.ack().await
     }
 
@@ -119,12 +120,12 @@ impl InMemoryDedupeStore {
 }
 
 impl DedupeStore for InMemoryDedupeStore {
-    async fn exists(&self, event_id: &str) -> Result<bool> {
-        Ok(self.seen.lock().unwrap().contains(event_id))
+    async fn exists(&self, event: &Event) -> Result<bool> {
+        Ok(self.seen.lock().unwrap().contains(&event.id().to_string()))
     }
 
-    async fn mark_processed(&self, event_id: &str) -> Result<()> {
-        self.seen.lock().unwrap().insert(event_id.to_owned());
+    async fn mark_processed(&self, event: &Event) -> Result<()> {
+        self.seen.lock().unwrap().insert(event.id().to_string());
         Ok(())
     }
 }
@@ -201,7 +202,7 @@ mod tests {
         let e1 = Event::create("org", "/x", "t1", Payload::from_string("p")).unwrap();
         let e2 = Event::create("org", "/x", "t2", Payload::from_string("p")).unwrap();
         let store = InMemoryDedupeStore::new();
-        store.mark_processed(&e1.id().to_string()).await.unwrap();
+        store.mark_processed(&e1).await.unwrap();
 
         let reader = VecReader {
             events: Mutex::new(Some(vec![e1, e2.clone()])),
