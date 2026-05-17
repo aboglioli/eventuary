@@ -1,19 +1,43 @@
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::collections::{HashSet, VecDeque};
+use std::num::NonZeroUsize;
 
-use futures::Stream;
+use futures::StreamExt;
+use tokio::sync::mpsc;
 
 use crate::error::Result;
+use crate::event::EventId;
+use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+
+pub type ReplayThenLiveStream<RA, LA, RC, LC> =
+    SpawnedStream<ReplayLiveAcker<RA, LA>, ReplayLiveCursor<RC, LC>>;
+
+#[derive(Debug, Clone, Default)]
+pub struct ReplayThenLiveConfig {
+    pub overlap_dedupe_capacity: Option<NonZeroUsize>,
+}
 
 pub struct ReplayThenLiveReader<R, L> {
     historical: R,
     live: L,
+    config: ReplayThenLiveConfig,
 }
 
 impl<R, L> ReplayThenLiveReader<R, L> {
     pub fn new(historical: R, live: L) -> Self {
-        Self { historical, live }
+        Self {
+            historical,
+            live,
+            config: ReplayThenLiveConfig::default(),
+        }
+    }
+
+    pub fn with_config(historical: R, live: L, config: ReplayThenLiveConfig) -> Self {
+        Self {
+            historical,
+            live,
+            config,
+        }
     }
 }
 
@@ -79,83 +103,105 @@ where
     type Subscription = ReplayThenLiveSubscription<R::Subscription, L::Subscription>;
     type Acker = ReplayLiveAcker<R::Acker, L::Acker>;
     type Cursor = ReplayLiveCursor<R::Cursor, L::Cursor>;
-    type Stream = ReplayThenLiveStream<R, L>;
+    type Stream = ReplayThenLiveStream<R::Acker, L::Acker, R::Cursor, L::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let replay = self.historical.read(subscription.replay).await?;
         let live = self.live.read(subscription.live).await?;
-        Ok(ReplayThenLiveStream {
-            replay: Box::pin(replay),
-            live: Some(Box::pin(live)),
-            phase: Phase::Replay,
-        })
+        let capacity = self.config.overlap_dedupe_capacity;
+        let (tx, rx) = mpsc::channel(64);
+
+        let handle = tokio::spawn(async move {
+            let mut replay = Box::pin(replay);
+            let mut seen: SeenIds = SeenIds::new(capacity);
+
+            while let Some(item) = replay.next().await {
+                let msg = match item {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+                if capacity.is_some() {
+                    seen.record(msg.event().id());
+                }
+                let (event, acker, cursor) = msg.into_parts();
+                let wrapped = Message::new(
+                    event,
+                    ReplayLiveAcker::Replay(acker),
+                    ReplayLiveCursor::Replay(cursor),
+                );
+                if tx.send(Ok(wrapped)).await.is_err() {
+                    return;
+                }
+            }
+
+            let mut live = Box::pin(live);
+            while let Some(item) = live.next().await {
+                let msg = match item {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                };
+                if capacity.is_some() && seen.contains(msg.event().id()) {
+                    if let Err(e) = msg.ack().await {
+                        let _ = tx.send(Err(e)).await;
+                        return;
+                    }
+                    continue;
+                }
+                let (event, acker, cursor) = msg.into_parts();
+                let wrapped = Message::new(
+                    event,
+                    ReplayLiveAcker::Live(acker),
+                    ReplayLiveCursor::Live(cursor),
+                );
+                if tx.send(Ok(wrapped)).await.is_err() {
+                    return;
+                }
+            }
+        });
+
+        Ok(SpawnedStream::new(rx, handle))
     }
 }
 
-enum Phase {
-    Replay,
-    Live,
+struct SeenIds {
+    set: HashSet<EventId>,
+    order: VecDeque<EventId>,
+    capacity: Option<NonZeroUsize>,
 }
 
-pub struct ReplayThenLiveStream<R: Reader, L: Reader> {
-    replay: Pin<Box<R::Stream>>,
-    live: Option<Pin<Box<L::Stream>>>,
-    phase: Phase,
-}
+impl SeenIds {
+    fn new(capacity: Option<NonZeroUsize>) -> Self {
+        Self {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
 
-impl<R, L> Stream for ReplayThenLiveStream<R, L>
-where
-    R: Reader + Send,
-    L: Reader + Send,
-    R::Acker: Send + Sync,
-    L::Acker: Send + Sync,
-    R::Cursor: Send + Sync,
-    L::Cursor: Send + Sync,
-{
-    type Item = Result<
-        Message<ReplayLiveAcker<R::Acker, L::Acker>, ReplayLiveCursor<R::Cursor, L::Cursor>>,
-    >;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match self.phase {
-                Phase::Replay => match self.replay.as_mut().poll_next(cx) {
-                    Poll::Ready(Some(Ok(msg))) => {
-                        let (event, acker, cursor) = msg.into_parts();
-                        return Poll::Ready(Some(Ok(Message::new(
-                            event,
-                            ReplayLiveAcker::Replay(acker),
-                            ReplayLiveCursor::Replay(cursor),
-                        ))));
-                    }
-                    Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                    Poll::Ready(None) => {
-                        self.phase = Phase::Live;
-                        continue; // re-poll with Live phase
-                    }
-                    Poll::Pending => return Poll::Pending,
-                },
-                Phase::Live => {
-                    if let Some(live) = &mut self.live {
-                        match live.as_mut().poll_next(cx) {
-                            Poll::Ready(Some(Ok(msg))) => {
-                                let (event, acker, cursor) = msg.into_parts();
-                                return Poll::Ready(Some(Ok(Message::new(
-                                    event,
-                                    ReplayLiveAcker::Live(acker),
-                                    ReplayLiveCursor::Live(cursor),
-                                ))));
-                            }
-                            Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
-                            Poll::Ready(None) => return Poll::Ready(None),
-                            Poll::Pending => return Poll::Pending,
-                        }
-                    } else {
-                        return Poll::Ready(None);
-                    }
+    fn record(&mut self, id: EventId) {
+        if !self.set.insert(id) {
+            return;
+        }
+        self.order.push_back(id);
+        if let Some(cap) = self.capacity {
+            while self.set.len() > cap.get() {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.set.remove(&oldest);
+                } else {
+                    break;
                 }
             }
         }
+    }
+
+    fn contains(&self, id: EventId) -> bool {
+        self.set.contains(&id)
     }
 }
 
@@ -237,5 +283,44 @@ mod tests {
 
         let end = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
         assert!(end.is_err() || end.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn overlap_dedupe_skips_live_events_seen_in_replay() {
+        let shared = ev();
+        let live_only = ev();
+        let historical = VecReader {
+            events: Mutex::new(Some(vec![shared.clone()])),
+        };
+        let live = VecReader {
+            events: Mutex::new(Some(vec![shared, live_only.clone()])),
+        };
+        let reader = ReplayThenLiveReader::with_config(
+            historical,
+            live,
+            ReplayThenLiveConfig {
+                overlap_dedupe_capacity: Some(NonZeroUsize::new(128).unwrap()),
+            },
+        );
+        let mut stream = reader
+            .read(ReplayThenLiveSubscription::new((), ()))
+            .await
+            .unwrap();
+
+        let m1 = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(m1.cursor(), ReplayLiveCursor::Replay(_)));
+        m1.ack().await.unwrap();
+
+        let m2 = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(m2.cursor(), ReplayLiveCursor::Live(_)));
+        assert_eq!(m2.event().id(), live_only.id());
     }
 }
