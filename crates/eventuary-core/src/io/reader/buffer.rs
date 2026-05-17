@@ -78,12 +78,12 @@ impl Default for BufferedReaderConfig {
 }
 
 struct InMemoryState<C> {
-    entries: HashMap<StoreId, InMemoryEntry<C>>,
-    next_id: StoreId,
+    entries: HashMap<InMemoryBufferStoreId, InMemoryEntry<C>>,
+    next_id: InMemoryBufferStoreId,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct StoreId(u64);
+pub struct InMemoryBufferStoreId(u64);
 
 struct InMemoryEntry<C> {
     event: Event,
@@ -98,7 +98,7 @@ where
         Self {
             state: Arc::new(Mutex::new(InMemoryState {
                 entries: HashMap::new(),
-                next_id: StoreId(0),
+                next_id: InMemoryBufferStoreId(0),
             })),
         }
     }
@@ -121,12 +121,12 @@ impl<C> BufferStore<C> for InMemoryBufferStore<C>
 where
     C: Clone + Send + Sync + 'static,
 {
-    type Id = StoreId;
+    type Id = InMemoryBufferStoreId;
 
     async fn push(&self, event: &Event, cursor: &C) -> Result<Self::Id> {
         let mut state = self.state.lock().unwrap();
         let id = state.next_id;
-        state.next_id = StoreId(
+        state.next_id = InMemoryBufferStoreId(
             id.0.checked_add(1)
                 .expect("buffer store id space exhausted"),
         );
