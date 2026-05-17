@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -11,15 +12,15 @@ use crate::io::stream::SpawnedStream;
 
 pub struct WindowReader<R> {
     inner: R,
-    max_size: usize,
+    max_size: NonZeroUsize,
     max_wait: Duration,
 }
 
 impl<R> WindowReader<R> {
-    pub fn new(inner: R, max_size: usize, max_wait: Duration) -> Self {
+    pub fn new(inner: R, max_size: NonZeroUsize, max_wait: Duration) -> Self {
         Self {
             inner,
-            max_size: max_size.max(1),
+            max_size,
             max_wait,
         }
     }
@@ -40,7 +41,7 @@ where
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
-        let max_size = self.max_size;
+        let max_size = self.max_size.get();
         let max_wait = self.max_wait;
         let (tx, rx) = mpsc::channel(64);
 
@@ -152,7 +153,11 @@ mod tests {
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
-        let windowed = WindowReader::new(reader, 10, Duration::from_millis(50));
+        let windowed = WindowReader::new(
+            reader,
+            NonZeroUsize::new(10).unwrap(),
+            Duration::from_millis(50),
+        );
         let mut stream = windowed.read(()).await.unwrap();
         for key in ["k0", "k1"] {
             let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
@@ -173,7 +178,11 @@ mod tests {
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
-        let windowed = WindowReader::new(reader, 3, Duration::from_secs(10));
+        let windowed = WindowReader::new(
+            reader,
+            NonZeroUsize::new(3).unwrap(),
+            Duration::from_secs(10),
+        );
         let mut stream = windowed.read(()).await.unwrap();
         for i in 0..5 {
             let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())

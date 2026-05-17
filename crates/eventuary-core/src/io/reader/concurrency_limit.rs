@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -13,10 +14,10 @@ pub struct ConcurrencyLimitReader<R> {
 }
 
 impl<R> ConcurrencyLimitReader<R> {
-    pub fn new(inner: R, limit: usize) -> Self {
+    pub fn new(inner: R, limit: NonZeroUsize) -> Self {
         Self {
             inner,
-            semaphore: Arc::new(Semaphore::new(limit)),
+            semaphore: Arc::new(Semaphore::new(limit.get())),
         }
     }
 }
@@ -135,7 +136,7 @@ mod tests {
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
-        let limited = ConcurrencyLimitReader::new(reader, 2);
+        let limited = ConcurrencyLimitReader::new(reader, NonZeroUsize::new(2).unwrap());
         let mut stream = limited.read(()).await.unwrap();
 
         let m1 = tokio::time::timeout(Duration::from_millis(500), stream.next())

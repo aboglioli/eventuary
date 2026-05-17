@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -10,11 +11,11 @@ use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
 pub struct BatchReader<R> {
     inner: R,
-    max_batch: usize,
+    max_batch: NonZeroUsize,
 }
 
 impl<R> BatchReader<R> {
-    pub fn new(inner: R, max_batch: usize) -> Self {
+    pub fn new(inner: R, max_batch: NonZeroUsize) -> Self {
         Self { inner, max_batch }
     }
 }
@@ -34,7 +35,7 @@ where
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
-        let max_batch = self.max_batch.max(1);
+        let max_batch = self.max_batch.get();
         let (tx, rx) = mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
@@ -210,7 +211,7 @@ mod tests {
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
-        let batched = BatchReader::new(reader, 2);
+        let batched = BatchReader::new(reader, NonZeroUsize::new(2).unwrap());
         let mut stream = batched.read(()).await.unwrap();
         for i in 0..5 {
             let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
