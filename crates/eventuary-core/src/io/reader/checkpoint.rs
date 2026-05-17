@@ -202,7 +202,11 @@ where
             let entry = state
                 .entry(self.cursor_id.clone())
                 .or_insert_with(PendingState::new);
-            entry.complete(self.index)
+            let cursor = entry.complete(self.index);
+            if entry.pending_count() == 0 {
+                state.remove(&self.cursor_id);
+            }
+            cursor
         };
         if let Some(cursor) = advanced {
             let key = CheckpointKey {
@@ -221,6 +225,23 @@ where
 
 pub type CheckpointStream<A, C, S> = SpawnedStream<CheckpointAcker<A, C, S>, C>;
 
+/// Wraps a `Reader` with durable consumer progress backed by a
+/// `CheckpointStore`.
+///
+/// # Cursor bounds
+///
+/// The inner reader's cursor must implement
+/// `Cursor + Clone + Ord + Send + Sync + 'static`:
+/// - [`Cursor`]: provides the `CursorId` used as the checkpoint key.
+/// - `Ord`: used to skip-already-stored cursors on resume and to track
+///   contiguous in-order progress per cursor id.
+/// - `Clone + Send + Sync + 'static`: required to persist the cursor
+///   across acks and to share it between the intake task and the
+///   per-message [`CheckpointAcker`].
+///
+/// Backend cursors (`PgCursor`, `SqliteCursor`) and the
+/// [`PartitionedCursor`](super::partitioned::PartitionedCursor) wrapper
+/// satisfy these bounds out of the box.
 pub struct CheckpointReader<R, S> {
     inner: R,
     store: S,
