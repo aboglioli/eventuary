@@ -20,5 +20,6 @@ pub use filter::{ArcFilter, BoxFilter, Filter, FilterExt};
 pub use handler::{ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt};
 pub use message::{Message, NoCursor};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
+pub use start_from::{StartFrom, StartableSubscription};
 pub use stream_id::StreamId;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};
