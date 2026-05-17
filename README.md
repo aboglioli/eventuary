@@ -457,6 +457,50 @@ let handler = RetryHandler::new(
 Dead-letter events are written to `<original_topic>.dead_letter` with failure
 metadata and the original event payload preserved.
 
+## Handler Multiplexing
+
+`Multiplexer` is a handler that routes one event to every matching subscriber:
+
+```rust,ignore
+use std::num::NonZeroUsize;
+
+use eventuary::io::filter::EventFilter;
+use eventuary::io::handler::{InMemoryMultiplexerStore, Multiplexer};
+
+let multiplexer = Multiplexer::builder()
+    .route("orders-projection", EventFilter::default(), orders_projection)?
+    .route("audit-log", EventFilter::default(), audit_handler)?
+    .store(InMemoryMultiplexerStore::with_capacity(NonZeroUsize::new(10_000).unwrap()))
+    .build()?;
+```
+
+The backend message still has one lifecycle. SQS has one receipt handle, Kafka
+has one offset in one consumer group, and SQL readers have one delivery cursor.
+The source is acked only after every matching subscriber succeeds. If any
+subscriber fails, the source is nacked and may redeliver the same event.
+
+`SubscriberId` is the durable identity of a subscriber. It is distinct from
+`Handler::id`: a handler's id is its observability label, while a subscriber id
+is the storage key for `(event_id, subscriber_id)` completion. Choose
+subscriber ids that are globally unique across every multiplexer that touches
+the same store; if you need isolation between multiplexers, namespace the
+subscriber id (`orders:projection`, `inventory:projection`).
+
+`Multiplexer` is generic over its store. The default `NoMultiplexerStore` is
+a zero-sized no-op: handlers run on every redelivery and must be idempotent.
+Calling `.store(...)` switches the builder to a real implementation
+(`InMemoryMultiplexerStore` or a backend-provided durable store); successful
+`(event_id, subscriber_id)` pairs are then marked completed and skipped on
+redelivery.
+
+Concurrency defaults to `1` (preserves route declaration order). Values greater
+than `1` run matching subscribers concurrently without order guarantees — use
+`1` when one subscriber must run before another for the same event.
+
+For fully independent subscriber progress, use backend-native isolation: one
+SQL `CheckpointScope` per subscriber, one Kafka consumer group per subscriber,
+or one SQS queue per subscriber.
+
 ## SQL Relations and Migrations
 
 SQLite and PostgreSQL create an append-only events table and a consumer offsets
