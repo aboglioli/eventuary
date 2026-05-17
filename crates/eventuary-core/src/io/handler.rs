@@ -148,7 +148,8 @@ pub mod retry;
 
 pub use filtered::FilteredHandler;
 pub use multiplexer::{
-    InMemoryMultiplexerStore, MultiplexerKey, MultiplexerStore, NoMultiplexerStore, SubscriberId,
+    InMemoryMultiplexerStore, Multiplexer, MultiplexerBuilder, MultiplexerKey, MultiplexerStore,
+    NoMatchPolicy, NoMultiplexerStore, SubscriberId,
 };
 pub use retry::{
     DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler, RetryPolicy,

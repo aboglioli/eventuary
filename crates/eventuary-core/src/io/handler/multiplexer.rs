@@ -4,10 +4,13 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
-use crate::event::EventId;
+use crate::event::{Event, EventId};
+use crate::io::{ArcFilter, ArcHandler, Filter, Handler, HandlerExt};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SubscriberId(Arc<str>);
@@ -157,6 +160,224 @@ impl MultiplexerStore for InMemoryMultiplexerStore {
     }
 }
 
+async fn run_subscriber(
+    subscriber_id: SubscriberId,
+    handler: ArcHandler,
+    event: &Event,
+) -> std::result::Result<(), MultiplexerFailure> {
+    match handler.handle(event).await {
+        Ok(()) => Ok(()),
+        Err(error) => Err(MultiplexerFailure {
+            subscriber_id,
+            error: Box::new(error),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum NoMatchPolicy {
+    #[default]
+    Ack,
+    Error,
+}
+
+struct MultiplexerRoute {
+    subscriber_id: SubscriberId,
+    filter: ArcFilter,
+    handler: ArcHandler,
+}
+
+impl MultiplexerRoute {
+    fn new<F, H>(subscriber_id: impl AsRef<str>, filter: F, handler: H) -> Result<Self>
+    where
+        F: Filter + 'static,
+        H: Handler + 'static,
+    {
+        Ok(Self {
+            subscriber_id: SubscriberId::new(subscriber_id)?,
+            filter: Arc::new(filter),
+            handler: handler.into_arced(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct MultiplexerFailure {
+    subscriber_id: SubscriberId,
+    error: Box<Error>,
+}
+
+const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(1).unwrap();
+
+pub struct MultiplexerBuilder<S = NoMultiplexerStore> {
+    id: String,
+    routes: Vec<MultiplexerRoute>,
+    store: S,
+    concurrency: NonZeroUsize,
+    no_match: NoMatchPolicy,
+}
+
+impl Default for MultiplexerBuilder<NoMultiplexerStore> {
+    fn default() -> Self {
+        Self {
+            id: "multiplexer".to_owned(),
+            routes: Vec::new(),
+            store: NoMultiplexerStore,
+            concurrency: DEFAULT_CONCURRENCY,
+            no_match: NoMatchPolicy::Ack,
+        }
+    }
+}
+
+impl MultiplexerBuilder<NoMultiplexerStore> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<S> MultiplexerBuilder<S> {
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    pub fn route<F, H>(
+        mut self,
+        subscriber_id: impl AsRef<str>,
+        filter: F,
+        handler: H,
+    ) -> Result<Self>
+    where
+        F: Filter + 'static,
+        H: Handler + 'static,
+    {
+        self.routes
+            .push(MultiplexerRoute::new(subscriber_id, filter, handler)?);
+        Ok(self)
+    }
+
+    pub fn concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.concurrency = concurrency;
+        self
+    }
+
+    pub fn on_no_match(mut self, policy: NoMatchPolicy) -> Self {
+        self.no_match = policy;
+        self
+    }
+
+    pub fn store<S2: MultiplexerStore>(self, store: S2) -> MultiplexerBuilder<S2> {
+        MultiplexerBuilder {
+            id: self.id,
+            routes: self.routes,
+            store,
+            concurrency: self.concurrency,
+            no_match: self.no_match,
+        }
+    }
+}
+
+impl<S: MultiplexerStore> MultiplexerBuilder<S> {
+    pub fn build(self) -> Result<Multiplexer<S>> {
+        if self.id.trim().is_empty() {
+            return Err(Error::Config("multiplexer id must not be empty".to_owned()));
+        }
+        let mut seen = HashSet::new();
+        for route in &self.routes {
+            if !seen.insert(route.subscriber_id.clone()) {
+                return Err(Error::Config(format!(
+                    "multiplexer {}: duplicate subscriber id {}",
+                    self.id, route.subscriber_id
+                )));
+            }
+        }
+        Ok(Multiplexer {
+            id: self.id,
+            routes: self.routes,
+            store: self.store,
+            concurrency: self.concurrency,
+            no_match: self.no_match,
+        })
+    }
+}
+
+pub struct Multiplexer<S = NoMultiplexerStore> {
+    id: String,
+    routes: Vec<MultiplexerRoute>,
+    #[allow(dead_code)]
+    store: S,
+    concurrency: NonZeroUsize,
+    no_match: NoMatchPolicy,
+}
+
+impl Multiplexer<NoMultiplexerStore> {
+    pub fn builder() -> MultiplexerBuilder<NoMultiplexerStore> {
+        MultiplexerBuilder::default()
+    }
+}
+
+impl<S: MultiplexerStore> Handler for Multiplexer<S> {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn handle(&self, event: &Event) -> Result<()> {
+        let matching: Vec<(SubscriberId, ArcHandler)> = self
+            .routes
+            .iter()
+            .filter(|route| route.filter.matches(event))
+            .map(|route| (route.subscriber_id.clone(), Arc::clone(&route.handler)))
+            .collect();
+
+        if matching.is_empty() {
+            return match self.no_match {
+                NoMatchPolicy::Ack => Ok(()),
+                NoMatchPolicy::Error => Err(Error::Handler(format!(
+                    "multiplexer {} found no matching subscriber for event {}",
+                    self.id,
+                    event.id()
+                ))),
+            };
+        }
+
+        let concurrency = self.concurrency.get();
+        let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
+        let mut iter = matching.into_iter();
+        let mut failures: Vec<MultiplexerFailure> = Vec::new();
+
+        for _ in 0..concurrency {
+            if let Some((subscriber_id, handler)) = iter.next() {
+                in_flight.push(run_subscriber(subscriber_id, handler, event));
+            } else {
+                break;
+            }
+        }
+
+        while let Some(result) = in_flight.next().await {
+            if let Err(failure) = result {
+                failures.push(failure);
+            }
+            if let Some((subscriber_id, handler)) = iter.next() {
+                in_flight.push(run_subscriber(subscriber_id, handler, event));
+            }
+        }
+
+        if failures.is_empty() {
+            return Ok(());
+        }
+
+        let summary = failures
+            .iter()
+            .map(|f| format!("{}: {}", f.subscriber_id, f.error))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(Error::Handler(format!(
+            "multiplexer {} failed subscribers: {summary}",
+            self.id
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +458,213 @@ mod tests {
         assert!(!store.is_empty().await);
         store.clear().await;
         assert!(store.is_empty().await);
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::event::Event;
+    use crate::io::filter::EventFilter;
+    use crate::io::{Filter, Handler};
+    use crate::payload::Payload;
+
+    struct CountingHandler {
+        id: String,
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Handler for CountingHandler {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        async fn handle(&self, _: &Event) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct FailingHandler;
+
+    impl Handler for FailingHandler {
+        fn id(&self) -> &str {
+            "failing"
+        }
+
+        async fn handle(&self, _: &Event) -> Result<()> {
+            Err(Error::Store("handler failed".to_owned()))
+        }
+    }
+
+    struct AllowNothing;
+
+    impl Filter for AllowNothing {
+        fn matches(&self, _: &Event) -> bool {
+            false
+        }
+    }
+
+    fn event() -> Event {
+        Event::builder(
+            "acme",
+            "/orders",
+            "order.created",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .key("order-1")
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn multiplexer_invokes_every_matching_handler() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let multiplexer = Multiplexer::builder()
+            .route(
+                "first",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "first-handler".to_owned(),
+                    count: Arc::clone(&first),
+                },
+            )
+            .unwrap()
+            .route(
+                "second",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "second-handler".to_owned(),
+                    count: Arc::clone(&second),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        multiplexer.handle(&event()).await.unwrap();
+
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn multiplexer_skips_non_matching_routes() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let multiplexer = Multiplexer::builder()
+            .route(
+                "skipped",
+                AllowNothing,
+                CountingHandler {
+                    id: "skipped-handler".to_owned(),
+                    count: Arc::clone(&count),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        multiplexer.handle(&event()).await.unwrap();
+
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn no_match_error_policy_returns_handler_error() {
+        let multiplexer = Multiplexer::builder()
+            .route("skipped", AllowNothing, FailingHandler)
+            .unwrap()
+            .on_no_match(NoMatchPolicy::Error)
+            .build()
+            .unwrap();
+
+        let err = multiplexer.handle(&event()).await.unwrap_err();
+        assert!(matches!(err, Error::Handler(_)));
+    }
+
+    #[tokio::test]
+    async fn matching_handler_failure_returns_handler_error() {
+        let multiplexer = Multiplexer::builder()
+            .route("failing", EventFilter::default(), FailingHandler)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let err = multiplexer.handle(&event()).await.unwrap_err();
+        assert!(matches!(err, Error::Handler(_)));
+    }
+
+    #[tokio::test]
+    async fn duplicate_subscriber_id_is_rejected_at_build() {
+        let result = Multiplexer::builder()
+            .route("same", EventFilter::default(), FailingHandler)
+            .unwrap()
+            .route("same", EventFilter::default(), FailingHandler)
+            .unwrap()
+            .build();
+
+        assert!(matches!(result, Err(Error::Config(_))));
+    }
+
+    #[tokio::test]
+    async fn nested_multiplexer_composes() {
+        let inner_count = Arc::new(AtomicUsize::new(0));
+        let inner = Multiplexer::builder()
+            .id("inner")
+            .route(
+                "inner-sub",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "inner-handler".to_owned(),
+                    count: Arc::clone(&inner_count),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let outer = Multiplexer::builder()
+            .id("outer")
+            .route("outer-sub", EventFilter::default(), inner)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        outer.handle(&event()).await.unwrap();
+        assert_eq!(inner_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrency_greater_than_one_runs_handlers() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let multiplexer = Multiplexer::builder()
+            .route(
+                "first",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "first-handler".to_owned(),
+                    count: Arc::clone(&first),
+                },
+            )
+            .unwrap()
+            .route(
+                "second",
+                EventFilter::default(),
+                CountingHandler {
+                    id: "second-handler".to_owned(),
+                    count: Arc::clone(&second),
+                },
+            )
+            .unwrap()
+            .concurrency(NonZeroUsize::new(4).unwrap())
+            .build()
+            .unwrap();
+
+        multiplexer.handle(&event()).await.unwrap();
+
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
     }
 }
