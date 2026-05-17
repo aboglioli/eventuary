@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Reader};
+use crate::io::{Acker, Message, Reader};
 
 pub trait DedupeStore: Clone + Send + Sync + 'static {
     fn exists(&self, event_id: &str) -> impl Future<Output = Result<bool>> + Send;
@@ -36,9 +36,9 @@ where
     S: DedupeStore + 'static,
 {
     type Subscription = R::Subscription;
-    type Acker = R::Acker;
+    type Acker = DedupeAcker<R::Acker, S>;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<R::Acker, R::Cursor>;
+    type Stream = SpawnedStream<DedupeAcker<R::Acker, S>, R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
@@ -55,32 +55,55 @@ where
                         return;
                     }
                 };
-                let event_id = msg.event().id().to_string();
+                let event_id: Arc<str> = Arc::from(msg.event().id().to_string());
                 match store.exists(&event_id).await {
                     Ok(true) => {
                         if let Err(e) = msg.ack().await {
                             let _ = tx.send(Err(e)).await;
+                            return;
                         }
                         continue;
                     }
-                    Ok(false) => {
-                        if let Err(e) = store.mark_processed(&event_id).await {
-                            let _ = tx.send(Err(e)).await;
-                            return;
-                        }
-                    }
+                    Ok(false) => {}
                     Err(e) => {
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
                 }
-                if tx.send(Ok(msg)).await.is_err() {
+                let (event, inner_acker, cursor) = msg.into_parts();
+                let wrapped = Message::new(
+                    event,
+                    DedupeAcker {
+                        inner: inner_acker,
+                        store: store.clone(),
+                        event_id,
+                    },
+                    cursor,
+                );
+                if tx.send(Ok(wrapped)).await.is_err() {
                     return;
                 }
             }
         });
 
         Ok(SpawnedStream::new(rx, handle))
+    }
+}
+
+pub struct DedupeAcker<A: Acker, S: DedupeStore> {
+    inner: A,
+    store: S,
+    event_id: Arc<str>,
+}
+
+impl<A: Acker, S: DedupeStore> Acker for DedupeAcker<A, S> {
+    async fn ack(&self) -> Result<()> {
+        self.store.mark_processed(&self.event_id).await?;
+        self.inner.ack().await
+    }
+
+    async fn nack(&self) -> Result<()> {
+        self.inner.nack().await
     }
 }
 
@@ -116,14 +139,12 @@ mod tests {
 
     use super::*;
     use crate::event::Event;
+    use crate::io::Message;
     use crate::io::acker::NoopAcker;
-    use crate::io::{Cursor, Message};
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
-
-    impl crate::io::Cursor for TestCursor {}
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -137,40 +158,63 @@ mod tests {
 
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let events = self.events.lock().unwrap().take().unwrap_or_default();
-            Ok(Box::pin(stream::iter(
-                events.into_iter().enumerate().map(|(i, e)| {
-                    Ok(Message::new(e, NoopAcker, TestCursor(i as u64)))
-                }),
-            )))
+            Ok(Box::pin(stream::iter(events.into_iter().enumerate().map(
+                |(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as u64))),
+            ))))
         }
     }
 
     #[tokio::test]
-    async fn dedup_skips_duplicate_events() {
+    async fn nack_before_mark_allows_redelivery() {
         let e = Event::create("org", "/x", "t", Payload::from_string("p")).unwrap();
-
-        let reader = VecReader {
-            events: Mutex::new(Some(vec![e.clone(), e])),
-        };
         let store = InMemoryDedupeStore::new();
-        let dedup = DedupeReader::new(reader, store);
+        let reader = VecReader {
+            events: Mutex::new(Some(vec![e.clone()])),
+        };
+        let dedup = DedupeReader::new(reader, store.clone());
         let mut stream = dedup.read(()).await.unwrap();
 
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        let m = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        m.nack().await.unwrap();
+        assert!(store.seen.lock().unwrap().is_empty());
 
-        // Second event has same id (clone) — should be skipped (stream ends or idles).
-        let second = tokio::time::timeout(Duration::from_millis(300), stream.next()).await;
-        match second {
-            Err(_) => {} // timeout = expected (stream idles)
-            Ok(None) => {} // stream ended = expected (inner exhausted)
-            Ok(Some(Ok(_))) => panic!("duplicate event should be skipped, got a message"),
-            Ok(Some(Err(_))) => panic!("duplicate event should be skipped, got error"),
-        }
-        drop(first);
+        let reader = VecReader {
+            events: Mutex::new(Some(vec![e])),
+        };
+        let dedup = DedupeReader::new(reader, store.clone());
+        let mut stream = dedup.read(()).await.unwrap();
+        let m = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        m.ack().await.unwrap();
+        assert_eq!(store.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dedup_skips_already_marked_events() {
+        let e1 = Event::create("org", "/x", "t1", Payload::from_string("p")).unwrap();
+        let e2 = Event::create("org", "/x", "t2", Payload::from_string("p")).unwrap();
+        let store = InMemoryDedupeStore::new();
+        store.mark_processed(&e1.id().to_string()).await.unwrap();
+
+        let reader = VecReader {
+            events: Mutex::new(Some(vec![e1, e2.clone()])),
+        };
+        let dedup = DedupeReader::new(reader, store);
+        let mut stream = dedup.read(()).await.unwrap();
+
+        let m = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.event().id(), e2.id());
     }
 
     #[tokio::test]

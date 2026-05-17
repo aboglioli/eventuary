@@ -5,8 +5,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
-use crate::io::stream::SpawnedStream;
 use crate::io::Reader;
+use crate::io::stream::SpawnedStream;
 
 #[derive(Debug, Clone)]
 pub struct RecoverConfig {
@@ -87,19 +87,11 @@ where
                         backoff = Duration::from_secs_f64(
                             backoff.as_secs_f64() * config.backoff_multiplier,
                         );
-                        match inner_reader.read(subscription.clone()).await {
-                            Ok(s) => stream = Box::pin(s),
-                            Err(_read_err) => {
-                                // Retry the read next iteration
-                                continue;
-                            }
+                        if let Ok(s) = inner_reader.read(subscription.clone()).await {
+                            stream = Box::pin(s);
                         }
                     }
-                    None => {
-                        // Inner stream ended cleanly
-                        let _ = tx.send(Err(crate::Error::Store("recover: inner stream ended".into()))).await;
-                        return;
-                    }
+                    None => return,
                 }
             }
         });
@@ -111,15 +103,14 @@ where
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use futures::{Stream, StreamExt, stream};
-    use crate::io::{Message, Cursor};
 
     use super::*;
     use crate::event::Event;
+    use crate::io::Message;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
@@ -139,10 +130,8 @@ mod tests {
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let call = self.call_count.fetch_add(1, Ordering::SeqCst);
             let items: Vec<Result<Message<NoopAcker, TestCursor>>> = if call < 2 {
-                // First two reads: error
                 vec![Err(crate::Error::Store("transient".into()))]
             } else {
-                // Third read: success
                 vec![Ok(Message::new(
                     Event::create("org", "/x", "test", Payload::from_string("p")).unwrap(),
                     NoopAcker,
@@ -174,7 +163,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(*msg.cursor(), TestCursor(0));
-        // First read + 2 retries = 3 calls
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
     }
 
@@ -197,7 +185,6 @@ mod tests {
             .unwrap();
 
         assert!(result.unwrap().is_err());
-        // First read + 1 retry = 2 calls
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
     }
 }

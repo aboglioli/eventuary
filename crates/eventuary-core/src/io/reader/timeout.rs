@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -59,17 +60,24 @@ where
             Poll::Ready(Some(Ok(msg))) => {
                 let (event, inner_acker, cursor) = msg.into_parts();
                 let notify = Arc::new(Notify::new());
+                let resolved = Arc::new(AtomicBool::new(false));
                 let acker = TimeoutAcker {
                     inner: inner_acker,
                     notify: Arc::clone(&notify),
-                    timed_out: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    resolved: Arc::clone(&resolved),
                 };
                 let acker_for_timer = acker.clone();
                 let timeout = self.timeout;
                 tokio::spawn(async move {
                     tokio::select! {
                         _ = tokio::time::sleep(timeout) => {
-                            acker_for_timer.on_timeout().await;
+                            if acker_for_timer
+                                .resolved
+                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                            {
+                                let _ = acker_for_timer.inner.nack().await;
+                            }
                         }
                         _ = notify.notified() => {}
                     }
@@ -87,24 +95,30 @@ where
 pub struct TimeoutAcker<A: Acker> {
     inner: A,
     notify: Arc<Notify>,
-    timed_out: Arc<std::sync::atomic::AtomicBool>,
+    resolved: Arc<AtomicBool>,
 }
 
-impl<A: Acker> TimeoutAcker<A> {
-    async fn on_timeout(&self) {
-        self.timed_out
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let _ = self.inner.nack().await;
-    }
-}
-
-impl<A: Acker + Send + Sync> Acker for TimeoutAcker<A> {
+impl<A: Acker> Acker for TimeoutAcker<A> {
     async fn ack(&self) -> Result<()> {
+        if self
+            .resolved
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
+        }
         self.notify.notify_waiters();
         self.inner.ack().await
     }
 
     async fn nack(&self) -> Result<()> {
+        if self
+            .resolved
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
+        }
         self.notify.notify_waiters();
         self.inner.nack().await
     }
@@ -119,11 +133,12 @@ mod tests {
     use futures::{Stream, StreamExt, stream};
 
     use super::*;
-    use crate::error::Error;
     use crate::event::Event;
     use crate::io::acker::NoopAcker;
     use crate::io::{Cursor, Reader};
     use crate::payload::Payload;
+
+    type TestItems = Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
@@ -131,7 +146,7 @@ mod tests {
     impl Cursor for TestCursor {}
 
     struct VecReader {
-        items: Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>,
+        items: TestItems,
     }
 
     impl Reader for VecReader {
@@ -172,7 +187,6 @@ mod tests {
         };
         let timed = TimeoutReader::new(reader, Duration::from_millis(50));
         let mut stream = timed.read(()).await.unwrap();
-        // Message should be delivered immediately, not blocked by timeout timer
         let msg = tokio::time::timeout(Duration::from_millis(200), stream.next())
             .await
             .unwrap()
@@ -190,7 +204,56 @@ mod tests {
         let timed = TimeoutReader::new(reader, Duration::from_secs(60));
         let mut stream = timed.read(()).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();
-        // Ack immediately, should work fine
         msg.ack().await.unwrap();
+    }
+
+    #[derive(Clone, Default)]
+    struct NackCounter {
+        nacks: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Acker for NackCounter {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            self.nacks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    type CountingItems = Mutex<Option<Vec<Result<Message<NackCounter, TestCursor>>>>>;
+
+    struct CountingReader {
+        items: CountingItems,
+    }
+
+    impl Reader for CountingReader {
+        type Subscription = ();
+        type Acker = NackCounter;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NackCounter, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let items = self.items.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(stream::iter(items)))
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_reader_nacks_inner_on_expiry() {
+        let counter = NackCounter::default();
+        let reader = CountingReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                ev(),
+                counter.clone(),
+                TestCursor(1),
+            ))])),
+        };
+        let timed = TimeoutReader::new(reader, Duration::from_millis(20));
+        let mut stream = timed.read(()).await.unwrap();
+        let _msg = stream.next().await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(counter.nacks.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

@@ -15,23 +15,6 @@ pub trait InspectHooks: Send + Sync {
     fn on_error(&self, _error: &Error) {}
 }
 
-impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
-    async fn ack(&self) -> Result<()> {
-        self.hooks.on_ack();
-        self.inner.ack().await
-    }
-
-    async fn nack(&self) -> Result<()> {
-        self.hooks.on_nack();
-        self.inner.nack().await
-    }
-}
-
-pub struct InspectAcker<A: Acker, H: InspectHooks> {
-    inner: A,
-    hooks: Arc<H>,
-}
-
 pub struct InspectReader<R, H> {
     inner: R,
     hooks: Arc<H>,
@@ -50,13 +33,13 @@ impl<R, H> Reader for InspectReader<R, H>
 where
     R: Reader + Send + Sync + 'static,
     R::Subscription: Send + 'static,
-    R::Acker: Clone + Send + Sync + 'static,
+    R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: 'static,
     H: InspectHooks + 'static,
 {
     type Subscription = R::Subscription;
-    type Acker = R::Acker;
+    type Acker = InspectAcker<R::Acker, H>;
     type Cursor = R::Cursor;
     type Stream = InspectStream<R, H>;
 
@@ -69,6 +52,23 @@ where
     }
 }
 
+pub struct InspectAcker<A: Acker, H: InspectHooks> {
+    inner: A,
+    hooks: Arc<H>,
+}
+
+impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
+    async fn ack(&self) -> Result<()> {
+        self.hooks.on_ack();
+        self.inner.ack().await
+    }
+
+    async fn nack(&self) -> Result<()> {
+        self.hooks.on_nack();
+        self.inner.nack().await
+    }
+}
+
 pub struct InspectStream<R: Reader, H> {
     inner: Pin<Box<R::Stream>>,
     hooks: Arc<H>,
@@ -77,16 +77,21 @@ pub struct InspectStream<R: Reader, H> {
 impl<R, H> Stream for InspectStream<R, H>
 where
     R: Reader,
-    R::Acker: Clone,
+    R::Acker: Send + Sync,
     H: InspectHooks,
 {
-    type Item = Result<Message<R::Acker, R::Cursor>>;
+    type Item = Result<Message<InspectAcker<R::Acker, H>, R::Cursor>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(msg))) => {
                 self.hooks.on_deliver(msg.event());
-                Poll::Ready(Some(Ok(msg)))
+                let (event, inner_acker, cursor) = msg.into_parts();
+                let acker = InspectAcker {
+                    inner: inner_acker,
+                    hooks: Arc::clone(&self.hooks),
+                };
+                Poll::Ready(Some(Ok(Message::new(event, acker, cursor))))
             }
             Poll::Ready(Some(Err(e))) => {
                 self.hooks.on_error(&e);
@@ -108,17 +113,17 @@ mod tests {
 
     use super::*;
     use crate::event::Event;
+    use crate::io::Reader;
     use crate::io::acker::NoopAcker;
-    use crate::io::{Cursor, Reader};
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
 
-    impl Cursor for TestCursor {}
+    type TestItems = Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>;
 
     struct VecReader {
-        items: Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>,
+        items: TestItems,
     }
 
     impl Reader for VecReader {
@@ -172,20 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspect_reader_calls_on_deliver() {
-        let hooks = CountingHooks::new();
-        let reader = VecReader {
-            items: Mutex::new(Some(vec![Ok(Message::new(ev(), NoopAcker, TestCursor(1)))])),
-        };
-        let inspect = InspectReader::new(reader, hooks);
-        let mut stream = inspect.read(()).await.unwrap();
-        let msg = stream.next().await.unwrap().unwrap();
-        assert_eq!(msg.event().topic().as_str(), "thing.happened");
-        msg.ack().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn inspect_reader_counts_delivered() {
+    async fn inspect_reader_counts_delivers_and_acks() {
         let hooks = CountingHooks::new();
         let reader = VecReader {
             items: Mutex::new(Some(vec![Ok(Message::new(ev(), NoopAcker, TestCursor(1)))])),
@@ -195,6 +187,20 @@ mod tests {
         let msg = stream.next().await.unwrap().unwrap();
         assert_eq!(hooks.delivers.load(Ordering::SeqCst), 1);
         msg.ack().await.unwrap();
+        assert_eq!(hooks.acks.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn inspect_reader_counts_nacks() {
+        let hooks = CountingHooks::new();
+        let reader = VecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(ev(), NoopAcker, TestCursor(1)))])),
+        };
+        let inspect = InspectReader::new(reader, hooks.clone());
+        let mut stream = inspect.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        msg.nack().await.unwrap();
+        assert_eq!(hooks.nacks.load(Ordering::SeqCst), 1);
         assert_eq!(hooks.acks.load(Ordering::SeqCst), 0);
     }
 

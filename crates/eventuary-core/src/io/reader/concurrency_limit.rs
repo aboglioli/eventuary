@@ -46,19 +46,28 @@ where
                     Ok(p) => p,
                     Err(_) => return,
                 };
-                let mapped = match item {
+                let msg = match item {
                     Ok(msg) => {
                         let (event, acker, cursor) = msg.into_parts();
-                        Some(Message::new(event, LimitAcker { inner: acker, _permit: permit }, cursor))
+                        Message::new(
+                            event,
+                            LimitAcker {
+                                inner: acker,
+                                _permit: permit,
+                            },
+                            cursor,
+                        )
                     }
-                    Err(_) => {
-                        // Release permit immediately on error, no message to deliver
+                    Err(e) => {
                         drop(permit);
-                        None
+                        if tx.send(Err(e)).await.is_err() {
+                            return;
+                        }
+                        continue;
                     }
                 };
-                if let Some(msg) = mapped {
-                    if tx.send(Ok(msg)).await.is_err() { return; }
+                if tx.send(Ok(msg)).await.is_err() {
+                    return;
                 }
             }
         });
@@ -110,11 +119,9 @@ mod tests {
 
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let events = self.events.lock().unwrap().take().unwrap_or_default();
-            Ok(Box::pin(stream::iter(
-                events.into_iter().enumerate().map(|(i, e)| {
-                    Ok(Message::new(e, NoopAcker, TestCursor(i as u64)))
-                }),
-            )))
+            Ok(Box::pin(stream::iter(events.into_iter().enumerate().map(
+                |(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as u64))),
+            ))))
         }
     }
 
@@ -131,7 +138,6 @@ mod tests {
         let limited = ConcurrencyLimitReader::new(reader, 2);
         let mut stream = limited.read(()).await.unwrap();
 
-        // First 2 messages arrive immediately
         let m1 = tokio::time::timeout(Duration::from_millis(500), stream.next())
             .await
             .unwrap()
@@ -143,14 +149,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // 3rd blocked (2 in-flight, none released)
         let blocked = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
-        assert!(blocked.is_err(), "3rd message should be blocked by semaphore");
+        assert!(
+            blocked.is_err(),
+            "3rd message should be blocked by semaphore"
+        );
 
-        // Drop m1 to release a semaphore slot
         drop(m1);
 
-        // Now 3rd should arrive
         let _m3 = tokio::time::timeout(Duration::from_millis(500), stream.next())
             .await
             .unwrap()

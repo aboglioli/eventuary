@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -6,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Reader};
+use crate::io::{Acker, Message, Reader};
 
 pub trait WatermarkStore: Clone + Send + Sync + 'static {
     fn load_watermark(
@@ -23,7 +24,7 @@ pub trait WatermarkStore: Clone + Send + Sync + 'static {
 pub struct WatermarkReader<R, S> {
     inner: R,
     store: S,
-    key: String,
+    key: Arc<str>,
 }
 
 impl<R, S> WatermarkReader<R, S> {
@@ -31,7 +32,7 @@ impl<R, S> WatermarkReader<R, S> {
         Self {
             inner,
             store,
-            key: key.into(),
+            key: Arc::from(key.into()),
         }
     }
 }
@@ -45,16 +46,16 @@ where
     R::Stream: Send + 'static,
     S: WatermarkStore + 'static,
 {
-    type Acker = R::Acker;
-    type Cursor = R::Cursor;
-    type Stream = SpawnedStream<R::Acker, R::Cursor>;
     type Subscription = R::Subscription;
+    type Acker = WatermarkAcker<R::Acker, S>;
+    type Cursor = R::Cursor;
+    type Stream = SpawnedStream<WatermarkAcker<R::Acker, S>, R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let watermark = self.store.load_watermark(&self.key).await?;
         let inner = self.inner.read(subscription).await?;
         let store = self.store.clone();
-        let key = self.key.clone();
+        let key = Arc::clone(&self.key);
         let (tx, rx) = mpsc::channel(64);
 
         let handle = tokio::spawn(async move {
@@ -73,19 +74,25 @@ where
                 if let Some(wm) = current_watermark
                     && event_ts <= wm
                 {
-                    // Event is older than watermark — ack and skip
                     if let Err(e) = msg.ack().await {
                         let _ = tx.send(Err(e)).await;
                     }
                     continue;
                 }
-                // Track the latest timestamp for watermark update
                 current_watermark = Some(event_ts);
-                if let Err(e) = store.save_watermark(&key, event_ts).await {
-                    let _ = tx.send(Err(e)).await;
-                    return;
-                }
-                if tx.send(Ok(msg)).await.is_err() {
+
+                let (event, inner_acker, cursor) = msg.into_parts();
+                let wrapped = Message::new(
+                    event,
+                    WatermarkAcker {
+                        inner: inner_acker,
+                        store: store.clone(),
+                        key: Arc::clone(&key),
+                        event_ts,
+                    },
+                    cursor,
+                );
+                if tx.send(Ok(wrapped)).await.is_err() {
                     return;
                 }
             }
@@ -95,11 +102,29 @@ where
     }
 }
 
+pub struct WatermarkAcker<A: Acker, S: WatermarkStore> {
+    inner: A,
+    store: S,
+    key: Arc<str>,
+    event_ts: DateTime<Utc>,
+}
+
+impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
+    async fn ack(&self) -> Result<()> {
+        self.store.save_watermark(&self.key, self.event_ts).await?;
+        self.inner.ack().await
+    }
+
+    async fn nack(&self) -> Result<()> {
+        self.inner.nack().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
-    use std::sync::Mutex;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use chrono::TimeDelta;
@@ -107,8 +132,8 @@ mod tests {
 
     use super::*;
     use crate::event::{Event, EventId};
+    use crate::io::Message;
     use crate::io::acker::NoopAcker;
-    use crate::io::{Cursor, Message};
     use crate::metadata::Metadata;
     use crate::namespace::Namespace;
     use crate::organization::OrganizationId;
@@ -117,8 +142,6 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
-
-    impl crate::io::Cursor for TestCursor {}
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -132,11 +155,9 @@ mod tests {
 
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let events = self.events.lock().unwrap().take().unwrap_or_default();
-            Ok(Box::pin(stream::iter(
-                events.into_iter().enumerate().map(|(i, e)| {
-                    Ok(Message::new(e, NoopAcker, TestCursor(i as u64)))
-                }),
-            )))
+            Ok(Box::pin(stream::iter(events.into_iter().enumerate().map(
+                |(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as u64))),
+            ))))
         }
     }
 
@@ -181,7 +202,6 @@ mod tests {
         let recent = now - TimeDelta::seconds(10);
 
         let store = InMemoryWatermarkStore::default();
-        // Watermark set slightly before recent so old is filtered but recent is not
         *store.inner.lock().unwrap() = Some(recent - TimeDelta::seconds(1));
 
         let reader = VecReader {
@@ -190,7 +210,6 @@ mod tests {
         let reader = WatermarkReader::new(reader, store, "test");
         let mut stream = reader.read(()).await.unwrap();
 
-        // old should be skipped (older than watermark), recent should arrive
         let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -200,43 +219,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ack_updates_watermark() {
+    async fn ack_updates_watermark_nack_does_not() {
         let now = Utc::now();
-        let old = now - TimeDelta::seconds(60);
-        let recent = now - TimeDelta::seconds(10);
+        let first = now - TimeDelta::seconds(60);
+        let second = now - TimeDelta::seconds(30);
         let store = InMemoryWatermarkStore::default();
 
-        // Read old event (no watermark set → delivers)
         let reader = WatermarkReader::new(
             VecReader {
-                events: Mutex::new(Some(vec![ev("old", old)])),
+                events: Mutex::new(Some(vec![ev("first", first), ev("second", second)])),
             },
             store.clone(),
             "test",
         );
         let mut stream = reader.read(()).await.unwrap();
-        let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(msg.event().topic().as_str(), "old");
-        msg.ack().await.unwrap();
 
-        // Read again: old should be skipped, recent delivered
-        let reader = WatermarkReader::new(
-            VecReader {
-                events: Mutex::new(Some(vec![ev("old", old), ev("recent", recent)])),
-            },
-            store.clone(),
-            "test",
-        );
-        let mut stream = reader.read(()).await.unwrap();
-        let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        let m1 = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().topic().as_str(), "recent");
+        m1.nack().await.unwrap();
+        assert_eq!(*store.inner.lock().unwrap(), None);
+
+        let m2 = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        m2.ack().await.unwrap();
+        assert_eq!(*store.inner.lock().unwrap(), Some(second));
     }
 }
