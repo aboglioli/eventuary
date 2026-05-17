@@ -122,7 +122,7 @@ impl EventRow {
         let metadata = serde_json::to_string(&serialized.metadata)
             .map_err(|e| Error::Store(format!("encode metadata: {e}")))?;
         Ok(Self {
-            id: serialized.id,
+            id: serialized.id.to_string(),
             organization: serialized.organization,
             namespace: serialized.namespace,
             topic: serialized.topic,
@@ -132,7 +132,7 @@ impl EventRow {
             metadata,
             timestamp: serialized.timestamp.to_rfc3339(),
             version: serialized.version as i64,
-            parent_id: serialized.parent_id,
+            parent_id: serialized.parent_id.map(|id| id.to_string()),
             correlation_id: serialized.correlation_id,
             causation_id: serialized.causation_id,
         })

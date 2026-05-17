@@ -371,7 +371,15 @@ async fn fetch_batch(
     rows.into_iter()
         .map(|row| {
             let sequence: i64 = row.get("sequence");
-            let id: String = row.get("id_text");
+            let id_text: String = row.get("id_text");
+            let id = uuid::Uuid::parse_str(&id_text)
+                .map_err(|e| Error::Serialization(format!("decode id: {e}")))?;
+            let parent_id = row
+                .get::<Option<String>, _>("parent_id_text")
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|e| Error::Serialization(format!("decode parent_id: {e}")))?;
             let payload_str: String = row.get("payload_text");
             let payload: SerializedPayload = serde_json::from_str(&payload_str)
                 .map_err(|e| Error::Serialization(format!("decode payload: {e}")))?;
@@ -392,7 +400,7 @@ async fn fetch_batch(
                 timestamp,
                 version: row.get::<i64, _>("version") as u64,
                 key: row.get("event_key"),
-                parent_id: row.get("parent_id_text"),
+                parent_id,
                 correlation_id: row.get("correlation_id"),
                 causation_id: row.get("causation_id"),
             };

@@ -88,7 +88,7 @@ fn insert_event(conn: &rusqlite::Connection, sql: &str, event: &Event) -> Result
     conn.execute(
         sql,
         rusqlite::params![
-            serialized.id,
+            serialized.id.to_string(),
             serialized.organization,
             serialized.namespace,
             serialized.topic,
@@ -98,7 +98,7 @@ fn insert_event(conn: &rusqlite::Connection, sql: &str, event: &Event) -> Result
             metadata,
             serialized.timestamp.to_rfc3339(),
             serialized.version as i64,
-            serialized.parent_id,
+            serialized.parent_id.map(|id| id.to_string()),
             serialized.correlation_id,
             serialized.causation_id,
         ],

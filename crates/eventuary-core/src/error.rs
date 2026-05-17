@@ -35,6 +35,9 @@ pub enum Error {
     #[error("store error: {0}")]
     Store(String),
 
+    #[error("handler error: {0}")]
+    Handler(String),
+
     #[error("timeout: {0}")]
     Timeout(String),
 

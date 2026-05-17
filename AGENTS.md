@@ -780,6 +780,22 @@ Worth knowing when changing the codebase:
   by the intake task, not one `tokio::spawn` per delivered message. At
   high throughput this keeps the timer wheel cost flat. The pattern is
   the template for any future "per-message timer" wrapper.
+- **Handler-level multiplexing, not reader-level fanout.** `Multiplexer`
+  is a `Handler` that routes one delivered event to multiple filtered
+  subscribers. The original backend message keeps one ack/nack
+  lifecycle. `SubscriberId` is the durable storage identity (distinct
+  from `Handler::id`), and `MultiplexerStore` skips subscribers that
+  already completed on redelivery. The store follows the
+  `CheckpointStore` shape: a single AFIT trait, `Clone + Send + Sync +
+  'static`, no Dyn bridge or `*Ext` helper, no `Box<T>`/`Arc<T>`
+  blanket impls. `Multiplexer<S>` is generic over the store; the
+  zero-sized `NoMultiplexerStore` is the default so callers can opt
+  into completion tracking explicitly via `.store(...)`. There is no
+  multiplexer-id scope in the store key: subscriber ids are globally
+  unique within the store's namespace, and callers prefix them when
+  they need isolation between multiplexers sharing a store. For fully
+  independent progress, use backend-native isolation
+  (`CheckpointScope`, Kafka consumer group, SQS queue).
 
 ## Releasing
 

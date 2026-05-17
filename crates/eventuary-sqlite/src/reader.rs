@@ -449,6 +449,13 @@ async fn fetch_batch(
             let payload: SerializedPayload = serde_json::from_str(&payload_str)
                 .map_err(|e| Error::Serialization(format!("decode payload: {e}")))?;
             let _ = content_type;
+            let id = uuid::Uuid::parse_str(&id)
+                .map_err(|e| Error::Serialization(format!("decode id: {e}")))?;
+            let parent_id = parent_id
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|e| Error::Serialization(format!("decode parent_id: {e}")))?;
             let metadata: HashMap<String, String> = serde_json::from_str(&metadata_str)
                 .map_err(|e| Error::Serialization(format!("decode metadata: {e}")))?;
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
