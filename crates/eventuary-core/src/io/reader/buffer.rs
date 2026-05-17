@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::future::Future;
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use futures::StreamExt;
 use tokio::sync::{Notify, mpsc};
@@ -31,7 +33,7 @@ pub trait BufferStore<C>: Clone + Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct InMemoryBufferStore<C> {
-    state: Arc<std::sync::Mutex<InMemoryState<C>>>,
+    state: Arc<Mutex<InMemoryState<C>>>,
 }
 
 pub struct BufferedReaderConfig {
@@ -52,17 +54,9 @@ struct InMemoryState<C> {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct StoreId(u64);
 
-#[derive(Clone)]
 struct InMemoryEntry<C> {
     event: Event,
     cursor: C,
-    status: StoreStatus,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum StoreStatus {
-    Pending,
-    Completed,
 }
 
 impl<C> InMemoryBufferStore<C>
@@ -71,7 +65,7 @@ where
 {
     pub fn new() -> Self {
         Self {
-            state: Arc::new(std::sync::Mutex::new(InMemoryState {
+            state: Arc::new(Mutex::new(InMemoryState {
                 entries: HashMap::new(),
                 next_id: StoreId(0),
             })),
@@ -79,13 +73,7 @@ where
     }
 
     pub fn pending_count(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap()
-            .entries
-            .values()
-            .filter(|e| matches!(e.status, StoreStatus::Pending))
-            .count()
+        self.state.lock().unwrap().entries.len()
     }
 }
 
@@ -113,7 +101,6 @@ where
             InMemoryEntry {
                 event: event.clone(),
                 cursor: cursor.clone(),
-                status: StoreStatus::Pending,
             },
         );
         Ok(id)
@@ -124,7 +111,6 @@ where
         let entries: Vec<BufferEntry<C, Self::Id>> = state
             .entries
             .iter()
-            .filter(|(_, e)| matches!(e.status, StoreStatus::Pending))
             .map(|(id, e)| BufferEntry {
                 id: *id,
                 event: e.event.clone(),
@@ -135,18 +121,11 @@ where
     }
 
     async fn ack(&self, id: &Self::Id) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(entry) = state.entries.get_mut(id) {
-            entry.status = StoreStatus::Completed;
-        }
+        self.state.lock().unwrap().entries.remove(id);
         Ok(())
     }
 
-    async fn nack(&self, id: &Self::Id) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(entry) = state.entries.get_mut(id) {
-            entry.status = StoreStatus::Pending;
-        }
+    async fn nack(&self, _id: &Self::Id) -> Result<()> {
         Ok(())
     }
 }
@@ -160,27 +139,39 @@ pub struct BufferAcker<S: BufferStore<C>, C> {
     store: S,
     id: S::Id,
     shared: Arc<BufferShared>,
+    released: Arc<AtomicBool>,
     _cursor: std::marker::PhantomData<fn() -> C>,
 }
 
 impl<S, C> BufferAcker<S, C>
 where
     S: BufferStore<C>,
-    C: Send + Sync + 'static,
 {
     fn new(store: S, id: S::Id, shared: Arc<BufferShared>) -> Self {
         Self {
             store,
             id,
             shared,
+            released: Arc::new(AtomicBool::new(false)),
             _cursor: std::marker::PhantomData,
+        }
+    }
+
+    fn release_slot(&self) {
+        if self
+            .released
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.shared.pending.fetch_sub(1, Ordering::SeqCst);
+            self.shared.notify.notify_one();
         }
     }
 }
 
 impl<S, C> Acker for BufferAcker<S, C>
 where
-    S: BufferStore<C> + Send + Sync + 'static,
+    S: BufferStore<C> + 'static,
     C: Send + Sync + 'static,
 {
     async fn ack(&self) -> Result<()> {
@@ -196,16 +187,6 @@ where
     }
 }
 
-impl<S, C> BufferAcker<S, C>
-where
-    S: BufferStore<C>,
-{
-    fn release_slot(&self) {
-        self.shared.pending.fetch_sub(1, Ordering::SeqCst);
-        self.shared.notify.notify_one();
-    }
-}
-
 impl<S, C> Clone for BufferAcker<S, C>
 where
     S: BufferStore<C> + Clone,
@@ -215,6 +196,7 @@ where
             store: self.store.clone(),
             id: self.id.clone(),
             shared: Arc::clone(&self.shared),
+            released: Arc::clone(&self.released),
             _cursor: std::marker::PhantomData,
         }
     }
@@ -258,10 +240,9 @@ where
     R: Reader + Send + Sync + 'static,
     R::Cursor: Clone + Send + Sync + 'static,
     R::Subscription: Send + 'static,
-    R::Acker: Acker + Send + Sync + 'static,
+    R::Acker: Acker + 'static,
     R::Stream: Send + 'static,
     S: BufferStore<R::Cursor> + 'static,
-    S::Id: Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = BufferAcker<S, R::Cursor>;
@@ -278,10 +259,10 @@ where
             notify: Notify::new(),
         });
 
-        let drain_shared = Arc::clone(&shared);
         for entry in drain_entries {
+            let drain_shared = Arc::clone(&shared);
             drain_shared.pending.fetch_add(1, Ordering::SeqCst);
-            let acker = BufferAcker::new(drain_store.clone(), entry.id, Arc::clone(&drain_shared));
+            let acker = BufferAcker::new(drain_store.clone(), entry.id, drain_shared);
             let msg = Message::new(entry.event, acker, entry.cursor);
             if tx.send(Ok(msg)).await.is_err() {
                 return Ok(SpawnedStream::new(rx, tokio::spawn(async {})));
@@ -502,15 +483,14 @@ mod reader_tests {
             .unwrap();
         msg1.nack().await.unwrap();
 
-        let _msg2 = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        let msg2 = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        drop(msg2);
 
-        drop(stream);
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(stream.next().await.is_none());
 
         let store2 = store.clone();
         let reader2 = VecReader {
@@ -599,6 +579,29 @@ mod reader_tests {
 
         msg.ack().await.unwrap();
         assert_eq!(store.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn inner_read_error_propagates() {
+        struct FailingReader;
+
+        impl Reader for FailingReader {
+            type Subscription = ();
+            type Acker = NoopAcker;
+            type Cursor = TestCursor;
+            type Stream =
+                Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+            async fn read(&self, _: ()) -> Result<Self::Stream> {
+                Err(crate::error::Error::Store("read failed".into()))
+            }
+        }
+
+        let store = InMemoryBufferStore::<TestCursor>::new();
+        let reader = FailingReader;
+        let buffered = BufferedReader::new(reader, store);
+        let result = buffered.read(()).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

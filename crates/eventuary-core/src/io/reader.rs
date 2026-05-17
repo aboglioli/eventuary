@@ -232,8 +232,7 @@ pub mod window;
 
 pub use batch::{BatchAcker, BatchCursor, BatchReader};
 pub use buffer::{
-    BufferAcker, BufferEntry, BufferStore, BufferedReader, BufferedReaderConfig,
-    InMemoryBufferStore,
+    BufferAcker, BufferStore, BufferedReader, BufferedReaderConfig, InMemoryBufferStore,
 };
 pub use checkpoint::{
     CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig, CheckpointScope,
