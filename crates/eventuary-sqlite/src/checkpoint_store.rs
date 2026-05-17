@@ -50,18 +50,11 @@ impl<C> SqliteCheckpointStore<C> {
 }
 
 fn encode_cursor_id(cursor_id: &CursorId) -> String {
-    match cursor_id {
-        CursorId::Global => "global".to_owned(),
-        CursorId::Named(id) => id.to_string(),
-    }
+    cursor_id.as_str().to_owned()
 }
 
 fn decode_cursor_id(value: &str) -> CursorId {
-    if value == "global" {
-        CursorId::Global
-    } else {
-        CursorId::Named(Arc::from(value))
-    }
+    CursorId::new(value).unwrap_or_else(|_| CursorId::global())
 }
 
 fn encode_cursor<C: Serialize>(cursor: &C) -> Result<String> {
@@ -197,13 +190,13 @@ mod tests {
 
     #[test]
     fn cursor_id_global_encodes_as_plain_string() {
-        assert_eq!(encode_cursor_id(&CursorId::Global), "global");
-        assert_eq!(decode_cursor_id("global"), CursorId::Global);
+        assert_eq!(encode_cursor_id(&CursorId::global()), "global");
+        assert_eq!(decode_cursor_id("global"), CursorId::global());
     }
 
     #[test]
     fn cursor_id_named_roundtrips_unquoted() {
-        let id = CursorId::Named(Arc::from("partition:100:17"));
+        let id = CursorId::partition(100, 17);
         let encoded = encode_cursor_id(&id);
         assert_eq!(encoded, "partition:100:17");
         assert_eq!(decode_cursor_id(&encoded), id);

@@ -150,11 +150,7 @@ impl<C> PartitionedCursor<C> {
 
 impl<C> Cursor for PartitionedCursor<C> {
     fn id(&self) -> CursorId {
-        CursorId::Named(Arc::from(format!(
-            "partition:{}:{}",
-            self.partition.count(),
-            self.partition.id(),
-        )))
+        CursorId::partition(self.partition.count(), self.partition.id())
     }
 }
 
@@ -601,10 +597,7 @@ mod tests {
     fn partitioned_cursor_id_is_named_with_partition() {
         let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
-        assert_eq!(
-            cursor.id(),
-            CursorId::Named(std::sync::Arc::from("partition:100:17"))
-        );
+        assert_eq!(cursor.id(), CursorId::partition(100, 17));
     }
 
     #[test]

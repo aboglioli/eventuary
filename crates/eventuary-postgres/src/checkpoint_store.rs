@@ -50,18 +50,11 @@ impl<C> PgCheckpointStore<C> {
 }
 
 fn encode_cursor_id(cursor_id: &CursorId) -> &str {
-    match cursor_id {
-        CursorId::Global => "global",
-        CursorId::Named(id) => id,
-    }
+    cursor_id.as_str()
 }
 
 fn decode_cursor_id(value: String) -> CursorId {
-    if value == "global" {
-        CursorId::Global
-    } else {
-        CursorId::Named(Arc::from(value))
-    }
+    CursorId::new(value).unwrap_or_else(|_| CursorId::global())
 }
 
 fn encode_cursor<C: Serialize>(cursor: &C) -> Result<serde_json::Value> {
@@ -172,13 +165,13 @@ mod tests {
 
     #[test]
     fn cursor_id_global_encodes_as_plain_string() {
-        assert_eq!(encode_cursor_id(&CursorId::Global), "global");
-        assert_eq!(decode_cursor_id("global".to_owned()), CursorId::Global);
+        assert_eq!(encode_cursor_id(&CursorId::global()), "global");
+        assert_eq!(decode_cursor_id("global".to_owned()), CursorId::global());
     }
 
     #[test]
     fn cursor_id_named_roundtrips_unquoted() {
-        let id = CursorId::Named(Arc::from("partition:100:17"));
+        let id = CursorId::partition(100, 17);
         let encoded = encode_cursor_id(&id).to_owned();
         assert_eq!(encoded, "partition:100:17");
         assert_eq!(decode_cursor_id(encoded), id);

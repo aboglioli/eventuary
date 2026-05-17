@@ -658,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reader_retries_with_initial_start_when_checkpoint_cursor_is_invalid() {
         let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(CursorId::Global, TestCursor(10))];
+        *store.rows.lock().await = vec![(CursorId::global(), TestCursor(10))];
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reader = InvalidCursorReader {
             calls: std::sync::Arc::clone(&calls),
@@ -680,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reader_returns_invalid_cursor_when_policy_is_error() {
         let store = PreloadedStore::default();
-        *store.rows.lock().await = vec![(CursorId::Global, TestCursor(10))];
+        *store.rows.lock().await = vec![(CursorId::global(), TestCursor(10))];
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reader = InvalidCursorReader {
             calls: std::sync::Arc::clone(&calls),
@@ -723,11 +723,11 @@ mod tests {
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![
             (
-                CursorId::Named(std::sync::Arc::from("partition:8:0")),
+                CursorId::partition(8, 0),
                 PartitionedCursor::new(TestCursor(0), old_partition),
             ),
             (
-                CursorId::Named(std::sync::Arc::from("partition:4:2")),
+                CursorId::partition(4, 2),
                 PartitionedCursor::new(TestCursor(0), current_partition),
             ),
         ];
@@ -778,7 +778,7 @@ mod tests {
         let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![(
-            CursorId::Named(std::sync::Arc::from("partition:8:0")),
+            CursorId::partition(8, 0),
             PartitionedCursor::new(TestCursor(10), old_partition),
         )];
 
@@ -816,7 +816,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_reader_seeds_inner_with_min_cursor() {
-        let cursor_id = CursorId::Named(std::sync::Arc::from("partition:4:2"));
+        let cursor_id = CursorId::partition(4, 2);
         let store = PreloadedStore::default();
         *store.rows.lock().await = vec![(cursor_id, TestCursor(10))];
         let observed = std::sync::Arc::new(TokioMutex::new(None));
@@ -860,8 +860,8 @@ mod tests {
             ConsumerGroupId::new("g").unwrap(),
             StreamId::new("s").unwrap(),
         );
-        let key = CheckpointKey::new(scope, CursorId::Global);
-        assert_eq!(key.cursor_id, CursorId::Global);
+        let key = CheckpointKey::new(scope, CursorId::global());
+        assert_eq!(key.cursor_id, CursorId::global());
     }
 
     #[test]
@@ -870,7 +870,7 @@ mod tests {
             ConsumerGroupId::new("g").unwrap(),
             StreamId::new("s").unwrap(),
         );
-        let id = CursorId::Named(std::sync::Arc::from("partition:100:17"));
+        let id = CursorId::partition(100, 17);
         let key = CheckpointKey::new(scope, id.clone());
         assert_eq!(key.cursor_id, id);
     }

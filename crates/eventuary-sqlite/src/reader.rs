@@ -484,6 +484,6 @@ mod tests {
 
     #[test]
     fn sqlite_cursor_id_is_global() {
-        assert_eq!(SqliteCursor::new(42).id(), CursorId::Global);
+        assert_eq!(SqliteCursor::new(42).id(), CursorId::global());
     }
 }
