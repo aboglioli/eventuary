@@ -54,26 +54,37 @@ crates/
 │
 ├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
 │   └── src/
-│       ├── event.rs        # Event aggregate, EventId, RestoreEvent
-│       ├── event_key.rs    # EventKey + inherent partition() (FNV-1a)
+│       ├── event.rs        # Event aggregate, EventId, Event::partition(count)
+│       ├── event_key.rs    # EventKey + Partition + fnv1a_u64 + EventKey::partition_for
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
-│       ├── payload.rs      # Payload + ContentType (JSON / text / binary)
+│       ├── payload.rs      # Payload (backed by bytes::Bytes) + ContentType
 │       ├── metadata.rs     # Metadata key/value pairs
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
-│       ├── partition.rs    # LogicalPartition, partition_for, fnv1a_u64
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
-│       ├── start_from.rs   # StartFrom<C> (Earliest / Latest / Timestamp / After)
 │       ├── serialization.rs # SerializedEvent wire format
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
 │           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt
 │           ├── reader.rs   # Reader trait + Dyn/Box/Arc + ReaderExt + BoxStream + submod owner
 │           ├── reader/
-│           │   ├── checkpoint.rs  # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope/ResumePolicy
-│           │   ├── partitioned.rs # PartitionedReader lane scheduler + PartitionedCursor + AckMode + LaneScheduling
-│           │   └── filtered.rs    # FilteredReader + FilteredStream
+│           │   ├── filtered.rs        # FilteredReader + FilteredStream
+│           │   ├── map.rs             # MapReader (Event -> Event)
+│           │   ├── try_map.rs         # TryMapReader (Event -> Result<Event>)
+│           │   ├── inspect.rs         # InspectReader + InspectHooks trait + InspectAcker
+│           │   ├── timeout.rs         # TimeoutReader (shared DelayQueue) + TimeoutAcker
+│           │   ├── rate_limit.rs      # RateLimitReader + RateLimit (MessagesPerSec)
+│           │   ├── concurrency_limit.rs # ConcurrencyLimitReader + LimitAcker
+│           │   ├── recover.rs         # RecoverReader + RecoverConfig (validated)
+│           │   ├── batch.rs           # BatchReader + BatchAcker + BatchCursor (Arc-backed)
+│           │   ├── window.rs          # WindowReader (size + time-based flush; reuses BatchAcker)
+│           │   ├── dedupe.rs          # DedupeReader + DedupeStore trait + InMemoryDedupeStore (capacity-bounded) + DedupeAcker
+│           │   ├── watermark.rs       # WatermarkReader (static or per-entity key fn) + WatermarkStore trait + WatermarkAcker
+│           │   ├── merge.rs           # MergeReader + MergeAcker + MergeCursor + MergeStrategy
+│           │   ├── replay_then_live.rs # ReplayThenLiveReader + ReplayThenLiveConfig (overlap dedupe) + ReplayLiveAcker + ReplayLiveCursor
+│           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
+│           │   └── checkpoint.rs      # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope + MissingCheckpointPolicy / InvalidCursorPolicy
 │           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
 │           │   ├── noop.rs      # NoopAcker
@@ -91,9 +102,10 @@ crates/
 │           ├── stream/
 │           │   ├── batched.rs # BatchedStream
 │           │   └── spawned.rs # SpawnedStream
-│           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter (single file)
-│           ├── cursor.rs   # Cursor trait + CursorId
-│           ├── message.rs  # Message<A, C> (event + acker + cursor), NoCursor
+│           ├── start_from.rs # StartFrom<C> (Earliest / Latest / Timestamp / After) + StartableSubscription
+│           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter + Filter impls for TopicPattern/NamespacePattern
+│           ├── cursor.rs   # Cursor trait + CursorId value-object newtype
+│           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value), NoCursor
 │           ├── stream_id.rs       # StreamId
 │           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
@@ -109,7 +121,7 @@ crates/
 
 | Layer | Can Import | Cannot Import |
 |-------|-----------|---------------|
-| `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, either, base64 | any other eventuary crate |
+| `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, tokio-util (`rt` + `time`), either, base64, bytes | any other eventuary crate |
 | `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate (backends depend on it, not vice versa) |
 | `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / rdkafka) | any other backend crate; `eventuary-conformance` only in `[dev-dependencies]` |
 | `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
@@ -224,9 +236,13 @@ when it resumes from a persisted checkpoint.
 ### Message + Acker
 
 `Message<A: Acker, C = NoCursor>` pairs an `Event` with an `Acker` and a
-`Cursor`. The handler receives the **borrowed event**
-(`Handler::handle(&self, event: &Event)`); the ack/nack envelope and the
-cursor stay with the consumer driver, not the handler.
+`Cursor`. The event is stored **by value**, not behind an `Arc` — every
+wrapper pays only for what it uses. Wrappers that need acker-side
+access to the event (currently `InspectAcker`, `DedupeAcker`,
+`WatermarkAcker`) wrap their own `Arc<Event>` locally instead of forcing
+an allocation on every Message. The handler receives the **borrowed
+event** (`Handler::handle(&self, event: &Event)`); the ack/nack envelope
+and the cursor stay with the consumer driver, not the handler.
 
 Ack semantics are backend-specific:
 
@@ -272,38 +288,69 @@ preserving the original event plus failure metadata.
   `Serialize + DeserializeOwned + SnapshotEventId`. Use to persist
   aggregate state alongside the event log and resume rebuild from the
   snapshot's `EventId`.
-- `EventKey::partition` (FNV-1a u64) for deterministic partition routing
-  (used by Kafka writer for record key → partition selection, and by
-  `PartitionedReader`).
+- `EventKey::partition_for(count: NonZeroU16) -> Partition` and
+  `Event::partition(count: NonZeroU16) -> Partition` (FNV-1a u64) for
+  deterministic partition routing (used by Kafka writer for record key →
+  partition selection, and by `PartitionedReader`). `Partition`,
+  `fnv1a_u64`, and `Event::partition` all live in `event_key.rs` / `event.rs`;
+  there is no separate `partition.rs` module.
 
-### Reader Composition (Cursor + Checkpoint + Partitioned)
+### Reader Composition (Wrappers)
 
 Backend readers (`PgReader`, `SqliteReader`, etc.) deliver events from a
 single source. Cross-cutting concerns live in generic core wrappers in
-`eventuary-core/src/io/reader/`:
+`eventuary-core/src/io/reader/`. Every wrapper is generic over
+`R: Reader`; most preserve or transparently wrap the inner `Acker` and
+`Cursor`.
 
-- `PartitionedReader<R>` is an in-process lane scheduler. It routes inner
-  messages into `LogicalPartition`s derived from `partition_for(event,
-  count)`, buffers each lane up to `lane_capacity`, acks the inner source
-  after accepting a message into a lane, and exposes one merged stream.
+**Core composition wrappers:**
+
+- `PartitionedReader<R>` is an in-process lane scheduler. It routes
+  inner messages into `Partition`s derived from `event.partition(count)`,
+  buffers each lane up to `lane_capacity`, and exposes one merged
+  stream. Two constructors pick the inner-ack semantics:
+  - `PartitionedReader::source(inner, config)` — acks inner on lane
+    accept. For source-cursor readers (Postgres, SQLite) where the
+    cursor advances independently of consumer progress.
+  - `PartitionedReader::delivery(inner, config)` — defers inner ack to
+    downstream ack. For destructive-ack brokers (SQS, Kafka).
   Downstream `ack` clears that lane's in-flight slot; downstream `nack`
-  requeues the same event at the front of that lane. Scheduling supports
-  round-robin and queue-depth-weighted modes.
+  requeues the same event at the front of that lane. Scheduling
+  supports `RoundRobin` and `QueueDepthWeighted` modes. `PartitionedAckMode`
+  is private; the constructors are the only way to pick a mode.
 - `CheckpointReader<R, S>` composes a source reader with a
   `CheckpointStore`. On `read` it loads persisted cursors by
   `CheckpointScope`, starts the inner reader from the minimum stored
   cursor with `StartFrom::After(cursor)`, drops already-checkpointed
   messages per partition, and commits checkpoints only in **contiguous
-  delivered order** per partition. `ack` calls the inner acker first and
-  then commits synchronously so store errors propagate; `nack` leaves the
-  checkpoint untouched.
+  delivered order** per progress point. `ack` calls the inner acker
+  first and then commits synchronously so store errors propagate;
+  `nack` leaves the checkpoint untouched. Empty `PendingState` entries
+  are evicted on completion so per-key state is bounded.
+
+  Resume policies (separate enums replace the old single
+  `CheckpointResumePolicy`):
+  - `MissingCheckpointPolicy::{UseInitialStart, Error}` — applied when
+    no checkpoint exists for the scope.
+  - `InvalidCursorPolicy::{UseInitialStart, Error}` — applied when the
+    inner reader returns `Error::InvalidCursor` for the stored cursor.
+
+  Cursor bound contract: `R::Cursor: Cursor + Clone + Ord + Send + Sync
+  + 'static`.
+
 - `Cursor` is the cursor-introspection trait. Every reader's cursor type
-  implements it. `Cursor::id()` returns `CursorId::Global` by default and
-  `CursorId::Named(Arc<str>)` for cursors that mark independent progress
-  points (e.g., `PartitionedCursor<C>` returns
-  `CursorId::Named("partition:{count}:{id}")`). `CheckpointReader` uses
-  `cursor.id()` to build the `CheckpointKey` and to track per-progress-point
-  pending state. The checkpoint store persists the full cursor value.
+  implements it. `Cursor::id() -> CursorId` returns `CursorId::Global`
+  by default; cursors that mark independent progress points (e.g.,
+  `PartitionedCursor<C>`) return a named id. `CheckpointReader` uses
+  `cursor.id()` to build the `CheckpointKey` and to track
+  per-progress-point pending state. The checkpoint store persists the
+  full cursor value.
+
+  `CursorId` is a **value-object newtype** wrapping `Arc<str>`. The
+  global sentinel is `"global"`; named cursors use any non-empty
+  string (e.g., `"partition:{count}:{id}"`). Serialization is the bare
+  string value.
+
 - `CheckpointStore<C>` is the persistence trait. SQL implementations
   (`PgCheckpointStore`, `SqliteCheckpointStore`) own the
   `consumer_offsets` table and persist the full inner cursor as JSON
@@ -311,11 +358,29 @@ single source. Cross-cutting concerns live in generic core wrappers in
   under a `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
   cursor_id)`.
 
+**Cross-cutting wrappers:**
+
+| Wrapper | Acker / Cursor | Purpose |
+|---|---|---|
+| `FilteredReader<R, F>` | passthrough | Drop messages that fail `Filter::matches`; skip-ack the inner so source progress advances. |
+| `MapReader<R, F>` | passthrough | Transform `Fn(Event) -> Event`. |
+| `TryMapReader<R, F>` | passthrough | Fallible mapper `Fn(Event) -> Result<Event>`. Errors surface to consumer. |
+| `InspectReader<R, H>` | `InspectAcker<R::Acker, H>` / passthrough | Observability hooks via `InspectHooks { on_deliver(&Event), on_ack(&Event), on_nack(&Event), on_error(&Error) }`. Acker holds `Arc<Event>` to keep ack/nack hooks rich. |
+| `TimeoutReader<R>` | `TimeoutAcker<R::Acker>` / passthrough | Per-message expiry that nacks the inner if downstream doesn't ack/nack in time. Backed by a single `tokio_util::time::DelayQueue` task (one task for all messages, not per-message), with an `AtomicBool` ensuring the inner Acker is called at most once. |
+| `RateLimitReader<R>` | passthrough | Throttle delivery to `RateLimit::MessagesPerSec`. Sleeps between successful emissions, not between polls. |
+| `ConcurrencyLimitReader<R>` | `LimitAcker<R::Acker>` / passthrough | Cap in-flight count via `tokio::sync::Semaphore`. Permit released on ack or nack. Limit is `NonZeroUsize`. |
+| `RecoverReader<R>` | passthrough | Retry the inner `read(subscription)` on stream error with exponential backoff. `RecoverConfig::new(retries, backoff, multiplier) -> Result<Self>` validates multiplier ≥ 1.0. |
+| `BatchReader<R>` | `BatchAcker<R::Acker>` / `BatchCursor<R::Cursor>` | Group up to `max_batch: NonZeroUsize` events into a shared `Arc`-backed acker/cursor. `BatchAcker::{ack, nack, ack_subset(&[usize]), nack_subset(&[usize])}` give all-or-subset acknowledgement. |
+| `WindowReader<R>` | `BatchAcker` / `BatchCursor` | Same shape as `BatchReader` but flushes on `max_size: NonZeroUsize` **or** `max_wait: Duration`. Reuses `flush_batch` helper from `batch.rs`. |
+| `DedupeReader<R, S>` | `DedupeAcker<R::Acker, S>` / passthrough | Skip already-seen events via a `DedupeStore`. `exists` check on intake; `mark_processed` deferred until downstream ack so nack/crash before processing does not silently drop the event. Trait offers `mark_if_new(&Event) -> Result<bool>` (atomic; default impl built on `exists`+`mark`, override for native atomicity). `InMemoryDedupeStore::with_capacity(NonZeroUsize)` evicts oldest FIFO; `unbounded()` for tests. |
+| `WatermarkReader<R, S>` | `WatermarkAcker<R::Acker, S>` / passthrough | Drop events older than the stored watermark. `with_static_key(reader, store, key)` or `with_key_fn(reader, store, |event| ...)` for per-entity watermarks (e.g., `"orders:customer-N"`). Save deferred to ack; in-memory cache shared between intake and acker so nack leaves both the store and the in-memory cursor untouched. |
+| `MergeReader<R1, R2>` | `MergeAcker<R1::Acker, R2::Acker>` / `MergeCursor<R1::Cursor, R2::Cursor>` | Combine two readers into one stream. `MergeStrategy::Fair` (default; `futures::stream::select`) or `MergeStrategy::LeftPriority` (drain left first via `select_with_strategy` + `PollNext::Left`). `MergeCursor` impls `Cursor` so the merged stream composes under `CheckpointReader`. |
+| `ReplayThenLiveReader<R, L>` | `ReplayLiveAcker<R::Acker, L::Acker>` / `ReplayLiveCursor<R::Cursor, L::Cursor>` | Historical-then-live phase switch (e.g., Postgres replay → Kafka live). `ReplayThenLiveConfig::overlap_dedupe_capacity: Option<NonZeroUsize>` records the last N replay event ids and silently acks any live event whose id matches. |
+
 Identity for the checkpoint store is `CheckpointKey { scope: { group,
 stream_id }, cursor_id: CursorId }`. Unpartitioned consumers use
-`CursorId::Global`; partitioned consumers use
-`CursorId::Named("partition:{count}:{id}")` so each lane checkpoints
-independently.
+`CursorId::Global`; partitioned consumers use the lane-named id so
+each lane checkpoints independently.
 
 **Backend capability matrix.**
 
@@ -331,10 +396,12 @@ Checkpoint compatibility is validated by the reader or wrapper that interprets
 the cursor, not by a global topology fingerprint. `CheckpointReader` seeds the
 inner subscription with `StartableSubscription::with_start(StartFrom::After(
 min(stored_cursors)))`. `PartitionedReader` inspects the resume
-`PartitionedCursor`'s embedded `LogicalPartition` and returns
+`PartitionedCursor`'s embedded `Partition` and returns
 `Error::InvalidCursor` when the stored partition count does not match its
-configured count. `CheckpointReader` then applies `CheckpointResumePolicy` to
-fail or retry from the original subscription start.
+configured count. `CheckpointReader` then applies `InvalidCursorPolicy`
+(fall back to the subscription's original start, or fail). When no
+checkpoint exists at all, `MissingCheckpointPolicy` decides the same
+fallback / fail behaviour.
 
 ### Error Model
 
@@ -665,6 +732,54 @@ Worth knowing when changing the codebase:
   intended as a `[dev-dependencies]` entry for backend authors. Keeping
   it out of the umbrella avoids dragging test-suite types into every
   consumer's dep graph.
+- **`Payload` is backed by `bytes::Bytes` internally.** Public API is
+  unchanged in shape (`from_json`, `from_string`, `data() -> &[u8]`,
+  `size()`); the raw-bytes constructors accept `impl Into<Bytes>` so
+  callers pass `Vec<u8>`, `Bytes`, or `&'static [u8]` without leaking
+  the storage type. `Bytes::from(Vec<u8>)` is O(1) move, so existing
+  call sites that build a `Vec` via `serde_json::to_vec` /
+  `String::into_bytes` / `base64::decode` flow into the new
+  constructors without an extra copy. Cloning a `Payload` (and so
+  cloning an `Event`) is now a refcount bump.
+- **`Message` stores `Event` by value, not `Arc<Event>`.** A previous
+  experiment wrapping every `Message` in `Arc<Event>` penalised all 14
+  reader wrappers (a hidden Arc allocation per `Message::new` plus a
+  silent `try_unwrap`/clone on `into_parts`) so that only `InspectAcker`
+  and `DedupeAcker` could share the `Event` with the delivered Message.
+  Those two wrappers now wrap their own local `Arc<Event>` instead; the
+  other wrappers pay nothing.
+- **`CursorId` is a value-object newtype**, not an enum. Backed by
+  `Arc<str>`; constructors validate non-empty; the global sentinel is
+  `"global"`. Cursors that mark independent progress points use any
+  caller-supplied name. Serialization is the bare string value.
+- **Reader-wrapper API conventions:**
+  - Capacity / limit configuration uses `NonZeroUsize` so zero is
+    impossible at the type level (e.g., `BatchReader::new`,
+    `WindowReader::new`, `ConcurrencyLimitReader::new`).
+  - Configurations with floating-point invariants (e.g., `RecoverConfig`
+    backoff multiplier) use a validated `Config::new(...) -> Result<Self>`
+    constructor and private fields with getters.
+  - Constructors that pick distinct delivery semantics use named
+    functions instead of an enum field (`PartitionedReader::source` vs
+    `PartitionedReader::delivery`; `MergeReader::new` vs
+    `MergeReader::with_left_priority`).
+  - Observability hooks receive `&Event` (e.g., `InspectHooks::on_ack`)
+    so consumers can tag metrics/logs without maintaining a parallel
+    id→event map.
+  - Stores that mediate between the reader and downstream ack (e.g.,
+    `DedupeStore`, `WatermarkStore`) defer their mutating call
+    (`mark_processed` / `save_watermark`) until downstream `ack` via a
+    wrapper Acker. Nack leaves the store untouched so the event can be
+    redelivered.
+  - `DedupeStore::mark_if_new(&Event) -> Result<bool>` is the atomic
+    canonical operation; the default impl is built on `exists` +
+    `mark_processed` (racy across concurrent callers). Backends with
+    native atomicity (Postgres `INSERT ON CONFLICT DO NOTHING`) override
+    it.
+- **`TimeoutReader` uses a single `tokio_util::time::DelayQueue`** owned
+  by the intake task, not one `tokio::spawn` per delivered message. At
+  high throughput this keeps the timer wheel cost flat. The pattern is
+  the template for any future "per-message timer" wrapper.
 
 ## Releasing
 
