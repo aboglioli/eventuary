@@ -141,10 +141,7 @@ mod tests {
         let partitions = NonZeroU16::new(32).unwrap();
         let a = EventKey::new("order-7").unwrap();
         let b = EventKey::new("order-7").unwrap();
-        assert_eq!(
-            a.partition_for(partitions),
-            b.partition_for(partitions)
-        );
+        assert_eq!(a.partition_for(partitions), b.partition_for(partitions));
     }
 
     #[test]

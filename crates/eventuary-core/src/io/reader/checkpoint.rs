@@ -27,10 +27,10 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
+use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
-use crate::io::start_from::{StartFrom, StartableSubscription};
 
 pub trait CheckpointStore<C>: Clone + Send + Sync + 'static {
     fn load<'a>(
@@ -264,8 +264,7 @@ where
         let store = self.store.clone();
         let stored = store.load_scope(&scope).await?;
 
-        if stored.is_empty() && matches!(subscription.on_missing, MissingCheckpointPolicy::Error)
-        {
+        if stored.is_empty() && matches!(subscription.on_missing, MissingCheckpointPolicy::Error) {
             return Err(Error::InvalidCursor(format!(
                 "checkpoint reader: no checkpoint found for consumer group `{}` and stream `{}`",
                 scope.consumer_group_id.as_str(),
@@ -602,8 +601,8 @@ mod tests {
             StreamId::new("s").unwrap(),
         );
 
-        let subscription = CheckpointSubscription::new(TestSub, scope)
-            .on_missing(MissingCheckpointPolicy::Error);
+        let subscription =
+            CheckpointSubscription::new(TestSub, scope).on_missing(MissingCheckpointPolicy::Error);
 
         let err = match cr.read(subscription).await {
             Ok(_) => panic!("expected missing checkpoint error"),
@@ -673,8 +672,7 @@ mod tests {
 
         let err = match cr
             .read(
-                CheckpointSubscription::new(TestSub, scope)
-                    .on_invalid(InvalidCursorPolicy::Error),
+                CheckpointSubscription::new(TestSub, scope).on_invalid(InvalidCursorPolicy::Error),
             )
             .await
         {
@@ -691,10 +689,10 @@ mod tests {
         // Stored cursor < VecReader's emitted TestCursor(1) so the
         // CheckpointReader skip-already-stored guard does not swallow
         // the resumed event if partition assignment happens to match.
+        use crate::event_key::Partition;
         use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
-        use crate::event_key::Partition;
         use futures::StreamExt;
         use std::num::NonZeroU16;
 
@@ -749,10 +747,10 @@ mod tests {
     async fn checkpoint_reader_over_old_partitions_only_falls_back() {
         // Stored row is incompatible (partition_count=8 vs configured=4);
         // test exercises the fallback path.
+        use crate::event_key::Partition;
         use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
-        use crate::event_key::Partition;
         use futures::StreamExt;
         use std::num::NonZeroU16;
 

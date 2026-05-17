@@ -19,7 +19,6 @@ pub struct SqsSubscription {
     pub limit: Option<usize>,
 }
 
-
 pub struct SqsReader {
     client: Client,
     config: SqsReaderConfig,

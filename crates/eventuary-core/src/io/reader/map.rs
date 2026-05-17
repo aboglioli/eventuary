@@ -80,16 +80,16 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::io::acker::NoopAcker;
-    use crate::io::{Cursor, Message, Reader};
+    use crate::io::{Message, Reader};
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
 
-    impl Cursor for TestCursor {}
+    type TestItems = Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>;
 
     struct VecReader {
-        items: Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>,
+        items: TestItems,
     }
 
     impl Reader for VecReader {
@@ -118,13 +118,7 @@ mod tests {
             ))])),
         };
         let mapped = MapReader::new(reader, |_event: Event| {
-            Event::create(
-                "org",
-                "/x",
-                "mapped.topic",
-                Payload::from_string("mapped"),
-            )
-            .unwrap()
+            Event::create("org", "/x", "mapped.topic", Payload::from_string("mapped")).unwrap()
         });
         let mut stream = mapped.read(()).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();

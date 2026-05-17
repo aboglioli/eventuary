@@ -52,9 +52,9 @@ pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
 
+pub use io::start_from::{StartFrom, StartableSubscription};
 pub use payload::{ContentType, Payload};
 pub use serialization::SerializedEvent;
 pub use snapshot::{Snapshot, SnapshotEventId};
-pub use io::start_from::{StartFrom, StartableSubscription};
 pub use topic::Topic;
 pub use topic_pattern::TopicPattern;

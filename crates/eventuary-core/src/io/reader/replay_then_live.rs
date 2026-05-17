@@ -112,7 +112,9 @@ where
     R::Cursor: Send + Sync,
     L::Cursor: Send + Sync,
 {
-    type Item = Result<Message<ReplayLiveAcker<R::Acker, L::Acker>, ReplayLiveCursor<R::Cursor, L::Cursor>>>;
+    type Item = Result<
+        Message<ReplayLiveAcker<R::Acker, L::Acker>, ReplayLiveCursor<R::Cursor, L::Cursor>>,
+    >;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -187,11 +189,9 @@ mod tests {
 
         async fn read(&self, _: ()) -> Result<Self::Stream> {
             let events = self.events.lock().unwrap().take().unwrap_or_default();
-            Ok(Box::pin(stream::iter(
-                events.into_iter().enumerate().map(|(i, e)| {
-                    Ok(Message::new(e, NoopAcker, TestCursor(i as u64)))
-                }),
-            )))
+            Ok(Box::pin(stream::iter(events.into_iter().enumerate().map(
+                |(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as u64))),
+            ))))
         }
     }
 
@@ -211,7 +211,6 @@ mod tests {
         let sub = ReplayThenLiveSubscription::new((), ());
         let mut stream = reader.read(sub).await.unwrap();
 
-        // First message from replay
         let m1 = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -220,7 +219,6 @@ mod tests {
         assert!(matches!(m1.cursor(), ReplayLiveCursor::Replay(_)));
         m1.ack().await.unwrap();
 
-        // Second from replay
         let m2 = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -229,7 +227,6 @@ mod tests {
         assert!(matches!(m2.cursor(), ReplayLiveCursor::Replay(_)));
         m2.ack().await.unwrap();
 
-        // Third from live
         let m3 = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await
             .unwrap()
@@ -238,7 +235,6 @@ mod tests {
         assert!(matches!(m3.cursor(), ReplayLiveCursor::Live(_)));
         m3.ack().await.unwrap();
 
-        // Exhausted
         let end = tokio::time::timeout(Duration::from_millis(200), stream.next()).await;
         assert!(end.is_err() || end.unwrap().is_none());
     }

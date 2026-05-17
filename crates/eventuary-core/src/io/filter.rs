@@ -177,9 +177,9 @@ impl Filter for crate::NamespacePattern {
 mod tests {
     use super::*;
 
-    use crate::payload::Payload;
-    use crate::Topic;
     use crate::Namespace;
+    use crate::Topic;
+    use crate::payload::Payload;
 
     fn ev(topic: &str, namespace: &str) -> Event {
         Event::create("org", namespace, topic, Payload::from_string("p")).unwrap()

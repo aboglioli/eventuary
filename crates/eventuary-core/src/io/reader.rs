@@ -230,23 +230,26 @@ pub mod window;
 
 pub use batch::{BatchAcker, BatchCursor, BatchReader};
 pub use checkpoint::{
-    CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig,
-    CheckpointScope, CheckpointStore, CheckpointStream,
-    CheckpointSubscription, MissingCheckpointPolicy, InvalidCursorPolicy,
+    CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig, CheckpointScope,
+    CheckpointStore, CheckpointStream, CheckpointSubscription, InvalidCursorPolicy,
+    MissingCheckpointPolicy,
 };
-pub use concurrency_limit::ConcurrencyLimitReader;
+pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
+pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore, InMemoryDedupeStore};
 pub use filtered::{FilteredReader, FilteredStream};
-pub use inspect::{InspectHooks, InspectReader};
-pub use map::MapReader;
+pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
+pub use map::{MapReader, MapStream};
+pub use merge::{MergeAcker, MergeCursor, MergeReader};
 pub use partitioned::{
-    LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader,
-    PartitionedReaderConfig, PartitionedSubscription,
+    LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
+    PartitionedSubscription,
 };
 pub use rate_limit::{RateLimit, RateLimitReader};
 pub use recover::{RecoverConfig, RecoverReader};
+pub use replay_then_live::{
+    ReplayLiveAcker, ReplayLiveCursor, ReplayThenLiveReader, ReplayThenLiveStream,
+    ReplayThenLiveSubscription,
+};
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
+pub use watermark::{WatermarkAcker, WatermarkReader, WatermarkStore};
 pub use window::WindowReader;
-pub use dedupe::{DedupeReader, DedupeStore, InMemoryDedupeStore};
-pub use merge::MergeReader;
-pub use replay_then_live::ReplayThenLiveReader;
-pub use watermark::{WatermarkReader, WatermarkStore};

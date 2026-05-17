@@ -5,8 +5,10 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use std::num::NonZeroU16;
+
 use crate::error::Result;
-use crate::event_key::EventKey;
+use crate::event_key::{EventKey, Partition, fnv1a_u64};
 use crate::metadata::Metadata;
 use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
@@ -232,14 +234,12 @@ impl Event {
 
     /// Determine the partition for this event within a given count.
     /// Uses the event key if present, falls back to event id bytes.
-    pub fn partition(&self, count: std::num::NonZeroU16) -> crate::event_key::Partition {
+    pub fn partition(&self, count: NonZeroU16) -> Partition {
         match self.key() {
             Some(key) => key.partition_for(count),
             None => {
-                let id = (crate::event_key::fnv1a_u64(self.id().as_uuid().as_bytes())
-                    % count.get() as u64) as u16;
-                crate::event_key::Partition::new(id, count)
-                    .expect("id < count by modulo")
+                let id = (fnv1a_u64(self.id().as_uuid().as_bytes()) % count.get() as u64) as u16;
+                Partition::new(id, count).expect("id < count by modulo")
             }
         }
     }
