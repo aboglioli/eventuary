@@ -53,6 +53,7 @@ pub trait FilterExt: Filter + Sized + 'static {
 impl<T: Filter + 'static> FilterExt for T {}
 
 /// Logical AND of two filters; matches when both inner filters match.
+#[derive(Clone)]
 pub struct AndFilter<A: Filter, B: Filter>(pub A, pub B);
 
 impl<A: Filter, B: Filter> Filter for AndFilter<A, B> {
@@ -62,6 +63,7 @@ impl<A: Filter, B: Filter> Filter for AndFilter<A, B> {
 }
 
 /// Logical OR of two filters; matches when either inner filter matches.
+#[derive(Clone)]
 pub struct OrFilter<A: Filter, B: Filter>(pub A, pub B);
 
 impl<A: Filter, B: Filter> Filter for OrFilter<A, B> {
@@ -71,6 +73,7 @@ impl<A: Filter, B: Filter> Filter for OrFilter<A, B> {
 }
 
 /// Logical NOT of a filter; matches when the inner filter does not match.
+#[derive(Clone)]
 pub struct NotFilter<F: Filter>(pub F);
 
 impl<F: Filter> Filter for NotFilter<F> {

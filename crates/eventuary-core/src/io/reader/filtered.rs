@@ -1,5 +1,4 @@
 use std::pin::Pin;
-use std::sync::Arc;
 
 use futures::{StreamExt, stream};
 
@@ -10,15 +9,12 @@ pub type FilteredStream<C, A> = BoxStream<C, A>;
 
 pub struct FilteredReader<R, F> {
     inner: R,
-    filter: Arc<F>,
+    filter: F,
 }
 
 impl<R, F> FilteredReader<R, F> {
     pub fn new(inner: R, filter: F) -> Self {
-        Self {
-            inner,
-            filter: Arc::new(filter),
-        }
+        Self { inner, filter }
     }
 
     pub fn inner(&self) -> &R {
@@ -37,7 +33,7 @@ where
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: 'static,
-    F: Filter + 'static,
+    F: Filter + Clone + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = R::Acker;
@@ -48,7 +44,7 @@ where
         let inner = self.inner.read(subscription).await?;
         let state = FilteredState {
             inner: Box::pin(inner),
-            filter: Arc::clone(&self.filter),
+            filter: self.filter.clone(),
             is_done: false,
         };
         Ok(Box::pin(stream::unfold(state, next_filtered::<R, F>)))
@@ -60,7 +56,7 @@ where
     R: Reader,
 {
     inner: Pin<Box<R::Stream>>,
-    filter: Arc<F>,
+    filter: F,
     is_done: bool,
 }
 
@@ -92,8 +88,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use futures::Stream;
     use futures::stream;
@@ -280,6 +276,7 @@ mod tests {
         use crate::topic::Topic;
         use crate::topic_pattern::TopicPattern;
 
+        #[derive(Clone)]
         struct OrgAcme;
         impl Filter for OrgAcme {
             fn matches(&self, e: &Event) -> bool {
@@ -290,6 +287,29 @@ mod tests {
         let acker = CountingAcker::default();
         let reader = VecReader::new(vec![Ok(msg(ev("acme", "k0"), acker.clone(), 1))]);
         let filter = OrgAcme.and(TopicPattern::exact(Topic::new("thing.happened").unwrap()));
+        let filtered = FilteredReader::new(reader, filter);
+
+        let mut stream = filtered.read(TestSubscription).await.unwrap();
+        let item = stream.next().await.unwrap().unwrap();
+        assert_eq!(item.event().key().unwrap().as_str(), "k0");
+    }
+
+    #[tokio::test]
+    async fn works_with_arc_wrapped_non_clone_filter() {
+        struct NonCloneFilter {
+            allowed: String,
+        }
+        impl Filter for NonCloneFilter {
+            fn matches(&self, e: &Event) -> bool {
+                e.topic().as_str() == self.allowed
+            }
+        }
+
+        let filter = Arc::new(NonCloneFilter {
+            allowed: "thing.happened".into(),
+        });
+        let acker = CountingAcker::default();
+        let reader = VecReader::new(vec![Ok(msg(ev("acme", "k0"), acker.clone(), 1))]);
         let filtered = FilteredReader::new(reader, filter);
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();

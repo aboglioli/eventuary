@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -53,22 +52,19 @@ impl Default for RecoverConfig {
 }
 
 pub struct RecoverReader<R> {
-    inner: Arc<R>,
+    inner: R,
     config: RecoverConfig,
 }
 
 impl<R> RecoverReader<R> {
     pub fn new(inner: R, config: RecoverConfig) -> Self {
-        Self {
-            inner: Arc::new(inner),
-            config,
-        }
+        Self { inner, config }
     }
 }
 
 impl<R> Reader for RecoverReader<R>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader + Clone + Send + Sync + 'static,
     R::Subscription: Clone + Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
@@ -80,7 +76,7 @@ where
     type Stream = SpawnedStream<R::Acker, R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let inner_reader = Arc::clone(&self.inner);
+        let inner_reader = self.inner.clone();
         let config = self.config.clone();
         let (tx, rx) = mpsc::channel(64);
 
@@ -144,8 +140,9 @@ mod tests {
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
 
+    #[derive(Clone)]
     struct AlternatingReader {
-        call_count: Arc<AtomicUsize>,
+        call_count: std::sync::Arc<AtomicUsize>,
     }
 
     impl Reader for AlternatingReader {
@@ -171,9 +168,9 @@ mod tests {
 
     #[tokio::test]
     async fn retries_and_then_produces_message() {
-        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count = std::sync::Arc::new(AtomicUsize::new(0));
         let reader = AlternatingReader {
-            call_count: Arc::clone(&call_count),
+            call_count: std::sync::Arc::clone(&call_count),
         };
         let config = RecoverConfig::new(3, Duration::from_millis(1), 1.0).unwrap();
         let recover = RecoverReader::new(reader, config);
@@ -191,9 +188,9 @@ mod tests {
 
     #[tokio::test]
     async fn stops_after_max_retries() {
-        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count = std::sync::Arc::new(AtomicUsize::new(0));
         let reader = AlternatingReader {
-            call_count: Arc::clone(&call_count),
+            call_count: std::sync::Arc::clone(&call_count),
         };
         let config = RecoverConfig::new(1, Duration::from_millis(1), 1.0).unwrap();
         let recover = RecoverReader::new(reader, config);
@@ -205,6 +202,48 @@ mod tests {
 
         assert!(result.unwrap().is_err());
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn works_with_arc_wrapped_non_clone_reader() {
+        type Items = Vec<Result<Message<NoopAcker, TestCursor>>>;
+
+        struct NonCloneReader {
+            events: std::sync::Mutex<Option<Items>>,
+        }
+
+        impl Reader for NonCloneReader {
+            type Subscription = ();
+            type Acker = NoopAcker;
+            type Cursor = TestCursor;
+            type Stream =
+                Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+            async fn read(&self, _: ()) -> Result<Self::Stream> {
+                let events = self.events.lock().unwrap().take().unwrap_or_default();
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+
+        let event = Message::new(
+            Event::create("org", "/x", "test", Payload::from_string("p")).unwrap(),
+            NoopAcker,
+            TestCursor(0),
+        );
+        let items: Items = vec![Ok(event)];
+        let reader = std::sync::Arc::new(NonCloneReader {
+            events: std::sync::Mutex::new(Some(items)),
+        });
+        let config = RecoverConfig::new(3, Duration::from_millis(1), 1.0).unwrap();
+        let recover = RecoverReader::new(reader, config);
+        let mut stream = recover.read(()).await.unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*msg.cursor(), TestCursor(0));
     }
 
     #[test]
