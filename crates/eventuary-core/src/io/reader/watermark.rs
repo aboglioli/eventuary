@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 use crate::error::Result;
@@ -52,15 +53,16 @@ where
     type Stream = SpawnedStream<WatermarkAcker<R::Acker, S>, R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let watermark = self.store.load_watermark(&self.key).await?;
+        let initial = self.store.load_watermark(&self.key).await?;
         let inner = self.inner.read(subscription).await?;
         let store = self.store.clone();
         let key = Arc::clone(&self.key);
+        let committed: Arc<Mutex<Option<DateTime<Utc>>>> = Arc::new(Mutex::new(initial));
         let (tx, rx) = mpsc::channel(64);
 
+        let intake_committed = Arc::clone(&committed);
         let handle = tokio::spawn(async move {
             let mut stream = Box::pin(inner);
-            let mut current_watermark = watermark;
 
             while let Some(item) = stream.next().await {
                 let msg = match item {
@@ -71,15 +73,16 @@ where
                     }
                 };
                 let event_ts = msg.event().timestamp();
-                if let Some(wm) = current_watermark
+                let current = *intake_committed.lock().await;
+                if let Some(wm) = current
                     && event_ts <= wm
                 {
                     if let Err(e) = msg.ack().await {
                         let _ = tx.send(Err(e)).await;
+                        return;
                     }
                     continue;
                 }
-                current_watermark = Some(event_ts);
 
                 let (event, inner_acker, cursor) = msg.into_parts();
                 let wrapped = Message::new(
@@ -87,6 +90,7 @@ where
                     WatermarkAcker {
                         inner: inner_acker,
                         store: store.clone(),
+                        committed: Arc::clone(&intake_committed),
                         key: Arc::clone(&key),
                         event_ts,
                     },
@@ -105,6 +109,7 @@ where
 pub struct WatermarkAcker<A: Acker, S: WatermarkStore> {
     inner: A,
     store: S,
+    committed: Arc<Mutex<Option<DateTime<Utc>>>>,
     key: Arc<str>,
     event_ts: DateTime<Utc>,
 }
@@ -112,6 +117,12 @@ pub struct WatermarkAcker<A: Acker, S: WatermarkStore> {
 impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
     async fn ack(&self) -> Result<()> {
         self.store.save_watermark(&self.key, self.event_ts).await?;
+        {
+            let mut guard = self.committed.lock().await;
+            if guard.is_none_or(|wm| wm < self.event_ts) {
+                *guard = Some(self.event_ts);
+            }
+        }
         self.inner.ack().await
     }
 
@@ -124,7 +135,7 @@ impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
 mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     use chrono::TimeDelta;
@@ -144,7 +155,7 @@ mod tests {
     struct TestCursor(u64);
 
     struct VecReader {
-        events: Mutex<Option<Vec<Event>>>,
+        events: StdMutex<Option<Vec<Event>>>,
     }
 
     impl Reader for VecReader {
@@ -181,7 +192,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct InMemoryWatermarkStore {
-        inner: Arc<Mutex<Option<DateTime<Utc>>>>,
+        inner: Arc<StdMutex<Option<DateTime<Utc>>>>,
     }
 
     impl WatermarkStore for InMemoryWatermarkStore {
@@ -205,7 +216,7 @@ mod tests {
         *store.inner.lock().unwrap() = Some(recent - TimeDelta::seconds(1));
 
         let reader = VecReader {
-            events: Mutex::new(Some(vec![ev("old", old), ev("recent", recent)])),
+            events: StdMutex::new(Some(vec![ev("old", old), ev("recent", recent)])),
         };
         let reader = WatermarkReader::new(reader, store, "test");
         let mut stream = reader.read(()).await.unwrap();
@@ -227,7 +238,7 @@ mod tests {
 
         let reader = WatermarkReader::new(
             VecReader {
-                events: Mutex::new(Some(vec![ev("first", first), ev("second", second)])),
+                events: StdMutex::new(Some(vec![ev("first", first), ev("second", second)])),
             },
             store.clone(),
             "test",
@@ -249,5 +260,44 @@ mod tests {
             .unwrap();
         m2.ack().await.unwrap();
         assert_eq!(*store.inner.lock().unwrap(), Some(second));
+    }
+
+    #[tokio::test]
+    async fn nacked_event_can_be_redelivered() {
+        let now = Utc::now();
+        let ts = now - TimeDelta::seconds(10);
+        let event = ev("t", ts);
+        let store = InMemoryWatermarkStore::default();
+
+        let reader = WatermarkReader::new(
+            VecReader {
+                events: StdMutex::new(Some(vec![event.clone()])),
+            },
+            store.clone(),
+            "test",
+        );
+        let mut stream = reader.read(()).await.unwrap();
+        let m = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        m.nack().await.unwrap();
+        drop(stream);
+
+        let reader = WatermarkReader::new(
+            VecReader {
+                events: StdMutex::new(Some(vec![event])),
+            },
+            store.clone(),
+            "test",
+        );
+        let mut stream = reader.read(()).await.unwrap();
+        let m = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.event().topic().as_str(), "t");
     }
 }
