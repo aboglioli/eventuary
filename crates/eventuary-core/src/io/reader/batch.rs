@@ -115,6 +115,42 @@ impl<A> Clone for BatchAcker<A> {
     }
 }
 
+impl<A: Acker> BatchAcker<A> {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    pub async fn ack_subset(&self, indices: &[usize]) -> Result<()> {
+        for &i in indices {
+            let Some(a) = self.inner.get(i) else {
+                return Err(crate::error::Error::Config(format!(
+                    "batch acker: index {i} out of range (len {})",
+                    self.inner.len()
+                )));
+            };
+            a.ack().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn nack_subset(&self, indices: &[usize]) -> Result<()> {
+        for &i in indices {
+            let Some(a) = self.inner.get(i) else {
+                return Err(crate::error::Error::Config(format!(
+                    "batch acker: index {i} out of range (len {})",
+                    self.inner.len()
+                )));
+            };
+            a.nack().await?;
+        }
+        Ok(())
+    }
+}
+
 impl<A: Acker> Acker for BatchAcker<A> {
     async fn ack(&self) -> Result<()> {
         for a in self.inner.iter() {
@@ -240,5 +276,50 @@ mod tests {
             inner: Arc::new(vec![]),
         };
         assert_eq!(cursor.id(), CursorId::Global);
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingAcker {
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Acker for CountingAcker {
+        async fn ack(&self) -> Result<()> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_acker_ack_subset_only_acks_selected() {
+        let ackers: Vec<CountingAcker> = (0..3).map(|_| CountingAcker::default()).collect();
+        let snapshot: Vec<CountingAcker> = ackers.to_vec();
+        let acker = BatchAcker {
+            inner: Arc::new(ackers),
+        };
+        acker.ack_subset(&[0, 2]).await.unwrap();
+        assert_eq!(
+            snapshot[0].count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            snapshot[1].count.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            snapshot[2].count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_acker_ack_subset_rejects_out_of_range() {
+        let acker: BatchAcker<NoopAcker> = BatchAcker {
+            inner: Arc::new(vec![NoopAcker]),
+        };
+        assert!(acker.ack_subset(&[5]).await.is_err());
     }
 }
