@@ -1,3 +1,27 @@
+//! Multiplexer handler: fans out one delivered event to multiple
+//! filter+handler subscribers under a single ack/nack lifecycle.
+//!
+//! Each route has a stable `SubscriberId` used as the storage key for
+//! the optional `MultiplexerStore`. When configured, the store skips
+//! subscribers that already completed for a given event on retry, so
+//! redelivery from the backend does not re-run already-acked work.
+//!
+//! Without a store (the default `NoMultiplexerStore`), every matching
+//! subscriber runs on every delivery — at-least-once at the
+//! subscriber level matches the backend's at-least-once semantics.
+//!
+//! Subscribers run concurrently up to `concurrency` via a
+//! `FuturesUnordered` drain loop. The handle aggregates every
+//! subscriber failure into a single `Error::Handler`; no fail-fast
+//! shortcut — slow successors still run so the handler reports the
+//! full failure set.
+//!
+//! Failure modes affecting delivery semantics:
+//! - Handler succeeds but `mark_completed` fails: at-least-once
+//!   double-run on the next redelivery. Callers should accept idempotent
+//!   handlers or pair this with the dedupe wrapper.
+//! - Empty match set: governed by `NoMatchPolicy` (default `Ack`).
+
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -142,6 +166,9 @@ impl MultiplexerStore for InMemoryMultiplexerStore {
         Ok(self.state.lock().await.set.contains(key))
     }
 
+    /// Bounded variant evicts in **FIFO insertion order** when capacity
+    /// is exceeded. Re-marking an already-completed key is a no-op and
+    /// does not refresh recency.
     async fn mark_completed(&self, key: &MultiplexerKey) -> Result<()> {
         let mut state = self.state.lock().await;
         if state.set.insert(key.clone()) {
@@ -190,14 +217,15 @@ impl MultiplexerRoute {
 #[derive(Debug)]
 struct MultiplexerFailure {
     subscriber_id: SubscriberId,
-    error: Box<Error>,
+    error: Error,
 }
 
-const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(1).unwrap();
+const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN;
 
 pub struct MultiplexerBuilder<S = NoMultiplexerStore> {
     id: String,
     routes: Vec<MultiplexerRoute>,
+    subscriber_ids: HashSet<SubscriberId>,
     store: S,
     concurrency: NonZeroUsize,
     no_match: NoMatchPolicy,
@@ -208,16 +236,11 @@ impl Default for MultiplexerBuilder<NoMultiplexerStore> {
         Self {
             id: "multiplexer".to_owned(),
             routes: Vec::new(),
+            subscriber_ids: HashSet::new(),
             store: NoMultiplexerStore,
             concurrency: DEFAULT_CONCURRENCY,
             no_match: NoMatchPolicy::Ack,
         }
-    }
-}
-
-impl MultiplexerBuilder<NoMultiplexerStore> {
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 
@@ -237,8 +260,14 @@ impl<S> MultiplexerBuilder<S> {
         F: Filter + 'static,
         H: Handler + 'static,
     {
-        self.routes
-            .push(MultiplexerRoute::new(subscriber_id, filter, handler)?);
+        let route = MultiplexerRoute::new(subscriber_id, filter, handler)?;
+        if !self.subscriber_ids.insert(route.subscriber_id.clone()) {
+            return Err(Error::Config(format!(
+                "multiplexer {}: duplicate subscriber id {}",
+                self.id, route.subscriber_id
+            )));
+        }
+        self.routes.push(route);
         Ok(self)
     }
 
@@ -256,6 +285,7 @@ impl<S> MultiplexerBuilder<S> {
         MultiplexerBuilder {
             id: self.id,
             routes: self.routes,
+            subscriber_ids: self.subscriber_ids,
             store,
             concurrency: self.concurrency,
             no_match: self.no_match,
@@ -267,15 +297,6 @@ impl<S: MultiplexerStore> MultiplexerBuilder<S> {
     pub fn build(self) -> Result<Multiplexer<S>> {
         if self.id.trim().is_empty() {
             return Err(Error::Config("multiplexer id must not be empty".to_owned()));
-        }
-        let mut seen = HashSet::new();
-        for route in &self.routes {
-            if !seen.insert(route.subscriber_id.clone()) {
-                return Err(Error::Config(format!(
-                    "multiplexer {}: duplicate subscriber id {}",
-                    self.id, route.subscriber_id
-                )));
-            }
         }
         Ok(Multiplexer {
             id: self.id,
@@ -315,7 +336,7 @@ impl<S: MultiplexerStore> Multiplexer<S> {
             Err(error) => {
                 return Err(MultiplexerFailure {
                     subscriber_id,
-                    error: Box::new(error),
+                    error,
                 });
             }
         }
@@ -323,14 +344,14 @@ impl<S: MultiplexerStore> Multiplexer<S> {
         if let Err(error) = handler.handle(event).await {
             return Err(MultiplexerFailure {
                 subscriber_id,
-                error: Box::new(error),
+                error,
             });
         }
 
         if let Err(error) = self.store.mark_completed(&key).await {
             return Err(MultiplexerFailure {
                 subscriber_id,
-                error: Box::new(error),
+                error,
             });
         }
 
@@ -402,11 +423,14 @@ impl<S: MultiplexerStore> Handler for Multiplexer<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::num::NonZeroUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::event::EventId;
+    use super::*;
+    use crate::event::{Event, EventId};
+    use crate::io::filter::EventFilter;
+    use crate::io::{Filter, Handler};
+    use crate::payload::Payload;
 
     #[test]
     fn subscriber_id_accepts_stable_names() {
@@ -481,13 +505,6 @@ mod tests {
         store.clear().await;
         assert!(store.is_empty().await);
     }
-
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use crate::event::Event;
-    use crate::io::filter::EventFilter;
-    use crate::io::{Filter, Handler};
-    use crate::payload::Payload;
 
     struct CountingHandler {
         id: String,
@@ -618,13 +635,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_subscriber_id_is_rejected_at_build() {
+    async fn duplicate_subscriber_id_is_rejected_at_route() {
         let result = Multiplexer::builder()
             .route("same", EventFilter::default(), FailingHandler)
             .unwrap()
-            .route("same", EventFilter::default(), FailingHandler)
-            .unwrap()
-            .build();
+            .route("same", EventFilter::default(), FailingHandler);
 
         assert!(matches!(result, Err(Error::Config(_))));
     }
