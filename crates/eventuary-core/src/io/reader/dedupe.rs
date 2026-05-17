@@ -86,9 +86,10 @@ where
                         return;
                     }
                 }
-                let (event_arc, inner_acker, cursor) = msg.into_parts_arc();
-                let wrapped = Message::from_arc(
-                    Arc::clone(&event_arc),
+                let (event, inner_acker, cursor) = msg.into_parts();
+                let event_arc = Arc::new(event);
+                let wrapped = Message::new(
+                    (*event_arc).clone(),
                     DedupeAcker {
                         inner: inner_acker,
                         store: store.clone(),

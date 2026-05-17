@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::{Acker, Cursor};
@@ -10,21 +8,13 @@ pub struct NoCursor;
 impl Cursor for NoCursor {}
 
 pub struct Message<A: Acker, C = NoCursor> {
-    event: Arc<Event>,
+    event: Event,
     acker: A,
     cursor: C,
 }
 
 impl<A: Acker, C> Message<A, C> {
     pub fn new(event: Event, acker: A, cursor: C) -> Self {
-        Self {
-            event: Arc::new(event),
-            acker,
-            cursor,
-        }
-    }
-
-    pub fn from_arc(event: Arc<Event>, acker: A, cursor: C) -> Self {
         Self {
             event,
             acker,
@@ -36,19 +26,11 @@ impl<A: Acker, C> Message<A, C> {
         &self.event
     }
 
-    pub fn event_arc(&self) -> &Arc<Event> {
-        &self.event
-    }
-
     pub fn cursor(&self) -> &C {
         &self.cursor
     }
 
     pub fn into_event(self) -> Event {
-        Arc::try_unwrap(self.event).unwrap_or_else(|arc| (*arc).clone())
-    }
-
-    pub fn into_event_arc(self) -> Arc<Event> {
         self.event
     }
 
@@ -65,11 +47,6 @@ impl<A: Acker, C> Message<A, C> {
     }
 
     pub fn into_parts(self) -> (Event, A, C) {
-        let event = Arc::try_unwrap(self.event).unwrap_or_else(|arc| (*arc).clone());
-        (event, self.acker, self.cursor)
-    }
-
-    pub fn into_parts_arc(self) -> (Arc<Event>, A, C) {
         (self.event, self.acker, self.cursor)
     }
 
@@ -100,9 +77,8 @@ impl<A: Acker, C> Message<A, C> {
     where
         F: FnOnce(Event) -> Event,
     {
-        let event = Arc::try_unwrap(self.event).unwrap_or_else(|arc| (*arc).clone());
         Message {
-            event: Arc::new(f(event)),
+            event: f(self.event),
             acker: self.acker,
             cursor: self.cursor,
         }
@@ -180,21 +156,5 @@ mod tests {
         let msg = Message::new(ev(), NoopAcker, TestCursor(7));
         let (_event, _acker, cursor) = msg.into_parts();
         assert_eq!(cursor, TestCursor(7));
-    }
-
-    #[test]
-    fn from_arc_shares_event() {
-        let event = Arc::new(ev());
-        let msg = Message::from_arc(Arc::clone(&event), NoopAcker, NoCursor);
-        assert_eq!(Arc::strong_count(&event), 2);
-        assert_eq!(msg.event().topic().as_str(), "thing.happened");
-    }
-
-    #[test]
-    fn into_event_arc_returns_inner_arc() {
-        let event = Arc::new(ev());
-        let msg = Message::from_arc(Arc::clone(&event), NoopAcker, NoCursor);
-        let extracted = msg.into_event_arc();
-        assert!(Arc::ptr_eq(&event, &extracted));
     }
 }
