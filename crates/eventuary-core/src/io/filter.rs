@@ -161,10 +161,24 @@ impl Filter for EventFilter {
     }
 }
 
+impl Filter for crate::TopicPattern {
+    fn matches(&self, event: &crate::Event) -> bool {
+        self.matches_topic(event.topic())
+    }
+}
+
+impl Filter for crate::NamespacePattern {
+    fn matches(&self, event: &crate::Event) -> bool {
+        self.matches_namespace(event.namespace())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::Namespace;
+    use crate::Topic;
     use crate::payload::Payload;
 
     fn ev(topic: &str, namespace: &str) -> Event {
@@ -318,5 +332,26 @@ mod tests {
         assert!(filter.matches(&ev("a", "/x")));
         assert!(filter.matches(&ev("b", "/x")));
         assert!(!filter.matches(&ev("c", "/x")));
+    }
+
+    #[test]
+    fn topic_pattern_is_a_filter_through_io() {
+        let pattern = TopicPattern::exact(Topic::new("invoice.created").unwrap());
+        let event =
+            Event::create("org", "/x", "invoice.created", Payload::from_string("p")).unwrap();
+        assert!(Filter::matches(&pattern, &event));
+    }
+
+    #[test]
+    fn namespace_pattern_is_a_filter_through_io() {
+        let pattern = NamespacePattern::prefix(Namespace::new("/billing").unwrap());
+        let event = Event::create(
+            "org",
+            "/billing/invoices",
+            "invoice.created",
+            Payload::from_string("p"),
+        )
+        .unwrap();
+        assert!(Filter::matches(&pattern, &event));
     }
 }

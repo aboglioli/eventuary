@@ -118,7 +118,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     }
 
     let source = SqliteReader::new(db.conn(), fast_config());
-    let partitioned = PartitionedReader::new(
+    let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
             partition_count: std::num::NonZeroU16::new(4).unwrap(),
@@ -215,7 +215,7 @@ async fn partitioned_reader_tags_partition_on_cursor() {
     }
 
     let source = SqliteReader::new(db.conn(), fast_config());
-    let partitioned = PartitionedReader::new(
+    let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
             partition_count: std::num::NonZeroU16::new(4).unwrap(),

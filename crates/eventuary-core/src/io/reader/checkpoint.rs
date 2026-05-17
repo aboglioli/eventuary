@@ -27,10 +27,10 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
+use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
-use crate::start_from::{StartFrom, StartableSubscription};
 
 pub trait CheckpointStore<C>: Clone + Send + Sync + 'static {
     fn load<'a>(
@@ -78,7 +78,14 @@ impl CheckpointKey {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-pub enum CheckpointResumePolicy {
+pub enum MissingCheckpointPolicy {
+    #[default]
+    UseInitialStart,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum InvalidCursorPolicy {
     #[default]
     UseInitialStart,
     Error,
@@ -101,7 +108,8 @@ impl Default for CheckpointReaderConfig {
 pub struct CheckpointSubscription<S> {
     pub inner: S,
     pub scope: CheckpointScope,
-    pub resume_policy: CheckpointResumePolicy,
+    pub on_missing: MissingCheckpointPolicy,
+    pub on_invalid: InvalidCursorPolicy,
 }
 
 impl<S> CheckpointSubscription<S> {
@@ -109,49 +117,64 @@ impl<S> CheckpointSubscription<S> {
         Self {
             inner,
             scope,
-            resume_policy: CheckpointResumePolicy::UseInitialStart,
+            on_missing: MissingCheckpointPolicy::UseInitialStart,
+            on_invalid: InvalidCursorPolicy::UseInitialStart,
         }
     }
 
-    pub fn with_resume_policy(mut self, policy: CheckpointResumePolicy) -> Self {
-        self.resume_policy = policy;
+    pub fn on_missing(mut self, policy: MissingCheckpointPolicy) -> Self {
+        self.on_missing = policy;
+        self
+    }
+
+    pub fn on_invalid(mut self, policy: InvalidCursorPolicy) -> Self {
+        self.on_invalid = policy;
         self
     }
 }
 
+use std::collections::VecDeque;
+
+struct Pending<C> {
+    cursor: C,
+    completed: bool,
+}
+
 struct PendingState<C> {
-    delivered: Vec<C>,
-    completed: std::collections::HashSet<usize>,
-    next_to_commit: usize,
+    queue: VecDeque<Pending<C>>,
+    offset: usize,
 }
 
 impl<C: Clone> PendingState<C> {
     fn new() -> Self {
         Self {
-            delivered: Vec::new(),
-            completed: std::collections::HashSet::new(),
-            next_to_commit: 0,
+            queue: VecDeque::new(),
+            offset: 0,
         }
     }
 
     fn record(&mut self, cursor: C) -> usize {
-        let idx = self.delivered.len();
-        self.delivered.push(cursor);
+        let idx = self.offset + self.queue.len();
+        self.queue.push_back(Pending {
+            cursor,
+            completed: false,
+        });
         idx
     }
 
     fn complete(&mut self, idx: usize) -> Option<C> {
-        self.completed.insert(idx);
-        let mut advanced: Option<C> = None;
-        while self.completed.remove(&self.next_to_commit) {
-            advanced = Some(self.delivered[self.next_to_commit].clone());
-            self.next_to_commit += 1;
+        let adjusted = idx.wrapping_sub(self.offset);
+        self.queue[adjusted].completed = true;
+        let mut latest: Option<C> = None;
+        while self.queue.front().map(|p| p.completed).unwrap_or(false) {
+            latest = Some(self.queue.pop_front().unwrap().cursor);
+            self.offset += 1;
         }
-        advanced
+        latest
     }
 
     fn pending_count(&self) -> usize {
-        self.delivered.len() - self.next_to_commit
+        self.queue.len()
     }
 }
 
@@ -179,7 +202,11 @@ where
             let entry = state
                 .entry(self.cursor_id.clone())
                 .or_insert_with(PendingState::new);
-            entry.complete(self.index)
+            let cursor = entry.complete(self.index);
+            if entry.pending_count() == 0 {
+                state.remove(&self.cursor_id);
+            }
+            cursor
         };
         if let Some(cursor) = advanced {
             let key = CheckpointKey {
@@ -198,6 +225,23 @@ where
 
 pub type CheckpointStream<A, C, S> = SpawnedStream<CheckpointAcker<A, C, S>, C>;
 
+/// Wraps a `Reader` with durable consumer progress backed by a
+/// `CheckpointStore`.
+///
+/// # Cursor bounds
+///
+/// The inner reader's cursor must implement
+/// `Cursor + Clone + Ord + Send + Sync + 'static`:
+/// - [`Cursor`]: provides the `CursorId` used as the checkpoint key.
+/// - `Ord`: used to skip-already-stored cursors on resume and to track
+///   contiguous in-order progress per cursor id.
+/// - `Clone + Send + Sync + 'static`: required to persist the cursor
+///   across acks and to share it between the intake task and the
+///   per-message [`CheckpointAcker`].
+///
+/// Backend cursors (`PgCursor`, `SqliteCursor`) and the
+/// [`PartitionedCursor`](super::partitioned::PartitionedCursor) wrapper
+/// satisfy these bounds out of the box.
 pub struct CheckpointReader<R, S> {
     inner: R,
     store: S,
@@ -241,8 +285,7 @@ where
         let store = self.store.clone();
         let stored = store.load_scope(&scope).await?;
 
-        if stored.is_empty() && matches!(subscription.resume_policy, CheckpointResumePolicy::Error)
-        {
+        if stored.is_empty() && matches!(subscription.on_missing, MissingCheckpointPolicy::Error) {
             return Err(Error::InvalidCursor(format!(
                 "checkpoint reader: no checkpoint found for consumer group `{}` and stream `{}`",
                 scope.consumer_group_id.as_str(),
@@ -264,8 +307,8 @@ where
             }
             Err(Error::InvalidCursor(reason))
                 if matches!(
-                    subscription.resume_policy,
-                    CheckpointResumePolicy::UseInitialStart
+                    subscription.on_invalid,
+                    InvalidCursorPolicy::UseInitialStart
                 ) =>
             {
                 tracing::warn!(
@@ -352,8 +395,8 @@ mod tests {
     use crate::io::Message;
     use crate::io::StreamId;
     use crate::io::acker::NoopAcker;
+    use crate::io::start_from::{StartFrom, StartableSubscription};
     use crate::payload::Payload;
-    use crate::start_from::{StartFrom, StartableSubscription};
     use futures::Stream;
     use std::pin::Pin;
     use tokio::sync::Mutex as TokioMutex;
@@ -579,8 +622,8 @@ mod tests {
             StreamId::new("s").unwrap(),
         );
 
-        let subscription = CheckpointSubscription::new(TestSub, scope)
-            .with_resume_policy(CheckpointResumePolicy::Error);
+        let subscription =
+            CheckpointSubscription::new(TestSub, scope).on_missing(MissingCheckpointPolicy::Error);
 
         let err = match cr.read(subscription).await {
             Ok(_) => panic!("expected missing checkpoint error"),
@@ -650,8 +693,7 @@ mod tests {
 
         let err = match cr
             .read(
-                CheckpointSubscription::new(TestSub, scope)
-                    .with_resume_policy(CheckpointResumePolicy::Error),
+                CheckpointSubscription::new(TestSub, scope).on_invalid(InvalidCursorPolicy::Error),
             )
             .await
         {
@@ -668,15 +710,15 @@ mod tests {
         // Stored cursor < VecReader's emitted TestCursor(1) so the
         // CheckpointReader skip-already-stored guard does not swallow
         // the resumed event if partition assignment happens to match.
+        use crate::event_key::Partition;
         use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
-        use crate::partition::LogicalPartition;
         use futures::StreamExt;
         use std::num::NonZeroU16;
 
-        let old_partition = LogicalPartition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
-        let current_partition = LogicalPartition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+        let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let current_partition = Partition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
 
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![
@@ -693,7 +735,7 @@ mod tests {
         let inner_reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(
+        let partitioned = PartitionedReader::source(
             inner_reader,
             PartitionedReaderConfig {
                 partition_count: NonZeroU16::new(4).unwrap(),
@@ -726,14 +768,14 @@ mod tests {
     async fn checkpoint_reader_over_old_partitions_only_falls_back() {
         // Stored row is incompatible (partition_count=8 vs configured=4);
         // test exercises the fallback path.
+        use crate::event_key::Partition;
         use crate::io::reader::{
             PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
         };
-        use crate::partition::LogicalPartition;
         use futures::StreamExt;
         use std::num::NonZeroU16;
 
-        let old_partition = LogicalPartition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![(
             CursorId::Named(std::sync::Arc::from("partition:8:0")),
@@ -743,7 +785,7 @@ mod tests {
         let inner_reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(
+        let partitioned = PartitionedReader::source(
             inner_reader,
             PartitionedReaderConfig {
                 partition_count: NonZeroU16::new(4).unwrap(),
@@ -797,10 +839,18 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_resume_policy_defaults_to_use_initial_start() {
+    fn missing_checkpoint_policy_defaults_to_use_initial_start() {
         assert_eq!(
-            CheckpointResumePolicy::default(),
-            CheckpointResumePolicy::UseInitialStart
+            MissingCheckpointPolicy::default(),
+            MissingCheckpointPolicy::UseInitialStart
+        );
+    }
+
+    #[test]
+    fn invalid_cursor_policy_defaults_to_use_initial_start() {
+        assert_eq!(
+            InvalidCursorPolicy::default(),
+            InvalidCursorPolicy::UseInitialStart
         );
     }
 

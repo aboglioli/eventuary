@@ -165,7 +165,7 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     }
 
     let source = PgReader::new(pool.clone(), fast_config());
-    let partitioned = PartitionedReader::new(
+    let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
             partition_count: std::num::NonZeroU16::new(4).unwrap(),
@@ -219,7 +219,7 @@ async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
     }
 
     let source = PgReader::new(pool.clone(), fast_config());
-    let partitioned = PartitionedReader::new(
+    let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
             partition_count: std::num::NonZeroU16::new(4).unwrap(),

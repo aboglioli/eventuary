@@ -212,17 +212,46 @@ mod tests {
     }
 }
 
+pub mod batch;
 pub mod checkpoint;
+pub mod concurrency_limit;
+pub mod dedupe;
 pub mod filtered;
+pub mod inspect;
+pub mod map;
+pub mod merge;
 pub mod partitioned;
+pub mod rate_limit;
+pub mod recover;
+pub mod replay_then_live;
+pub mod timeout;
+pub mod try_map;
+pub mod watermark;
+pub mod window;
 
+pub use batch::{BatchAcker, BatchCursor, BatchReader};
 pub use checkpoint::{
-    CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig,
-    CheckpointResumePolicy, CheckpointScope, CheckpointStore, CheckpointStream,
-    CheckpointSubscription,
+    CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig, CheckpointScope,
+    CheckpointStore, CheckpointStream, CheckpointSubscription, InvalidCursorPolicy,
+    MissingCheckpointPolicy,
 };
+pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
+pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore, InMemoryDedupeStore};
 pub use filtered::{FilteredReader, FilteredStream};
+pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
+pub use map::{MapReader, MapStream};
+pub use merge::{MergeAcker, MergeCursor, MergeReader, MergeStrategy};
 pub use partitioned::{
-    LaneScheduling, PartitionAcker, PartitionedAckMode, PartitionedCursor, PartitionedReader,
-    PartitionedReaderConfig, PartitionedSubscription,
+    LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
+    PartitionedSubscription,
 };
+pub use rate_limit::{RateLimit, RateLimitReader};
+pub use recover::{RecoverConfig, RecoverReader};
+pub use replay_then_live::{
+    ReplayLiveAcker, ReplayLiveCursor, ReplayThenLiveConfig, ReplayThenLiveReader,
+    ReplayThenLiveStream, ReplayThenLiveSubscription,
+};
+pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
+pub use try_map::{TryMapReader, TryMapStream};
+pub use watermark::{WatermarkAcker, WatermarkReader, WatermarkStore};
+pub use window::WindowReader;

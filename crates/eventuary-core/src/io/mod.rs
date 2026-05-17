@@ -8,6 +8,7 @@ pub mod filter;
 pub mod handler;
 mod message;
 pub mod reader;
+pub mod start_from;
 pub mod stream;
 mod stream_id;
 mod writer;

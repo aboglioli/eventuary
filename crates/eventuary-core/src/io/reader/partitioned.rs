@@ -1,6 +1,6 @@
 //! Partitioned reader: in-process lane scheduler over any inner reader.
 //!
-//! Routes inner messages into N lanes by `partition_for(event, count)`.
+//! Routes inner messages into N lanes by `Event::partition(count)`.
 //! Each lane buffers up to `lane_capacity` events. Downstream redelivery
 //! is in-memory only: a downstream `ack` clears the lane's in-flight slot
 //! so the merged emit task can serve the next event from that lane (or any
@@ -49,17 +49,16 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::event_key::Partition;
+use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
-use crate::partition::{LogicalPartition, partition_for};
-use crate::start_from::{StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone)]
 pub struct PartitionedReaderConfig {
     pub partition_count: NonZeroU16,
     pub lane_capacity: NonZeroUsize,
     pub scheduling: LaneScheduling,
-    pub ack_mode: PartitionedAckMode,
 }
 
 impl Default for PartitionedReaderConfig {
@@ -70,7 +69,6 @@ impl Default for PartitionedReaderConfig {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
-            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
         }
     }
 }
@@ -82,7 +80,7 @@ pub enum LaneScheduling {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-pub enum PartitionedAckMode {
+enum PartitionedAckMode {
     #[default]
     AckInnerOnLaneAccept,
     AckInnerOnDownstreamAck,
@@ -129,11 +127,11 @@ where
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct PartitionedCursor<C> {
     inner: C,
-    partition: LogicalPartition,
+    partition: Partition,
 }
 
 impl<C> PartitionedCursor<C> {
-    pub fn new(inner: C, partition: LogicalPartition) -> Self {
+    pub fn new(inner: C, partition: Partition) -> Self {
         Self { inner, partition }
     }
 
@@ -145,14 +143,18 @@ impl<C> PartitionedCursor<C> {
         self.inner
     }
 
-    pub fn partition(&self) -> LogicalPartition {
+    pub fn partition(&self) -> Partition {
         self.partition
     }
 }
 
 impl<C> Cursor for PartitionedCursor<C> {
     fn id(&self) -> CursorId {
-        self.partition.to_cursor_id()
+        CursorId::Named(Arc::from(format!(
+            "partition:{}:{}",
+            self.partition.count(),
+            self.partition.id(),
+        )))
     }
 }
 
@@ -245,11 +247,28 @@ where
 pub struct PartitionedReader<R> {
     inner: R,
     config: PartitionedReaderConfig,
+    ack_mode: PartitionedAckMode,
 }
 
 impl<R> PartitionedReader<R> {
-    pub fn new(inner: R, config: PartitionedReaderConfig) -> Self {
-        Self { inner, config }
+    /// Source-cursor mode: acks inner on lane accept.
+    /// For PgReader, SqliteReader — inner ack only advances a local cursor.
+    pub fn source(inner: R, config: PartitionedReaderConfig) -> Self {
+        Self {
+            inner,
+            config,
+            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
+        }
+    }
+
+    /// Delivery-preserving mode: defers inner ack to downstream ack.
+    /// For SqsReader, KafkaReader — inner ack deletes/commits the message.
+    pub fn delivery(inner: R, config: PartitionedReaderConfig) -> Self {
+        Self {
+            inner,
+            config,
+            ack_mode: PartitionedAckMode::AckInnerOnDownstreamAck,
+        }
     }
 }
 
@@ -314,10 +333,9 @@ where
         let inner_stream = self.inner.read(inner_subscription).await?;
         let count_nz = self.config.partition_count;
         let count = count_nz.get() as usize;
-        let count_u32 = std::num::NonZeroU32::new(count_nz.get() as u32).unwrap();
         let lane_capacity = self.config.lane_capacity.get();
         let scheduling = self.config.scheduling;
-        let ack_mode = self.config.ack_mode;
+        let ack_mode = self.ack_mode;
 
         let lanes_inner: Vec<Lane<R::Acker, R::Cursor>> = (0..count)
             .map(|_| Lane {
@@ -367,7 +385,7 @@ where
                         continue;
                     }
                 };
-                let lane_id = partition_for(msg.event(), count_u32) as usize;
+                let lane_id = msg.event().partition(count_nz).id() as usize;
                 let mut msg_holder = Some(msg);
                 loop {
                     let lanes = intake_state.lock().await;
@@ -505,7 +523,7 @@ where
                 match pick {
                     Some((lane_id, id, event, inner_acker, cursor)) => {
                         let partition =
-                            LogicalPartition::new(lane_id as u16, count_nz).expect("valid lane");
+                            Partition::new(lane_id as u16, count_nz).expect("valid lane");
                         let acker = PartitionAcker {
                             state: Arc::clone(&emit_state),
                             notify: Arc::clone(&emit_notify),
@@ -581,7 +599,7 @@ mod tests {
 
     #[test]
     fn partitioned_cursor_id_is_named_with_partition() {
-        let partition = LogicalPartition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
+        let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
         assert_eq!(
             cursor.id(),
@@ -591,7 +609,7 @@ mod tests {
 
     #[test]
     fn partitioned_cursor_roundtrip_preserves_partition_and_inner() {
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(42), partition);
 
         let value = serde_json::to_value(&cursor).unwrap();
@@ -602,7 +620,7 @@ mod tests {
 
     #[test]
     fn partitioned_subscription_stores_start_after_cursor() {
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), partition);
         let subscription = PartitionedSubscription::<(), TestCursor>::new(())
             .with_start(StartFrom::After(cursor.clone()));
@@ -612,7 +630,7 @@ mod tests {
 
     #[test]
     fn partitioned_subscription_stores_starts_from_with_starts() {
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let starts = vec![StartFrom::After(PartitionedCursor::new(
             TestCursor(10),
             partition,
@@ -627,8 +645,8 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let old_partition = LogicalPartition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
+        let partitioned = PartitionedReader::source(reader, rr_config(4, 64));
+        let old_partition = Partition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), old_partition);
         let subscription =
             PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
@@ -647,8 +665,8 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
-        let partition = LogicalPartition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partitioned = PartitionedReader::source(reader, rr_config(4, 64));
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), partition);
         let subscription =
             PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
@@ -661,7 +679,7 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let partitioned = PartitionedReader::new(reader, rr_config(4, 64));
+        let partitioned = PartitionedReader::source(reader, rr_config(4, 64));
         let subscription = PartitionedSubscription::<_, TestCursor>::new(());
 
         let _stream = partitioned.read(subscription).await.unwrap();
@@ -701,7 +719,6 @@ mod tests {
             partition_count: NonZeroU16::new(n).unwrap(),
             lane_capacity: NonZeroUsize::new(cap).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
-            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
         }
     }
 
@@ -711,7 +728,7 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(events)),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let mut delivered = 0usize;
         while delivered < 16 {
@@ -733,7 +750,7 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(events)),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
@@ -762,7 +779,7 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(events)),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
@@ -790,7 +807,7 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(events)),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let mut delivered = 0usize;
         while delivered < 4 {
@@ -846,7 +863,7 @@ mod tests {
         let reader = FailingAckReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
@@ -866,7 +883,7 @@ mod tests {
         let reader = FailingAckReader {
             events: std::sync::Mutex::new(Some(vec![ev("k0"), ev("k1")])),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
@@ -905,9 +922,8 @@ mod tests {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
-            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
         };
-        let p = PartitionedReader::new(reader, cfg);
+        let p = PartitionedReader::source(reader, cfg);
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let mut order: Vec<String> = Vec::new();
         for _ in 0..33 {
@@ -930,12 +946,6 @@ mod tests {
             cold_pos < 16,
             "cold lane starved: cold delivered at position {cold_pos}, order={order:?}"
         );
-    }
-
-    #[test]
-    fn partitioned_reader_config_default_is_ack_inner_on_lane_accept() {
-        let config = PartitionedReaderConfig::default();
-        assert_eq!(config.ack_mode, PartitionedAckMode::AckInnerOnLaneAccept);
     }
 
     #[derive(Clone, Default)]
@@ -988,13 +998,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
             acker: acker.clone(),
         };
-        let config = PartitionedReaderConfig {
-            partition_count: NonZeroU16::new(2).unwrap(),
-            lane_capacity: NonZeroUsize::new(64).unwrap(),
-            scheduling: LaneScheduling::RoundRobin,
-            ack_mode: PartitionedAckMode::AckInnerOnDownstreamAck,
-        };
-        let partitioned = PartitionedReader::new(reader, config);
+        let partitioned = PartitionedReader::delivery(reader, rr_config(2, 64));
 
         let mut stream = partitioned
             .read(PartitionedSubscription::new(()))
@@ -1021,13 +1025,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
             acker: acker.clone(),
         };
-        let config = PartitionedReaderConfig {
-            partition_count: NonZeroU16::new(2).unwrap(),
-            lane_capacity: NonZeroUsize::new(64).unwrap(),
-            scheduling: LaneScheduling::RoundRobin,
-            ack_mode: PartitionedAckMode::AckInnerOnDownstreamAck,
-        };
-        let partitioned = PartitionedReader::new(reader, config);
+        let partitioned = PartitionedReader::delivery(reader, rr_config(2, 64));
 
         let mut stream = partitioned
             .read(PartitionedSubscription::new(()))
@@ -1060,13 +1058,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
             acker: acker.clone(),
         };
-        let config = PartitionedReaderConfig {
-            partition_count: NonZeroU16::new(2).unwrap(),
-            lane_capacity: NonZeroUsize::new(64).unwrap(),
-            scheduling: LaneScheduling::RoundRobin,
-            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
-        };
-        let partitioned = PartitionedReader::new(reader, config);
+        let partitioned = PartitionedReader::source(reader, rr_config(2, 64));
 
         let mut stream = partitioned
             .read(PartitionedSubscription::new(()))
@@ -1095,7 +1087,7 @@ mod tests {
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(events)),
         };
-        let p = PartitionedReader::new(reader, rr_config(4, 64));
+        let p = PartitionedReader::source(reader, rr_config(4, 64));
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
         let mut held = Vec::new();
         let mut lanes = std::collections::HashSet::new();

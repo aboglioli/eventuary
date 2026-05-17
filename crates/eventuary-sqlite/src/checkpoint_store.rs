@@ -172,18 +172,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary_core::LogicalPartition;
+    use eventuary_core::Partition;
     use std::num::NonZeroU16;
 
     #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     struct WrappedCursor {
         sequence: i64,
-        partition: LogicalPartition,
+        partition: Partition,
     }
 
     #[test]
     fn encode_cursor_preserves_nested_json() {
-        let partition = LogicalPartition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
         let cursor = WrappedCursor {
             sequence: 42,
             partition,
