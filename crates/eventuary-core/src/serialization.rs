@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::event::{Event, EventId};
@@ -15,9 +15,12 @@ use crate::topic::Topic;
 
 /// Wire-format representation of an [`Event`]. Field order matches
 /// `Event` so the JSON shape is predictable and self-documenting.
+///
+/// `id` and `parent_id` carry `Uuid` directly so backends with native
+/// UUID columns can bind/fetch without a String round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedEvent {
-    pub id: String,
+    pub id: Uuid,
     pub organization: String,
     pub namespace: String,
     pub topic: String,
@@ -28,7 +31,7 @@ pub struct SerializedEvent {
     #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
-    pub parent_id: Option<String>,
+    pub parent_id: Option<Uuid>,
     #[serde(default)]
     pub correlation_id: Option<String>,
     #[serde(default)]
@@ -113,7 +116,7 @@ mod base64_bytes {
 impl SerializedEvent {
     pub fn from_event(event: &Event) -> Result<Self> {
         Ok(Self {
-            id: event.id().to_string(),
+            id: *event.id().as_uuid(),
             organization: event.organization().to_string(),
             namespace: event.namespace().to_string(),
             topic: event.topic().to_string(),
@@ -122,7 +125,7 @@ impl SerializedEvent {
             timestamp: event.timestamp(),
             version: event.version(),
             key: event.key().map(|key| key.to_string()),
-            parent_id: event.parent_id().map(|id| id.to_string()),
+            parent_id: event.parent_id().map(|id| *id.as_uuid()),
             correlation_id: event.correlation_id().map(|id| id.to_string()),
             causation_id: event.causation_id().map(|id| id.to_string()),
         })
@@ -131,12 +134,7 @@ impl SerializedEvent {
     pub fn to_event(&self) -> Result<Event> {
         let payload = self.payload.clone().into_payload()?;
         let key = self.key.as_deref().map(EventKey::new).transpose()?;
-        let parent_id = self
-            .parent_id
-            .as_deref()
-            .map(EventId::from_str)
-            .transpose()
-            .map_err(|e| Error::Serialization(e.to_string()))?;
+        let parent_id = self.parent_id.map(EventId::from_uuid);
         let correlation_id = self
             .correlation_id
             .as_deref()
@@ -149,7 +147,7 @@ impl SerializedEvent {
             .transpose()?;
 
         Event::new(
-            EventId::from_str(&self.id).map_err(|e| Error::Serialization(e.to_string()))?,
+            EventId::from_uuid(self.id),
             OrganizationId::new(&self.organization)?,
             Namespace::new(&self.namespace)?,
             Topic::new(&self.topic)?,
@@ -417,10 +415,7 @@ mod tests {
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert_eq!(serialized.key.as_deref(), Some("k"));
-        assert_eq!(
-            serialized.parent_id.as_deref(),
-            Some(parent_id.to_string().as_str())
-        );
+        assert_eq!(serialized.parent_id, Some(*parent_id.as_uuid()));
         assert_eq!(serialized.correlation_id.as_deref(), Some("corr"));
         assert_eq!(serialized.causation_id.as_deref(), Some("cause"));
 
