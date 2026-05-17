@@ -415,6 +415,6 @@ mod tests {
 
     #[test]
     fn pg_cursor_id_is_global() {
-        assert_eq!(PgCursor::new(42).id(), CursorId::Global);
+        assert_eq!(PgCursor::new(42).id(), CursorId::global());
     }
 }

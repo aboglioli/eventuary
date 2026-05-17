@@ -191,7 +191,7 @@ impl<C: Cursor> Cursor for BatchCursor<C> {
         self.inner
             .first()
             .map(|c| c.id())
-            .unwrap_or(CursorId::Global)
+            .unwrap_or(CursorId::global())
     }
 }
 
@@ -275,7 +275,7 @@ mod tests {
         let cursor: BatchCursor<TestCursor> = BatchCursor {
             inner: Arc::new(vec![]),
         };
-        assert_eq!(cursor.id(), CursorId::Global);
+        assert_eq!(cursor.id(), CursorId::global());
     }
 
     #[derive(Clone, Default)]

@@ -201,7 +201,7 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     assert!(!rows.is_empty(), "expected per-lane checkpoints persisted");
     for (cursor_id, _cursor) in &rows {
         assert!(
-            matches!(cursor_id, eventuary_core::io::CursorId::Named(_)),
+            cursor_id.as_str().starts_with("partition:"),
             "partitioned cursor must be tagged with a named cursor id"
         );
     }

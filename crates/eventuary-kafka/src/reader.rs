@@ -256,6 +256,6 @@ mod tests {
             partition: 0,
             offset: 42,
         };
-        assert_eq!(cursor.id(), CursorId::Global);
+        assert_eq!(cursor.id(), CursorId::global());
     }
 }
