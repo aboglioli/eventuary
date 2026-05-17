@@ -225,6 +225,7 @@ pub mod rate_limit;
 pub mod recover;
 pub mod replay_then_live;
 pub mod timeout;
+pub mod try_map;
 pub mod watermark;
 pub mod window;
 
@@ -239,7 +240,7 @@ pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore, InMemoryDedupeStore};
 pub use filtered::{FilteredReader, FilteredStream};
 pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
 pub use map::{MapReader, MapStream};
-pub use merge::{MergeAcker, MergeCursor, MergeReader};
+pub use merge::{MergeAcker, MergeCursor, MergeReader, MergeStrategy};
 pub use partitioned::{
     LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
     PartitionedSubscription,
@@ -247,9 +248,10 @@ pub use partitioned::{
 pub use rate_limit::{RateLimit, RateLimitReader};
 pub use recover::{RecoverConfig, RecoverReader};
 pub use replay_then_live::{
-    ReplayLiveAcker, ReplayLiveCursor, ReplayThenLiveReader, ReplayThenLiveStream,
-    ReplayThenLiveSubscription,
+    ReplayLiveAcker, ReplayLiveCursor, ReplayThenLiveConfig, ReplayThenLiveReader,
+    ReplayThenLiveStream, ReplayThenLiveSubscription,
 };
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
+pub use try_map::{TryMapReader, TryMapStream};
 pub use watermark::{WatermarkAcker, WatermarkReader, WatermarkStore};
 pub use window::WindowReader;
