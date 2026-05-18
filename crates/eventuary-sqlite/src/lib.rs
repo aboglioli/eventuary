@@ -7,9 +7,23 @@
 //!
 //! ack advances the checkpoint, nack leaves it unchanged. SQLite work runs in
 //! `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+//!
+//! Also ships sqlite-backed implementations of the IO store traits:
+//! - [`SqliteMultiplexerStore`]
+//! - [`SqliteBufferStore`]
+//! - [`SqliteDedupeStore`]
+//! - [`SqliteCheckpointStore`]
 
+pub mod buffer_store;
 pub mod checkpoint_store;
 pub mod database;
+pub mod dedupe_store;
+pub mod multiplexer_store;
 pub mod reader;
 pub mod relation;
 pub mod writer;
+
+pub use buffer_store::{SqliteBufferStore, SqliteBufferStoreConfig, SqliteBufferStoreId};
+pub use checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
+pub use dedupe_store::{SqliteDedupeStore, SqliteDedupeStoreConfig};
+pub use multiplexer_store::{SqliteMultiplexerStore, SqliteMultiplexerStoreConfig};
