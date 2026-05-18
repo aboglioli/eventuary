@@ -15,10 +15,10 @@ mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
 pub use consumer_group_id::ConsumerGroupId;
-pub use cursor::{Cursor, CursorId};
+pub use cursor::{Cursor, CursorId, NoCursor};
 pub use filter::{ArcFilter, BoxFilter, Filter, FilterExt};
 pub use handler::{ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt};
-pub use message::{Message, NoCursor};
+pub use message::Message;
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use stream_id::StreamId;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};

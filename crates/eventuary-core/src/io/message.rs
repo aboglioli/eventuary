@@ -1,13 +1,8 @@
 use crate::error::Result;
 use crate::event::Event;
-use crate::io::{Acker, Cursor};
+use crate::io::Acker;
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct NoCursor;
-
-impl Cursor for NoCursor {}
-
-pub struct Message<A: Acker, C = NoCursor> {
+pub struct Message<A: Acker, C> {
     event: Event,
     acker: A,
     cursor: C,
@@ -89,6 +84,7 @@ impl<A: Acker, C> Message<A, C> {
 mod tests {
     use super::*;
 
+    use crate::io::NoCursor;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
