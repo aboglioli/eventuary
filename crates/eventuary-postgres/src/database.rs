@@ -17,10 +17,16 @@ impl Migration {
     }
 }
 
-const MIGRATION_TEMPLATES: &[Migration] = &[Migration {
-    filename: "0001_init.sql",
-    template: include_str!("../migrations/0001_init.sql"),
-}];
+const MIGRATION_TEMPLATES: &[Migration] = &[
+    Migration {
+        filename: "0001_init.sql",
+        template: include_str!("../migrations/0001_init.sql"),
+    },
+    Migration {
+        filename: "0002_stores.sql",
+        template: include_str!("../migrations/0002_stores.sql"),
+    },
+];
 
 pub fn migrations() -> &'static [Migration] {
     MIGRATION_TEMPLATES
@@ -30,6 +36,10 @@ pub fn migrations() -> &'static [Migration] {
 pub struct PgDatabaseConfig {
     pub events_relation: PgRelationName,
     pub offsets_relation: PgRelationName,
+    pub multiplexer_completions_relation: PgRelationName,
+    pub dedupe_keys_relation: PgRelationName,
+    pub buffer_entries_relation: PgRelationName,
+    pub watermarks_relation: PgRelationName,
     pub max_connections: u32,
 }
 
@@ -39,6 +49,14 @@ impl Default for PgDatabaseConfig {
             events_relation: PgRelationName::new("events").expect("default events relation"),
             offsets_relation: PgRelationName::new("consumer_offsets")
                 .expect("default offsets relation"),
+            multiplexer_completions_relation: PgRelationName::new("multiplexer_completions")
+                .expect("default multiplexer relation"),
+            dedupe_keys_relation: PgRelationName::new("dedupe_keys")
+                .expect("default dedupe relation"),
+            buffer_entries_relation: PgRelationName::new("buffer_entries")
+                .expect("default buffer relation"),
+            watermarks_relation: PgRelationName::new("watermarks")
+                .expect("default watermarks relation"),
             max_connections: 20,
         }
     }
@@ -50,6 +68,12 @@ impl PgDatabaseConfig {
         Ok(Self {
             events_relation: PgRelationName::new(format!("{schema}.events"))?,
             offsets_relation: PgRelationName::new(format!("{schema}.consumer_offsets"))?,
+            multiplexer_completions_relation: PgRelationName::new(format!(
+                "{schema}.multiplexer_completions"
+            ))?,
+            dedupe_keys_relation: PgRelationName::new(format!("{schema}.dedupe_keys"))?,
+            buffer_entries_relation: PgRelationName::new(format!("{schema}.buffer_entries"))?,
+            watermarks_relation: PgRelationName::new(format!("{schema}.watermarks"))?,
             max_connections: 20,
         })
     }
@@ -60,17 +84,31 @@ pub fn render_migration_sql(migration: &Migration, config: &PgDatabaseConfig) ->
         .template
         .replace("{events}", &config.events_relation.render())
         .replace("{offsets}", &config.offsets_relation.render())
+        .replace(
+            "{multiplexer_completions}",
+            &config.multiplexer_completions_relation.render(),
+        )
+        .replace("{dedupe_keys}", &config.dedupe_keys_relation.render())
+        .replace("{buffer_entries}", &config.buffer_entries_relation.render())
+        .replace("{watermarks}", &config.watermarks_relation.render())
 }
 
 pub fn render_schema_sql(config: &PgDatabaseConfig) -> String {
     let mut sql = String::new();
-    if let Some(schema) = config.events_relation.schema() {
-        sql.push_str(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\";\n"));
-    }
-    if let Some(schema) = config.offsets_relation.schema()
-        && Some(schema) != config.events_relation.schema()
-    {
-        sql.push_str(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\";\n"));
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for relation in [
+        &config.events_relation,
+        &config.offsets_relation,
+        &config.multiplexer_completions_relation,
+        &config.dedupe_keys_relation,
+        &config.buffer_entries_relation,
+        &config.watermarks_relation,
+    ] {
+        if let Some(schema) = relation.schema()
+            && seen.insert(schema)
+        {
+            sql.push_str(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\";\n"));
+        }
     }
     for migration in migrations() {
         sql.push_str(&render_migration_sql(migration, config));
@@ -144,19 +182,25 @@ impl PgDatabase {
 }
 
 async fn apply_migrations(pool: &PgPool, config: &PgDatabaseConfig) -> Result<()> {
-    if let Some(schema) = config.events_relation.schema() {
-        sqlx::raw_sql(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-            .execute(pool)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
-    }
-    if let Some(schema) = config.offsets_relation.schema()
-        && Some(schema) != config.events_relation.schema()
-    {
-        sqlx::raw_sql(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-            .execute(pool)
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+    let schemas: Vec<&str> = [
+        config.events_relation.schema(),
+        config.offsets_relation.schema(),
+        config.multiplexer_completions_relation.schema(),
+        config.dedupe_keys_relation.schema(),
+        config.buffer_entries_relation.schema(),
+        config.watermarks_relation.schema(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for schema in schemas {
+        if seen.insert(schema) {
+            sqlx::raw_sql(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
+                .execute(pool)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?;
+        }
     }
     // Every statement in the rendered migration is `CREATE TABLE IF NOT
     // EXISTS` / `CREATE INDEX IF NOT EXISTS` / `ALTER TABLE ... IF NOT

@@ -11,6 +11,7 @@ repository.workspace = true
 
 [dependencies]
 eventuary-core = { workspace = true }
+chrono.workspace = true
 futures.workspace = true
 tokio.workspace = true
 

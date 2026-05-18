@@ -231,16 +231,14 @@ pub mod watermark;
 pub mod window;
 
 pub use batch::{BatchAcker, BatchCursor, BatchReader};
-pub use buffer::{
-    BufferAcker, BufferStore, BufferedReader, BufferedReaderConfig, InMemoryBufferStore,
-};
+pub use buffer::{BufferAcker, BufferEntry, BufferStore, BufferedReader, BufferedReaderConfig};
 pub use checkpoint::{
     CheckpointAcker, CheckpointKey, CheckpointReader, CheckpointReaderConfig, CheckpointScope,
     CheckpointStore, CheckpointStream, CheckpointSubscription, InvalidCursorPolicy,
     MissingCheckpointPolicy,
 };
 pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
-pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore, InMemoryDedupeStore};
+pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
 pub use filtered::{FilteredReader, FilteredStream};
 pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
 pub use map::{MapReader, MapStream};
