@@ -2,7 +2,7 @@
 //!
 //! `SqsWriter` serializes events with `SerializedEvent::to_json_string` and
 //! sends them via `SendMessageBatch`. `SqsReader` long-polls `ReceiveMessage`
-//! and emits `Message<BatchedAcker<String>>` whose token is the receipt handle.
+//! and emits `Message<BatchedAcker<String>, NoCursor>` whose token is the receipt handle.
 //!
 //! SQS does not support historical replay: `StartFrom::{Earliest, Timestamp}`
 //! and `limit` are rejected at config time with `Error::Config`. Poison

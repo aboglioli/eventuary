@@ -2,7 +2,7 @@
 //!
 //! Wraps `rdkafka`. `KafkaWriter` produces records (event key as record key,
 //! JSON-encoded `SerializedEvent` as payload). `KafkaReader` streams from a
-//! `StreamConsumer` and emits `Message<BatchedAcker<KafkaOffsetToken>>` whose
+//! `StreamConsumer` and emits `Message<BatchedAcker<KafkaOffsetToken>, KafkaCursor>` whose
 //! token carries `(topic, partition, offset)`.
 //!
 //! Configuration uses `kafka_topics: Vec<String>` (Kafka topic names to

@@ -59,11 +59,16 @@ impl<'de> serde::Deserialize<'de> for CursorId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct NoCursor;
+
 pub trait Cursor {
     fn id(&self) -> CursorId {
         CursorId::global()
     }
 }
+
+impl Cursor for NoCursor {}
 
 #[cfg(test)]
 mod tests {
@@ -172,5 +177,10 @@ mod tests {
 
         let id = CursorId::partition(4, 1);
         assert_eq!(id.to_string(), "partition:4:1");
+    }
+
+    #[test]
+    fn no_cursor_uses_global_cursor_id() {
+        assert_eq!(NoCursor.id(), CursorId::global());
     }
 }
