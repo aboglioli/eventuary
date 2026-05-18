@@ -1,11 +1,5 @@
 # eventuary-conformance
 
-Shared backend conformance test suite for eventuary. Not published to crates.io.
+Internal workspace scaffold for shared backend conformance checks. This crate is not published to crates.io.
 
-Each backend's integration tests implement the [`Backend`] trait, declare their
-[`Capabilities`], and call `run_all`. Capability flags gate cases that the
-backend cannot honor (e.g. SQS does not support replay, so
-`start_from_earliest` is skipped).
-
-TODO: SQS and Kafka adapters can be added later. The suite is currently wired
-into memory, SQLite, and Postgres backends.
+It currently exposes [`Capabilities`] so backend tests can describe supported cursor-reader behavior while the reusable case suite is rebuilt. Backend-specific integration and composition tests in `crates/eventuary-<backend>/tests/` are the source of truth for release validation.

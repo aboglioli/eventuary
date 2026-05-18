@@ -9,7 +9,7 @@ PostgreSQL, AWS SQS, and Apache Kafka. Everything intended for application use i
 available through the `eventuary` umbrella crate, with backends enabled by Cargo
 features.
 
-> **Status:** Alpha (`0.1.0-alpha.0`). API may change before `0.1.0`.
+> **Status:** Alpha (`0.1.0-alpha.1`). API may change before `0.1.0`.
 
 Eventuary is a library you embed in your application. It is not a server, broker,
 daemon, or transport runtime.
@@ -21,7 +21,7 @@ features they need. No backend is enabled by default.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.1.0-alpha.0", features = ["postgres"] }
+eventuary = { version = "0.1.0-alpha.1", features = ["postgres"] }
 ```
 
 | Feature | Module | Backend crate |
@@ -56,7 +56,6 @@ Advanced users can depend on sub-crates directly:
 | Crate | When to depend directly |
 |-------|-------------------------|
 | [`eventuary-core`](crates/eventuary-core) | Building a custom backend or using only the event model and IO traits |
-| [`eventuary-conformance`](crates/eventuary-conformance) | Backend-author dev-dependency for shared conformance scaffolding |
 | [`eventuary-memory`](crates/eventuary-memory), etc. | Pinning or publishing against a backend crate independently |
 
 Applications should normally use the umbrella crate.
@@ -72,7 +71,7 @@ crates/
 ├── eventuary-postgres/     # sqlx/Postgres append-only event log + checkpoint store
 ├── eventuary-sqs/          # AWS SQS writer/reader with batched delete acks
 ├── eventuary-kafka/        # rdkafka writer/reader with batched offset commits
-└── eventuary-conformance/  # backend conformance support types
+└── eventuary-conformance/  # internal conformance scaffold, not published
 ```
 
 Layering rules:
@@ -81,8 +80,10 @@ Layering rules:
 - Backend crates depend on `eventuary-core`, not on the umbrella crate.
 - The umbrella crate contains no original implementation code; it only re-exports
   `eventuary-core` and optional backend crates.
-- Backend `lib.rs` files expose modules only. Implementation types stay at
-  paths such as `eventuary::sqlite::reader::SqliteReader`, not flat paths.
+- Backend implementation types have canonical module paths such as
+  `eventuary::sqlite::reader::SqliteReader`. Some backend crates also expose
+  selected convenience re-exports from their crate root; prefer module paths
+  when showing which role a type plays.
 
 ## Core Event Model
 
@@ -188,7 +189,7 @@ let writer: BoxWriter = MemoryWriter::new(tx).into_boxed();
 
 ```toml
 [dependencies]
-eventuary = { version = "0.1.0-alpha.0", features = ["memory"] }
+eventuary = { version = "0.1.0-alpha.1", features = ["memory"] }
 ```
 
 ```rust
@@ -465,12 +466,13 @@ metadata and the original event payload preserved.
 use std::num::NonZeroUsize;
 
 use eventuary::io::filter::EventFilter;
-use eventuary::io::handler::{InMemoryMultiplexerStore, Multiplexer};
+use eventuary::io::handler::Multiplexer;
+use eventuary::memory::multiplexer_store::MemoryMultiplexerStore;
 
 let multiplexer = Multiplexer::builder()
     .route("orders-projection", EventFilter::default(), orders_projection)?
     .route("audit-log", EventFilter::default(), audit_handler)?
-    .store(InMemoryMultiplexerStore::with_capacity(NonZeroUsize::new(10_000).unwrap()))
+    .store(MemoryMultiplexerStore::with_capacity(NonZeroUsize::new(10_000).unwrap()))
     .build()?;
 ```
 
@@ -489,7 +491,7 @@ subscriber id (`orders:projection`, `inventory:projection`).
 `Multiplexer` is generic over its store. The default `NoMultiplexerStore` is
 a zero-sized no-op: handlers run on every redelivery and must be idempotent.
 Calling `.store(...)` switches the builder to a real implementation
-(`InMemoryMultiplexerStore` or a backend-provided durable store); successful
+(`MemoryMultiplexerStore` or a backend-provided durable store); successful
 `(event_id, subscriber_id)` pairs are then marked completed and skipped on
 redelivery.
 
@@ -634,7 +636,7 @@ The publish workflow verifies that the tag matches `workspace.package.version`,
 runs formatting, clippy, and unit tests, then publishes in dependency order:
 
 1. `eventuary-core`
-2. backend crates and `eventuary-conformance`
+2. backend crates
 3. `eventuary` umbrella crate
 
 Release procedure:

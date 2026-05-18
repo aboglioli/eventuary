@@ -16,12 +16,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! eventuary = { version = "0.1.0-alpha.0", features = ["postgres"] }
+//! eventuary = { version = "0.1.0-alpha.1", features = ["postgres"] }
 //! ```
 //!
-//! Backend-authoring crates may prefer to depend directly on `eventuary-core`
-//! and use [`eventuary-conformance`](https://crates.io/crates/eventuary-conformance)
-//! as a dev-dependency for the shared backend conformance test suite.
+//! Backend-authoring crates may prefer to depend directly on `eventuary-core`.
 //!
 //! # Example
 //!

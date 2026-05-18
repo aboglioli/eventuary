@@ -7,7 +7,7 @@ Eventuary started life as `orchy-events` inside the [orchy](https://github.com/a
 project and was extracted as a standalone library so other Rust projects can
 reuse the same event-sourcing primitives and reader/writer abstractions.
 
-> **Status:** Alpha (`0.1.0-alpha.0`). API may change before `0.1.0`.
+> **Status:** Alpha (`0.1.0-alpha.1`). API may change before `0.1.0`.
 
 ## What Eventuary Provides
 
@@ -35,7 +35,7 @@ The top-level `eventuary` crate is an **umbrella facade**: it re-exports
 feature flag. Typical consumers add a single line to their `Cargo.toml`:
 
 ```toml
-eventuary = { version = "0.1.0-alpha.0", features = ["postgres"] }
+eventuary = { version = "0.1.0-alpha.1", features = ["postgres"] }
 ```
 
 …and import `eventuary::Event`, `eventuary::postgres::PgReader`, etc.
@@ -79,10 +79,11 @@ crates/
 │           │   ├── recover.rs         # RecoverReader + RecoverConfig (validated)
 │           │   ├── batch.rs           # BatchReader + BatchAcker + BatchCursor (Arc-backed)
 │           │   ├── window.rs          # WindowReader (size + time-based flush; reuses BatchAcker)
-│           │   ├── dedupe.rs          # DedupeReader + DedupeStore trait + InMemoryDedupeStore (capacity-bounded) + DedupeAcker
+│           │   ├── dedupe.rs          # DedupeReader + DedupeStore trait + DedupeAcker
 │           │   ├── watermark.rs       # WatermarkReader (static or per-entity key fn) + WatermarkStore trait + WatermarkAcker
 │           │   ├── merge.rs           # MergeReader + MergeAcker + MergeCursor + MergeStrategy
 │           │   ├── replay_then_live.rs # ReplayThenLiveReader + ReplayThenLiveConfig (overlap dedupe) + ReplayLiveAcker + ReplayLiveCursor
+│           │   ├── buffer.rs           # BufferedReader + BufferStore trait + BufferAcker + BufferEntry
 │           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
 │           │   └── checkpoint.rs      # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope + MissingCheckpointPolicy / InvalidCursorPolicy
 │           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
@@ -104,17 +105,17 @@ crates/
 │           │   └── spawned.rs # SpawnedStream
 │           ├── start_from.rs # StartFrom<C> (Earliest / Latest / Timestamp / After) + StartableSubscription
 │           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter + Filter impls for TopicPattern/NamespacePattern
-│           ├── cursor.rs   # Cursor trait + CursorId value-object newtype
-│           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value), NoCursor
+│           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
+│           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
 │           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
-├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor
+├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
 ├── eventuary-sqlite/       # rusqlite source reader/writer + SqliteCheckpointStore
 ├── eventuary-postgres/     # sqlx Postgres source reader/writer + PgCheckpointStore
 ├── eventuary-sqs/          # aws-sdk-sqs, BatchedAcker via SqsFlusher + NoCursor
-├── eventuary-kafka/        # rdkafka StreamConsumer, BatchedAcker via KafkaFlusher
-└── eventuary-conformance/  # direct dev-dep crate for backend conformance scaffolding
+├── eventuary-kafka/        # rdkafka StreamConsumer, BatchedAcker via KafkaFlusher + KafkaCursor
+└── eventuary-conformance/  # internal workspace scaffold for backend conformance checks
 ```
 
 ### Layer Rules
@@ -122,8 +123,8 @@ crates/
 | Layer | Can Import | Cannot Import |
 |-------|-----------|---------------|
 | `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, tokio-util (`rt` + `time`), either, base64, bytes | any other eventuary crate |
-| `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate (backends depend on it, not vice versa) |
-| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / rdkafka) | any other backend crate; `eventuary-conformance` only in `[dev-dependencies]` |
+| `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate |
+| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / rdkafka) | any other backend crate |
 | `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
 
 Key invariants:
@@ -139,11 +140,11 @@ Key invariants:
   means adding both a `eventuary-<x>` crate and a matching feature in the
   umbrella's `Cargo.toml`.
 
-The conformance crate is exposed only as a **direct sub-crate**
-(`eventuary-conformance`), not re-exported through the umbrella. Backend
-authors add it as a `[dev-dependencies]` entry, alongside `eventuary-core`.
-The reusable case suite is being rebuilt for the cursor-reader API; keep
-backend-specific integration coverage in place while doing that work.
+The conformance crate is an **internal workspace scaffold**, not re-exported
+through the umbrella and not published to crates.io. It currently exposes
+capability flags while the reusable case suite is being rebuilt for the
+cursor-reader API; keep backend-specific integration coverage in place while
+doing that work.
 
 ## Key Patterns
 
@@ -210,8 +211,8 @@ Use `WriterExt::into_boxed()` / `into_arced()`, `ReaderExt::into_boxed()` /
 `Reader::Subscription` is an associated type so each backend can specialize
 (Kafka has a richer config than memory). `Reader::Cursor` is the matching
 delivery-cursor type. SQL source readers expose `PgCursor` / `SqliteCursor`;
-memory, SQS, and Kafka currently deliver `NoCursor` because their native ack
-systems own replay/progress semantics.
+memory and SQS deliver `NoCursor`; Kafka delivers `KafkaCursor` while its
+native consumer-group commits still own durable progress semantics.
 
 ### Subscription Model
 
@@ -235,7 +236,7 @@ when it resumes from a persisted checkpoint.
 
 ### Message + Acker
 
-`Message<A: Acker, C = NoCursor>` pairs an `Event` with an `Acker` and a
+`Message<A: Acker, C>` pairs an `Event` with an `Acker` and a
 `Cursor`. The event is stored **by value**, not behind an `Arc` — every
 wrapper pays only for what it uses. Wrappers that need acker-side
 access to the event (currently `InspectAcker`, `DedupeAcker`,
@@ -372,7 +373,7 @@ single source. Cross-cutting concerns live in generic core wrappers in
 | `RecoverReader<R>` | passthrough | Retry the inner `read(subscription)` on stream error with exponential backoff. `RecoverConfig::new(retries, backoff, multiplier) -> Result<Self>` validates multiplier ≥ 1.0. |
 | `BatchReader<R>` | `BatchAcker<R::Acker>` / `BatchCursor<R::Cursor>` | Group up to `max_batch: NonZeroUsize` events into a shared `Arc`-backed acker/cursor. `BatchAcker::{ack, nack, ack_subset(&[usize]), nack_subset(&[usize])}` give all-or-subset acknowledgement. |
 | `WindowReader<R>` | `BatchAcker` / `BatchCursor` | Same shape as `BatchReader` but flushes on `max_size: NonZeroUsize` **or** `max_wait: Duration`. Reuses `flush_batch` helper from `batch.rs`. |
-| `DedupeReader<R, S>` | `DedupeAcker<R::Acker, S>` / passthrough | Skip already-seen events via a `DedupeStore`. `exists` check on intake; `mark_processed` deferred until downstream ack so nack/crash before processing does not silently drop the event. Trait offers `mark_if_new(&Event) -> Result<bool>` (atomic; default impl built on `exists`+`mark`, override for native atomicity). `InMemoryDedupeStore::with_capacity(NonZeroUsize)` evicts oldest FIFO; `unbounded()` for tests. |
+| `DedupeReader<R, S>` | `DedupeAcker<R::Acker, S>` / passthrough | Skip already-seen events via a `DedupeStore`. `exists` check on intake; `mark_processed` deferred until downstream ack so nack/crash before processing does not silently drop the event. Trait offers `mark_if_new(&Event) -> Result<bool>` (atomic; default impl built on `exists`+`mark`, override for native atomicity). Memory, PostgreSQL, and SQLite store implementations live in their backend crates. |
 | `WatermarkReader<R, S>` | `WatermarkAcker<R::Acker, S>` / passthrough | Drop events older than the stored watermark. `with_static_key(reader, store, key)` or `with_key_fn(reader, store, |event| ...)` for per-entity watermarks (e.g., `"orders:customer-N"`). Save deferred to ack; in-memory cache shared between intake and acker so nack leaves both the store and the in-memory cursor untouched. |
 | `MergeReader<R1, R2>` | `MergeAcker<R1::Acker, R2::Acker>` / `MergeCursor<R1::Cursor, R2::Cursor>` | Combine two readers into one stream. `MergeStrategy::Fair` (default; `futures::stream::select`) or `MergeStrategy::LeftPriority` (drain left first via `select_with_strategy` + `PollNext::Left`). `MergeCursor` impls `Cursor` so the merged stream composes under `CheckpointReader`. |
 | `ReplayThenLiveReader<R, L>` | `ReplayLiveAcker<R::Acker, L::Acker>` / `ReplayLiveCursor<R::Cursor, L::Cursor>` | Historical-then-live phase switch (e.g., Postgres replay → Kafka live). `ReplayThenLiveConfig::overlap_dedupe_capacity: Option<NonZeroUsize>` records the last N replay event ids and silently acks any live event whose id matches. |
@@ -390,7 +391,7 @@ each lane checkpoints independently.
 | `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | composes with `PartitionedReader` + `CheckpointReader` |
 | `eventuary-memory` | `NoCursor` | — | mpsc source; no replay/checkpoint semantics |
 | `eventuary-sqs` | `NoCursor` | — | queue visibility/delete is the native progress model |
-| `eventuary-kafka` | `NoCursor` | — | consumer group commits are the native progress model |
+| `eventuary-kafka` | `KafkaCursor` | — | consumer group commits are the native progress model |
 
 Checkpoint compatibility is validated by the reader or wrapper that interprets
 the cursor, not by a global topology fingerprint. `CheckpointReader` seeds the
@@ -425,20 +426,20 @@ to domain errors.
 
 ## Conformance Suite
 
-`eventuary-conformance` is being rewired alongside the cursor reader
-refactor. The capability flag enum (`Capabilities`) still lives there;
-the reusable case suite is being rebuilt to compose `PartitionedReader`
-and `CheckpointReader` over each backend's source-cursor reader through
-a per-backend subscription factory. Until that lands, per-backend
-integration tests (`crates/eventuary-sqlite/tests`, etc.) cover the new
-behavior directly.
+`eventuary-conformance` is an internal workspace scaffold. The capability
+flag enum (`Capabilities`) still lives there; the reusable case suite is
+being rebuilt to compose `PartitionedReader` and `CheckpointReader` over
+each backend's source-cursor reader through a per-backend subscription
+factory. Until that lands, per-backend integration tests
+(`crates/eventuary-sqlite/tests`, etc.) cover the new behavior directly.
 
 ## Backend Notes
 
 ### memory
 
-- `mpsc::channel` per writer/reader pair. Test-only — no persistence.
+- `mpsc::channel` per writer/reader pair. Test/dev — no durable event-log persistence.
 - `NoopAcker`; subscription filter applied in `poll_next`.
+- Store implementations: `MemoryMultiplexerStore`, `MemoryBufferStore`, `MemoryDedupeStore`, `MemoryWatermarkStore`, and `MemoryCheckpointStore`.
 
 ### sqlite
 
@@ -455,6 +456,8 @@ behavior directly.
   `"global"` or `"partition:{count}:{id}"`).
 - `SqliteDatabaseConfig`, `SqliteReaderConfig`, `SqliteWriterConfig`, and
   `SqliteCheckpointStoreConfig` all support validated relation names.
+- Store implementations: `SqliteMultiplexerStore`, `SqliteBufferStore`,
+  `SqliteDedupeStore`, `SqliteWatermarkStore`, and `SqliteCheckpointStore`.
 - Polling reader: `batch_size` + `poll_interval`.
 
 ### postgres
@@ -472,6 +475,8 @@ behavior directly.
 - `PgDatabaseConfig`, `PgReaderConfig`, `PgWriterConfig`, and
   `PgCheckpointStoreConfig` all support validated simple or
   schema-qualified relation names.
+- Store implementations: `PgMultiplexerStore`, `PgBufferStore`,
+  `PgDedupeStore`, `PgWatermarkStore`, and `PgCheckpointStore`.
 - Integration tests use `testcontainers` with `postgres:18-alpine`.
 
 ### sqs
@@ -595,7 +600,7 @@ adds clarity.
 
 ### Re-export Layering
 
-Each crate exposes only its **base abstractions** and **cross-cutting value types** at the top-level public path. **Implementations**, wrappers, and their auxiliary types are accessed via the submodule path that owns them.
+Each crate exposes its base abstractions and cross-cutting value types at the top-level public path. Implementations, wrappers, and auxiliary types keep canonical module paths that identify their role; backend crates may add explicit convenience re-exports from `lib.rs` for frequently used stores or in-memory types.
 
 **`eventuary-core`:**
 
@@ -612,9 +617,7 @@ Each crate exposes only its **base abstractions** and **cross-cutting value type
 |---|---|---|
 | All implementation and auxiliary types | submodule path | `eventuary_postgres::reader::PgReader`, `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::database::SqliteDatabaseConfig` |
 
-Backend `lib.rs` files contain only `pub mod` declarations. No flat re-exports. The submodule name (`reader`, `writer`, `checkpoint_store`, `database`, `relation`, `flusher`, `reader_config`) tells the user what role the type plays.
-
-This makes the rule uniform across all crates: implementations and their auxiliaries always live at `<crate>::<module>::*`. Only `eventuary-core` keeps flat re-exports — for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and for IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
+Backend `lib.rs` files declare role modules (`reader`, `writer`, `checkpoint_store`, `database`, `relation`, `flusher`, `reader_config`, and store modules). Module paths remain the canonical learning surface, even when a backend crate also re-exports selected public store types at its root for convenience. `eventuary-core` keeps flat re-exports for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
 
 ### Import Paths Mental Model
 
@@ -637,12 +640,14 @@ use eventuary::io::stream::{BatchedStream, SpawnedStream};
 use eventuary::io::acker::{OnceAcker, NoopAcker, BatchedAcker};
 use eventuary::io::filter::{EventFilter, AllFilter, AndFilter};
 
-// Backend types — feature-gated, all at submodule path
+// Backend types — feature-gated, canonical module paths
 use eventuary::postgres::reader::{PgReader, PgCursor, PgSubscription, PgReaderConfig};
 use eventuary::postgres::writer::{PgWriter, PgWriterConfig};
 use eventuary::postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
 use eventuary::postgres::relation::PgRelationName;
+use eventuary::postgres::multiplexer_store::PgMultiplexerStore;
+use eventuary::memory::multiplexer_store::MemoryMultiplexerStore;
 ```
 
 **Through sub-crates (backend authoring or alternative facades):**
@@ -664,7 +669,7 @@ The two routes are interchangeable — the umbrella does `pub use eventuary_core
 | `<crate>::Type` | Domain value | `Event`, `Topic`, `Payload` |
 | `<crate>::io::Type` | IO base abstraction | `Reader`, `Acker`, `Message` |
 | `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::handler::RetryPolicy` |
-| `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor` |
+| `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor`, `memory::multiplexer_store::MemoryMultiplexerStore` |
 
 No `prelude` module is provided by design — importing through these paths is the learning surface for the structure. Once the layering is understood, users may write personal preludes in their own crates.
 
@@ -727,11 +732,11 @@ Worth knowing when changing the codebase:
   sub-crates), but real multi-crate workspace for dev (per-crate test
   boundaries, smaller incremental builds, isolated dep graphs) plus a
   single import path for typical users.
-- **Conformance suite is a sibling sub-crate, not under the umbrella.**
-  `eventuary-conformance` depends only on `eventuary-core` and is
-  intended as a `[dev-dependencies]` entry for backend authors. Keeping
-  it out of the umbrella avoids dragging test-suite types into every
-  consumer's dep graph.
+- **Conformance scaffold is internal and not under the umbrella.**
+  `eventuary-conformance` depends only on `eventuary-core`, is not
+  published to crates.io, and currently carries shared capability flags
+  while reusable cases are rebuilt. Keeping it out of the umbrella avoids
+  dragging test-suite types into every consumer's dep graph.
 - **`Payload` is backed by `bytes::Bytes` internally.** Public API is
   unchanged in shape (`from_json`, `from_string`, `data() -> &[u8]`,
   `size()`); the raw-bytes constructors accept `impl Into<Bytes>` so
@@ -811,8 +816,7 @@ fmt + clippy + unit tests, then publishes in three tiers:
 
 1. `eventuary-core` (waits 60s for crates.io index to settle).
 2. `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
-   `eventuary-sqs`, `eventuary-kafka`, `eventuary-conformance` — all
-   depend on `eventuary-core` only.
+   `eventuary-sqs`, `eventuary-kafka` — all depend on `eventuary-core` only.
 3. `eventuary` umbrella — depends on `eventuary-core` plus every backend
    crate via optional features.
 

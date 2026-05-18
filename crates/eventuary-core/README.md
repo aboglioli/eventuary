@@ -1,4 +1,4 @@
-# eventuary
+# eventuary-core
 
 Core event toolkit for logs, queues, streams, routing, replay, and acknowledgements.
 
