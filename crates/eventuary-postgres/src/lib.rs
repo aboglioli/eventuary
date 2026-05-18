@@ -7,9 +7,23 @@
 //!
 //! Polling reader (no LISTEN/NOTIFY in this version). ack advances the
 //! checkpoint with a backwards-move guard, nack leaves it unchanged.
+//!
+//! Also ships postgres-backed implementations of the IO store traits:
+//! - [`PgMultiplexerStore`]
+//! - [`PgBufferStore`]
+//! - [`PgDedupeStore`]
+//! - [`PgCheckpointStore`]
 
+pub mod buffer_store;
 pub mod checkpoint_store;
 pub mod database;
+pub mod dedupe_store;
+pub mod multiplexer_store;
 pub mod reader;
 pub mod relation;
 pub mod writer;
+
+pub use buffer_store::{PgBufferStore, PgBufferStoreConfig, PgBufferStoreId};
+pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
+pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
