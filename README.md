@@ -629,8 +629,8 @@ build dependencies such as `cmake`, OpenSSL, libcurl, SASL, zlib, and
 
 ## Releasing
 
-Publishing to crates.io is gated on a GitHub release, a version tag, or a manual
-workflow dispatch. Pushes to `main` do not publish.
+Publishing to crates.io is gated on a published GitHub Release or a manual
+workflow dispatch. Pushes to `main` and tag pushes do not publish.
 
 The publish workflow verifies that the tag matches `workspace.package.version`,
 runs formatting, clippy, and unit tests, then publishes in dependency order:
@@ -644,10 +644,9 @@ Release procedure:
 ```bash
 # 1. Bump workspace.package.version in Cargo.toml.
 # 2. Commit and push the version bump.
-# 3. Tag the release.
-git tag v0.1.0-alpha.1
-git push origin v0.1.0-alpha.1
-# 4. The publish workflow runs automatically.
+# 3. Create and publish a GitHub Release targeting main.
+#    Use tag v0.1.0-alpha.1 and title v0.1.0-alpha.1.
+# 4. The publish workflow runs automatically from the release event.
 ```
 
 A `CARGO_REGISTRY_TOKEN` repository secret is required for publishing.
