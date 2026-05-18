@@ -804,12 +804,14 @@ Worth knowing when changing the codebase:
 
 ## Releasing
 
-Publishing is gated on a GitHub release / version tag. The
+Publishing is gated on a published GitHub Release. The
 `.github/workflows/publish.yml` workflow runs only when:
 
 1. A GitHub Release is published, or
-2. A `vX.Y.Z` (or `vX.Y.Z-prerelease`) tag is pushed, or
-3. A maintainer triggers `workflow_dispatch`.
+2. A maintainer triggers `workflow_dispatch`.
+
+Tag pushes do not publish; this avoids duplicate publish runs when GitHub
+creates a tag as part of publishing a release.
 
 The workflow verifies the tag matches `workspace.package.version`, runs
 fmt + clippy + unit tests, then publishes in three tiers:
@@ -833,10 +835,9 @@ to [trusted publishing] is a future improvement.
 ```bash
 # 1. Bump workspace.package.version in the root Cargo.toml
 # 2. Commit + push (maintainer)
-# 3. Tag + push tag
-git tag v0.1.0-alpha.1
-git push origin v0.1.0-alpha.1
-# 4. Publish workflow runs automatically.
+# 3. Create and publish a GitHub Release targeting main.
+#    Use tag v0.1.0-alpha.1 and title v0.1.0-alpha.1.
+# 4. Publish workflow runs automatically from the release event.
 ```
 
 [trusted publishing]: https://crates.io/docs/trusted-publishing
