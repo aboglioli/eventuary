@@ -312,7 +312,7 @@ mod tests {
 
         async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id>>> {
             let state = self.state.lock().unwrap();
-            Ok(state
+            let mut entries: Vec<BufferEntry<C, Self::Id>> = state
                 .entries
                 .iter()
                 .map(|(id, (e, c))| BufferEntry {
@@ -320,7 +320,9 @@ mod tests {
                     event: e.clone(),
                     cursor: c.clone(),
                 })
-                .collect())
+                .collect();
+            entries.sort_by_key(|e| e.id.0);
+            Ok(entries)
         }
 
         async fn ack(&self, id: &Self::Id) -> Result<()> {

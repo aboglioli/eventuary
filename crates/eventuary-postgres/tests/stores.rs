@@ -3,13 +3,15 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
+use chrono::Utc;
+
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore, SubscriberId};
-use eventuary_core::io::reader::{BufferStore, DedupeStore};
+use eventuary_core::io::reader::{BufferStore, DedupeStore, WatermarkStore};
 use eventuary_core::{Event, EventId, Payload};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::{
     PgBufferStore, PgBufferStoreConfig, PgDedupeStore, PgDedupeStoreConfig, PgMultiplexerStore,
-    PgMultiplexerStoreConfig,
+    PgMultiplexerStoreConfig, PgWatermarkStore, PgWatermarkStoreConfig,
 };
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
@@ -131,4 +133,38 @@ async fn pg_buffer_store_pending_orders_by_id() {
     assert_eq!(pending[0].id, id1);
     assert_eq!(pending[1].id, id2);
     assert_eq!(pending[2].id, id3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_watermark_store_save_and_load() {
+    let (_c, pool) = start_postgres().await;
+    let store = PgWatermarkStore::new(pool, PgWatermarkStoreConfig::default());
+    assert!(store.load_watermark("k").await.unwrap().is_none());
+
+    let now = Utc::now();
+    store.save_watermark("k", now).await.unwrap();
+    let loaded = store.load_watermark("k").await.unwrap().unwrap();
+    assert_eq!(loaded.timestamp_millis(), now.timestamp_millis());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_watermark_store_save_overwrites() {
+    let (_c, pool) = start_postgres().await;
+    let store = PgWatermarkStore::new(pool, PgWatermarkStoreConfig::default());
+    let t1 = Utc::now();
+    let t2 = t1 + chrono::Duration::seconds(60);
+    store.save_watermark("k", t1).await.unwrap();
+    store.save_watermark("k", t2).await.unwrap();
+    let loaded = store.load_watermark("k").await.unwrap().unwrap();
+    assert_eq!(loaded.timestamp_millis(), t2.timestamp_millis());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_watermark_store_scopes_by_key() {
+    let (_c, pool) = start_postgres().await;
+    let store = PgWatermarkStore::new(pool, PgWatermarkStoreConfig::default());
+    let now = Utc::now();
+    store.save_watermark("a", now).await.unwrap();
+    assert!(store.load_watermark("a").await.unwrap().is_some());
+    assert!(store.load_watermark("b").await.unwrap().is_none());
 }

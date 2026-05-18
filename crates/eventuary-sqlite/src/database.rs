@@ -43,6 +43,7 @@ pub struct SqliteDatabaseConfig {
     pub multiplexer_completions_relation: SqliteRelationName,
     pub dedupe_keys_relation: SqliteRelationName,
     pub buffer_entries_relation: SqliteRelationName,
+    pub watermarks_relation: SqliteRelationName,
 }
 
 impl Default for SqliteDatabaseConfig {
@@ -57,6 +58,8 @@ impl Default for SqliteDatabaseConfig {
                 .expect("default dedupe relation"),
             buffer_entries_relation: SqliteRelationName::new("buffer_entries")
                 .expect("default buffer relation"),
+            watermarks_relation: SqliteRelationName::new("watermarks")
+                .expect("default watermarks relation"),
         }
     }
 }
@@ -72,6 +75,7 @@ pub fn render_migration_sql(migration: &Migration, config: &SqliteDatabaseConfig
         )
         .replace("{dedupe_keys}", &config.dedupe_keys_relation.render())
         .replace("{buffer_entries}", &config.buffer_entries_relation.render())
+        .replace("{watermarks}", &config.watermarks_relation.render())
 }
 
 pub fn render_schema_sql(config: &SqliteDatabaseConfig) -> String {

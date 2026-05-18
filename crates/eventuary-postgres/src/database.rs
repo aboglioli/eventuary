@@ -39,6 +39,7 @@ pub struct PgDatabaseConfig {
     pub multiplexer_completions_relation: PgRelationName,
     pub dedupe_keys_relation: PgRelationName,
     pub buffer_entries_relation: PgRelationName,
+    pub watermarks_relation: PgRelationName,
     pub max_connections: u32,
 }
 
@@ -54,6 +55,8 @@ impl Default for PgDatabaseConfig {
                 .expect("default dedupe relation"),
             buffer_entries_relation: PgRelationName::new("buffer_entries")
                 .expect("default buffer relation"),
+            watermarks_relation: PgRelationName::new("watermarks")
+                .expect("default watermarks relation"),
             max_connections: 20,
         }
     }
@@ -70,6 +73,7 @@ impl PgDatabaseConfig {
             ))?,
             dedupe_keys_relation: PgRelationName::new(format!("{schema}.dedupe_keys"))?,
             buffer_entries_relation: PgRelationName::new(format!("{schema}.buffer_entries"))?,
+            watermarks_relation: PgRelationName::new(format!("{schema}.watermarks"))?,
             max_connections: 20,
         })
     }
@@ -86,6 +90,7 @@ pub fn render_migration_sql(migration: &Migration, config: &PgDatabaseConfig) ->
         )
         .replace("{dedupe_keys}", &config.dedupe_keys_relation.render())
         .replace("{buffer_entries}", &config.buffer_entries_relation.render())
+        .replace("{watermarks}", &config.watermarks_relation.render())
 }
 
 pub fn render_schema_sql(config: &PgDatabaseConfig) -> String {
@@ -97,6 +102,7 @@ pub fn render_schema_sql(config: &PgDatabaseConfig) -> String {
         &config.multiplexer_completions_relation,
         &config.dedupe_keys_relation,
         &config.buffer_entries_relation,
+        &config.watermarks_relation,
     ] {
         if let Some(schema) = relation.schema()
             && seen.insert(schema)
@@ -182,6 +188,7 @@ async fn apply_migrations(pool: &PgPool, config: &PgDatabaseConfig) -> Result<()
         config.multiplexer_completions_relation.schema(),
         config.dedupe_keys_relation.schema(),
         config.buffer_entries_relation.schema(),
+        config.watermarks_relation.schema(),
     ]
     .into_iter()
     .flatten()

@@ -18,3 +18,9 @@ CREATE TABLE IF NOT EXISTS {buffer_entries} (
 );
 
 CREATE INDEX IF NOT EXISTS idx_buffer_entries_pushed_at ON {buffer_entries} (pushed_at);
+
+CREATE TABLE IF NOT EXISTS {watermarks} (
+    key        TEXT        NOT NULL PRIMARY KEY,
+    ts         TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

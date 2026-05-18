@@ -83,7 +83,7 @@ where
 
     async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id>>> {
         let state = self.state.lock().unwrap();
-        let entries: Vec<BufferEntry<C, Self::Id>> = state
+        let mut entries: Vec<BufferEntry<C, Self::Id>> = state
             .entries
             .iter()
             .map(|(id, e)| BufferEntry {
@@ -92,6 +92,7 @@ where
                 cursor: e.cursor.clone(),
             })
             .collect();
+        entries.sort_by_key(|e| e.id.0);
         Ok(entries)
     }
 

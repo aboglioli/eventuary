@@ -13,6 +13,7 @@
 //! - [`PgBufferStore`]
 //! - [`PgDedupeStore`]
 //! - [`PgCheckpointStore`]
+//! - [`PgWatermarkStore`]
 
 pub mod buffer_store;
 pub mod checkpoint_store;
@@ -21,9 +22,11 @@ pub mod dedupe_store;
 pub mod multiplexer_store;
 pub mod reader;
 pub mod relation;
+pub mod watermark_store;
 pub mod writer;
 
 pub use buffer_store::{PgBufferStore, PgBufferStoreConfig, PgBufferStoreId};
 pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
 pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
+pub use watermark_store::{PgWatermarkStore, PgWatermarkStoreConfig};
