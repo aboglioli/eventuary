@@ -22,7 +22,7 @@
 //!   handlers or pair this with the dedupe wrapper.
 //! - Empty match set: governed by `NoMatchPolicy` (default `Ack`).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
@@ -30,7 +30,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::event::{Event, EventId};
@@ -103,86 +102,6 @@ impl MultiplexerStore for NoMultiplexerStore {
     }
 
     async fn mark_completed(&self, _: &MultiplexerKey) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct InMemoryStoreState {
-    set: HashSet<MultiplexerKey>,
-    order: VecDeque<MultiplexerKey>,
-}
-
-#[derive(Debug, Clone)]
-pub struct InMemoryMultiplexerStore {
-    state: Arc<Mutex<InMemoryStoreState>>,
-    capacity: Option<NonZeroUsize>,
-}
-
-impl Default for InMemoryMultiplexerStore {
-    fn default() -> Self {
-        Self::unbounded()
-    }
-}
-
-impl InMemoryMultiplexerStore {
-    pub fn unbounded() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(InMemoryStoreState {
-                set: HashSet::new(),
-                order: VecDeque::new(),
-            })),
-            capacity: None,
-        }
-    }
-
-    pub fn with_capacity(capacity: NonZeroUsize) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(InMemoryStoreState {
-                set: HashSet::new(),
-                order: VecDeque::new(),
-            })),
-            capacity: Some(capacity),
-        }
-    }
-
-    pub async fn len(&self) -> usize {
-        self.state.lock().await.set.len()
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.state.lock().await.set.is_empty()
-    }
-
-    pub async fn clear(&self) {
-        let mut state = self.state.lock().await;
-        state.set.clear();
-        state.order.clear();
-    }
-}
-
-impl MultiplexerStore for InMemoryMultiplexerStore {
-    async fn is_completed(&self, key: &MultiplexerKey) -> Result<bool> {
-        Ok(self.state.lock().await.set.contains(key))
-    }
-
-    /// Bounded variant evicts in **FIFO insertion order** when capacity
-    /// is exceeded. Re-marking an already-completed key is a no-op and
-    /// does not refresh recency.
-    async fn mark_completed(&self, key: &MultiplexerKey) -> Result<()> {
-        let mut state = self.state.lock().await;
-        if state.set.insert(key.clone()) {
-            state.order.push_back(key.clone());
-            if let Some(cap) = self.capacity {
-                while state.set.len() > cap.get() {
-                    if let Some(oldest) = state.order.pop_front() {
-                        state.set.remove(&oldest);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -464,46 +383,20 @@ mod tests {
         assert!(!store.is_completed(&key).await.unwrap());
     }
 
-    #[tokio::test]
-    async fn in_memory_store_records_completion() {
-        let store = InMemoryMultiplexerStore::unbounded();
-        let key = MultiplexerKey::new(EventId::new(), SubscriberId::new("audit").unwrap());
-
-        assert!(!store.is_completed(&key).await.unwrap());
-        store.mark_completed(&key).await.unwrap();
-        assert!(store.is_completed(&key).await.unwrap());
-        assert_eq!(store.len().await, 1);
+    #[derive(Clone, Default)]
+    struct TestMultiplexerStore {
+        completed: Arc<std::sync::Mutex<HashSet<MultiplexerKey>>>,
     }
 
-    #[tokio::test]
-    async fn in_memory_store_evicts_oldest_when_capacity_exceeded() {
-        let store = InMemoryMultiplexerStore::with_capacity(NonZeroUsize::new(2).unwrap());
-        let k1 = MultiplexerKey::new(EventId::new(), SubscriberId::new("a").unwrap());
-        let k2 = MultiplexerKey::new(EventId::new(), SubscriberId::new("b").unwrap());
-        let k3 = MultiplexerKey::new(EventId::new(), SubscriberId::new("c").unwrap());
-        store.mark_completed(&k1).await.unwrap();
-        store.mark_completed(&k2).await.unwrap();
-        store.mark_completed(&k3).await.unwrap();
+    impl MultiplexerStore for TestMultiplexerStore {
+        async fn is_completed(&self, key: &MultiplexerKey) -> Result<bool> {
+            Ok(self.completed.lock().unwrap().contains(key))
+        }
 
-        assert_eq!(store.len().await, 2);
-        assert!(!store.is_completed(&k1).await.unwrap());
-        assert!(store.is_completed(&k2).await.unwrap());
-        assert!(store.is_completed(&k3).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn in_memory_store_clear_resets_state() {
-        let store = InMemoryMultiplexerStore::unbounded();
-        store
-            .mark_completed(&MultiplexerKey::new(
-                EventId::new(),
-                SubscriberId::new("a").unwrap(),
-            ))
-            .await
-            .unwrap();
-        assert!(!store.is_empty().await);
-        store.clear().await;
-        assert!(store.is_empty().await);
+        async fn mark_completed(&self, key: &MultiplexerKey) -> Result<()> {
+            self.completed.lock().unwrap().insert(key.clone());
+            Ok(())
+        }
     }
 
     struct CountingHandler {
@@ -695,7 +588,7 @@ mod tests {
                 },
             )
             .unwrap()
-            .store(InMemoryMultiplexerStore::unbounded())
+            .store(TestMultiplexerStore::default())
             .build()
             .unwrap();
         let event = event();
@@ -722,7 +615,7 @@ mod tests {
             .unwrap()
             .route("failing", EventFilter::default(), FailingHandler)
             .unwrap()
-            .store(InMemoryMultiplexerStore::unbounded())
+            .store(TestMultiplexerStore::default())
             .build()
             .unwrap();
         let event = event();

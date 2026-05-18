@@ -22,10 +22,9 @@
 //! - Store push fails after the inner reader produced an item: error
 //!   propagates to the stream, the inner ack is not invoked, source
 //!   redelivers on restart.
-//! - `BufferStore::nack` is store-defined; for `InMemoryBufferStore`
+//! - `BufferStore::nack` is store-defined; for the in-memory backend
 //!   it is a no-op (entry remains in `pending`).
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -62,11 +61,6 @@ pub trait BufferStore<C>: Clone + Send + Sync + 'static {
     fn nack(&self, id: &Self::Id) -> impl Future<Output = Result<()>> + Send;
 }
 
-#[derive(Clone)]
-pub struct InMemoryBufferStore<C> {
-    state: Arc<Mutex<InMemoryState<C>>>,
-}
-
 pub struct BufferedReaderConfig {
     pub max_pending: usize,
 }
@@ -74,93 +68,6 @@ pub struct BufferedReaderConfig {
 impl Default for BufferedReaderConfig {
     fn default() -> Self {
         Self { max_pending: 1024 }
-    }
-}
-
-struct InMemoryState<C> {
-    entries: HashMap<InMemoryBufferStoreId, InMemoryEntry<C>>,
-    next_id: InMemoryBufferStoreId,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct InMemoryBufferStoreId(u64);
-
-struct InMemoryEntry<C> {
-    event: Event,
-    cursor: C,
-}
-
-impl<C> InMemoryBufferStore<C>
-where
-    C: Clone + Send + Sync + 'static,
-{
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(InMemoryState {
-                entries: HashMap::new(),
-                next_id: InMemoryBufferStoreId(0),
-            })),
-        }
-    }
-
-    pub fn pending_count(&self) -> usize {
-        self.state.lock().unwrap().entries.len()
-    }
-}
-
-impl<C> Default for InMemoryBufferStore<C>
-where
-    C: Clone + Send + Sync + 'static,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<C> BufferStore<C> for InMemoryBufferStore<C>
-where
-    C: Clone + Send + Sync + 'static,
-{
-    type Id = InMemoryBufferStoreId;
-
-    async fn push(&self, event: &Event, cursor: &C) -> Result<Self::Id> {
-        let mut state = self.state.lock().unwrap();
-        let id = state.next_id;
-        state.next_id = InMemoryBufferStoreId(
-            id.0.checked_add(1)
-                .expect("buffer store id space exhausted"),
-        );
-        state.entries.insert(
-            id,
-            InMemoryEntry {
-                event: event.clone(),
-                cursor: cursor.clone(),
-            },
-        );
-        Ok(id)
-    }
-
-    async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id>>> {
-        let state = self.state.lock().unwrap();
-        let entries: Vec<BufferEntry<C, Self::Id>> = state
-            .entries
-            .iter()
-            .map(|(id, e)| BufferEntry {
-                id: *id,
-                event: e.event.clone(),
-                cursor: e.cursor.clone(),
-            })
-            .collect();
-        Ok(entries)
-    }
-
-    async fn ack(&self, id: &Self::Id) -> Result<()> {
-        self.state.lock().unwrap().entries.remove(id);
-        Ok(())
-    }
-
-    async fn nack(&self, _id: &Self::Id) -> Result<()> {
-        Ok(())
     }
 }
 
@@ -342,6 +249,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -363,64 +271,66 @@ mod tests {
             .expect("valid event")
     }
 
-    fn ev_basic() -> Event {
-        Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap()
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+    struct TestId(u64);
+
+    struct TestState<C> {
+        entries: HashMap<TestId, (Event, C)>,
+        next_id: TestId,
     }
 
-    #[tokio::test]
-    async fn store_push_returns_incrementing_ids() {
-        let store = InMemoryBufferStore::<()>::new();
-        let id1 = store.push(&ev_basic(), &()).await.unwrap();
-        let id2 = store.push(&ev_basic(), &()).await.unwrap();
-        assert!(id1.0 < id2.0);
+    #[derive(Clone)]
+    struct TestBufferStore<C> {
+        state: Arc<Mutex<TestState<C>>>,
     }
 
-    #[tokio::test]
-    async fn pending_returns_persisted_entries() {
-        let store = InMemoryBufferStore::<()>::new();
-        store.push(&ev_basic(), &()).await.unwrap();
-        let entries = store.pending().await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id.0, 0);
+    impl<C: Clone + Send + Sync + 'static> TestBufferStore<C> {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(TestState {
+                    entries: HashMap::new(),
+                    next_id: TestId(0),
+                })),
+            }
+        }
+
+        fn pending_count(&self) -> usize {
+            self.state.lock().unwrap().entries.len()
+        }
     }
 
-    #[tokio::test]
-    async fn ack_removes_from_pending() {
-        let store = InMemoryBufferStore::<()>::new();
-        let id = store.push(&ev_basic(), &()).await.unwrap();
-        store.ack(&id).await.unwrap();
-        let entries = store.pending().await.unwrap();
-        assert!(entries.is_empty());
-    }
+    impl<C: Clone + Send + Sync + 'static> BufferStore<C> for TestBufferStore<C> {
+        type Id = TestId;
 
-    #[tokio::test]
-    async fn nack_keeps_entry_pending() {
-        let store = InMemoryBufferStore::<()>::new();
-        let id = store.push(&ev_basic(), &()).await.unwrap();
-        store.nack(&id).await.unwrap();
-        let entries = store.pending().await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, id);
-    }
+        async fn push(&self, event: &Event, cursor: &C) -> Result<Self::Id> {
+            let mut state = self.state.lock().unwrap();
+            let id = state.next_id;
+            state.next_id = TestId(id.0 + 1);
+            state.entries.insert(id, (event.clone(), cursor.clone()));
+            Ok(id)
+        }
 
-    #[tokio::test]
-    async fn pending_is_idempotent_snapshot() {
-        let store = InMemoryBufferStore::<()>::new();
-        store.push(&ev_basic(), &()).await.unwrap();
-        let first = store.pending().await.unwrap();
-        let second = store.pending().await.unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(second.len(), 1);
-    }
+        async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id>>> {
+            let state = self.state.lock().unwrap();
+            Ok(state
+                .entries
+                .iter()
+                .map(|(id, (e, c))| BufferEntry {
+                    id: *id,
+                    event: e.clone(),
+                    cursor: c.clone(),
+                })
+                .collect())
+        }
 
-    #[tokio::test]
-    async fn pending_count_reflects_drainable_entries() {
-        let store = InMemoryBufferStore::<()>::new();
-        assert_eq!(store.pending_count(), 0);
-        let id = store.push(&ev_basic(), &()).await.unwrap();
-        assert_eq!(store.pending_count(), 1);
-        store.ack(&id).await.unwrap();
-        assert_eq!(store.pending_count(), 0);
+        async fn ack(&self, id: &Self::Id) -> Result<()> {
+            self.state.lock().unwrap().entries.remove(id);
+            Ok(())
+        }
+
+        async fn nack(&self, _id: &Self::Id) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -449,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn delivers_events_and_acks_store() {
         let events: Vec<Event> = (0..3).map(|i| ev(&format!("k{i}"))).collect();
-        let store = InMemoryBufferStore::<TestCursor>::new();
+        let store = TestBufferStore::<TestCursor>::new();
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
@@ -472,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn drain_on_restart_replays_unacked_events() {
         let events: Vec<Event> = (0..3).map(|i| ev(&format!("k{i}"))).collect();
-        let store = InMemoryBufferStore::<TestCursor>::new();
+        let store = TestBufferStore::<TestCursor>::new();
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
@@ -568,7 +478,7 @@ mod tests {
         }
 
         let acker = CountingAcker::default();
-        let store = InMemoryBufferStore::<TestCursor>::new();
+        let store = TestBufferStore::<TestCursor>::new();
         let reader = CountingReader {
             events: Mutex::new(Some(vec![ev("k0")])),
             acker: acker.clone(),
@@ -605,7 +515,7 @@ mod tests {
             }
         }
 
-        let store = InMemoryBufferStore::<TestCursor>::new();
+        let store = TestBufferStore::<TestCursor>::new();
         let reader = FailingReader;
         let buffered = BufferedReader::new(reader, store);
         let result = buffered.read(()).await;
@@ -615,7 +525,7 @@ mod tests {
     #[tokio::test]
     async fn backpressure_blocks_intake_when_buffer_full() {
         let events: Vec<Event> = (0..5).map(|i| ev(&format!("k{i}"))).collect();
-        let store = InMemoryBufferStore::<TestCursor>::new();
+        let store = TestBufferStore::<TestCursor>::new();
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };

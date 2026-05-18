@@ -1,8 +1,5 @@
-use std::collections::{HashSet, VecDeque};
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
@@ -124,102 +121,6 @@ impl<A: Acker, S: DedupeStore> Acker for DedupeAcker<A, S> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct InMemoryDedupeStore {
-    state: Arc<Mutex<DedupeState>>,
-    capacity: Option<NonZeroUsize>,
-}
-
-#[derive(Debug, Default)]
-struct DedupeState {
-    set: HashSet<String>,
-    order: VecDeque<String>,
-}
-
-impl Default for InMemoryDedupeStore {
-    fn default() -> Self {
-        Self::unbounded()
-    }
-}
-
-impl InMemoryDedupeStore {
-    pub fn unbounded() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(DedupeState::default())),
-            capacity: None,
-        }
-    }
-
-    pub fn with_capacity(capacity: NonZeroUsize) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(DedupeState::default())),
-            capacity: Some(capacity),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.state.lock().unwrap().set.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.state.lock().unwrap().set.is_empty()
-    }
-
-    pub fn clear(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.set.clear();
-        state.order.clear();
-    }
-}
-
-impl DedupeStore for InMemoryDedupeStore {
-    async fn exists(&self, event: &Event) -> Result<bool> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .set
-            .contains(&event.id().to_string()))
-    }
-
-    async fn mark_processed(&self, event: &Event) -> Result<()> {
-        let key = event.id().to_string();
-        let mut state = self.state.lock().unwrap();
-        if state.set.insert(key.clone()) {
-            state.order.push_back(key);
-            if let Some(cap) = self.capacity {
-                while state.set.len() > cap.get() {
-                    if let Some(oldest) = state.order.pop_front() {
-                        state.set.remove(&oldest);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn mark_if_new(&self, event: &Event) -> Result<bool> {
-        let key = event.id().to_string();
-        let mut state = self.state.lock().unwrap();
-        if !state.set.insert(key.clone()) {
-            return Ok(false);
-        }
-        state.order.push_back(key);
-        if let Some(cap) = self.capacity {
-            while state.set.len() > cap.get() {
-                if let Some(oldest) = state.order.pop_front() {
-                    state.set.remove(&oldest);
-                } else {
-                    break;
-                }
-            }
-        }
-        Ok(true)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
@@ -259,10 +160,34 @@ mod tests {
         Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
     }
 
+    use std::collections::HashSet;
+
+    #[derive(Debug, Clone, Default)]
+    struct TestDedupeStore {
+        seen: Arc<Mutex<HashSet<String>>>,
+    }
+
+    impl TestDedupeStore {
+        fn len(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+    }
+
+    impl DedupeStore for TestDedupeStore {
+        async fn exists(&self, event: &Event) -> Result<bool> {
+            Ok(self.seen.lock().unwrap().contains(&event.id().to_string()))
+        }
+
+        async fn mark_processed(&self, event: &Event) -> Result<()> {
+            self.seen.lock().unwrap().insert(event.id().to_string());
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn nack_before_mark_allows_redelivery() {
         let e = Event::create("org", "/x", "t", Payload::from_string("p")).unwrap();
-        let store = InMemoryDedupeStore::unbounded();
+        let store = TestDedupeStore::default();
         let reader = VecReader {
             events: Mutex::new(Some(vec![e.clone()])),
         };
@@ -295,7 +220,7 @@ mod tests {
     async fn dedup_skips_already_marked_events() {
         let e1 = ev("t1");
         let e2 = ev("t2");
-        let store = InMemoryDedupeStore::unbounded();
+        let store = TestDedupeStore::default();
         store.mark_processed(&e1).await.unwrap();
 
         let reader = VecReader {
@@ -313,36 +238,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capped_store_evicts_oldest() {
-        let store = InMemoryDedupeStore::with_capacity(NonZeroUsize::new(2).unwrap());
-        let e1 = ev("t1");
-        let e2 = ev("t2");
-        let e3 = ev("t3");
-        store.mark_processed(&e1).await.unwrap();
-        store.mark_processed(&e2).await.unwrap();
-        store.mark_processed(&e3).await.unwrap();
-        assert_eq!(store.len(), 2);
-        assert!(!store.exists(&e1).await.unwrap());
-        assert!(store.exists(&e2).await.unwrap());
-        assert!(store.exists(&e3).await.unwrap());
-    }
-
-    #[tokio::test]
     async fn mark_if_new_default_returns_correct_status() {
-        let store = InMemoryDedupeStore::unbounded();
+        let store = TestDedupeStore::default();
         let e = ev("t");
         assert!(store.mark_if_new(&e).await.unwrap());
         assert!(!store.mark_if_new(&e).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn clear_resets_store() {
-        let store = InMemoryDedupeStore::unbounded();
-        store.mark_processed(&ev("t1")).await.unwrap();
-        store.mark_processed(&ev("t2")).await.unwrap();
-        assert_eq!(store.len(), 2);
-        store.clear();
-        assert_eq!(store.len(), 0);
-        assert!(store.is_empty());
     }
 }
