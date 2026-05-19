@@ -145,4 +145,22 @@ mod tests {
         assert_eq!(store.load_scope(&scope()).await.unwrap().len(), 1);
         assert_eq!(store.load_scope(&other_scope).await.unwrap().len(), 1);
     }
+
+    #[tokio::test]
+    async fn stores_encoded_cursor() {
+        use eventuary_core::io::{CursorKind, CursorOrder, EncodedCursor};
+
+        let store: MemoryCheckpointStore<EncodedCursor> = MemoryCheckpointStore::new();
+        let k = key(CursorId::global());
+        let cursor = EncodedCursor::from_json(
+            CursorId::global(),
+            CursorKind::new("eventuary.test.cursor.v1").unwrap(),
+            CursorOrder::from_i64(42),
+            &serde_json::json!({ "sequence": 42 }),
+        )
+        .unwrap();
+
+        store.commit(&k, cursor.clone()).await.unwrap();
+        assert_eq!(store.load(&k).await.unwrap(), Some(cursor));
+    }
 }

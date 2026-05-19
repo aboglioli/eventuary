@@ -186,12 +186,39 @@ impl<C> Clone for BatchCursor<C> {
     }
 }
 
+impl<C: PartialEq> PartialEq for BatchCursor<C> {
+    fn eq(&self, other: &Self) -> bool {
+        *self.inner == *other.inner
+    }
+}
+
+impl<C: Eq> Eq for BatchCursor<C> {}
+
+impl<C: Ord> PartialOrd for BatchCursor<C> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<C: Ord> Ord for BatchCursor<C> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (*self.inner).cmp(&*other.inner)
+    }
+}
+
 impl<C: Cursor> Cursor for BatchCursor<C> {
     fn id(&self) -> CursorId {
         self.inner
             .first()
             .map(|c| c.id())
             .unwrap_or(CursorId::global())
+    }
+
+    fn order_key(&self) -> crate::io::CursorOrder {
+        self.inner
+            .last()
+            .map(|c| c.order_key())
+            .unwrap_or_else(crate::io::CursorOrder::min)
     }
 }
 

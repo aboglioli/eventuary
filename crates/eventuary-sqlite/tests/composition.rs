@@ -6,10 +6,12 @@ use tokio::time::timeout;
 use eventuary_core::io::ConsumerGroupId;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::reader::{
-    CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription, PartitionedCursor,
-    PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
+    CheckpointKey, CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription,
+    PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
-use eventuary_core::io::{Reader, StreamId, Writer};
+use eventuary_core::io::{
+    CursorId, CursorKind, CursorOrder, EncodedCursor, Reader, StreamId, Writer,
+};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
 use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::SqliteDatabase;
@@ -239,4 +241,27 @@ async fn partitioned_reader_tags_partition_on_cursor() {
         delivered += 1;
     }
     assert_eq!(delivered, 8);
+}
+
+#[tokio::test]
+async fn sqlite_checkpoint_store_persists_encoded_cursor() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    let store: SqliteCheckpointStore<EncodedCursor> =
+        SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+
+    let key = CheckpointKey::new(scope(), CursorId::global());
+    let cursor = EncodedCursor::from_json(
+        CursorId::global(),
+        CursorKind::new("eventuary.test.cursor.v1").unwrap(),
+        CursorOrder::from_u64(7),
+        &serde_json::json!({ "sequence": 7 }),
+    )
+    .unwrap();
+
+    store.commit(&key, cursor.clone()).await.unwrap();
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.kind().as_str(), "eventuary.test.cursor.v1");
+    assert_eq!(loaded.id_ref(), &CursorId::global());
+    assert_eq!(loaded.order(), &CursorOrder::from_u64(7));
+    assert_eq!(loaded, cursor);
 }

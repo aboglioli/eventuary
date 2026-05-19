@@ -36,7 +36,17 @@ impl PgCursor {
     }
 }
 
-impl Cursor for PgCursor {}
+impl Cursor for PgCursor {
+    fn order_key(&self) -> eventuary_core::io::CursorOrder {
+        eventuary_core::io::CursorOrder::from_i64(self.sequence)
+    }
+}
+
+impl PgCursor {
+    pub fn codec() -> Result<eventuary_core::io::JsonCursorCodec<Self>> {
+        eventuary_core::io::JsonCursorCodec::new("eventuary.postgres.pg_cursor.v1")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PgSubscription {
@@ -419,10 +429,34 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary_core::io::{Cursor, CursorId};
+    use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder};
 
     #[test]
     fn pg_cursor_id_is_global() {
         assert_eq!(PgCursor::new(42).id(), CursorId::global());
+    }
+
+    #[test]
+    fn pg_cursor_order_key_from_sequence() {
+        assert_eq!(PgCursor::new(42).order_key(), CursorOrder::from_i64(42));
+        assert!(PgCursor::new(9).order_key() < PgCursor::new(10).order_key());
+    }
+
+    #[test]
+    fn pg_cursor_codec_roundtrips() {
+        let codec = PgCursor::codec().unwrap();
+        let cursor = PgCursor::new(42);
+        let encoded = codec.encode(&cursor).unwrap();
+        assert_eq!(encoded.kind().as_str(), "eventuary.postgres.pg_cursor.v1");
+        assert_eq!(encoded.order(), &CursorOrder::from_i64(42));
+        assert_eq!(codec.decode(&encoded).unwrap(), cursor);
+    }
+
+    #[test]
+    fn pg_cursor_codec_preserves_typed_ord() {
+        let codec = PgCursor::codec().unwrap();
+        let lo = codec.encode(&PgCursor::new(9)).unwrap();
+        let hi = codec.encode(&PgCursor::new(10)).unwrap();
+        assert!(lo < hi);
     }
 }

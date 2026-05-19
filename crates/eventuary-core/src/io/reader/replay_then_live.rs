@@ -52,6 +52,7 @@ impl<RS, LS> ReplayThenLiveSubscription<RS, LS> {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ReplayLiveCursor<RC, LC> {
     Replay(RC),
     Live(LC),
@@ -60,8 +61,15 @@ pub enum ReplayLiveCursor<RC, LC> {
 impl<RC: Cursor, LC: Cursor> Cursor for ReplayLiveCursor<RC, LC> {
     fn id(&self) -> CursorId {
         match self {
-            Self::Replay(c) => c.id(),
-            Self::Live(c) => c.id(),
+            Self::Replay(c) => c.id().prefixed("replay").expect("valid replay cursor id"),
+            Self::Live(c) => c.id().prefixed("live").expect("valid live cursor id"),
+        }
+    }
+
+    fn order_key(&self) -> crate::io::CursorOrder {
+        match self {
+            Self::Replay(c) => c.order_key(),
+            Self::Live(c) => c.order_key(),
         }
     }
 }
@@ -218,7 +226,7 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
     struct TestCursor(u64);
 
     impl crate::io::Cursor for TestCursor {}
@@ -322,5 +330,21 @@ mod tests {
             .unwrap();
         assert!(matches!(m2.cursor(), ReplayLiveCursor::Live(_)));
         assert_eq!(m2.event().id(), live_only.id());
+    }
+
+    #[test]
+    fn replay_live_cursor_ids_are_prefixed() {
+        assert_eq!(
+            ReplayLiveCursor::<TestCursor, TestCursor>::Replay(TestCursor(1))
+                .id()
+                .as_str(),
+            "replay:global"
+        );
+        assert_eq!(
+            ReplayLiveCursor::<TestCursor, TestCursor>::Live(TestCursor(1))
+                .id()
+                .as_str(),
+            "live:global"
+        );
     }
 }

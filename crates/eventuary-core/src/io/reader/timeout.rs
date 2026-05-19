@@ -168,7 +168,7 @@ mod tests {
 
     type TestItems = Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor>>>>>;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
     struct TestCursor(u64);
 
     impl Cursor for TestCursor {}

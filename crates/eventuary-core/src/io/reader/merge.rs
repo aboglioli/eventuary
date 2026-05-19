@@ -83,7 +83,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MergeCursor<C1, C2> {
     Left(C1),
     Right(C2),
@@ -92,8 +92,15 @@ pub enum MergeCursor<C1, C2> {
 impl<C1: Cursor, C2: Cursor> Cursor for MergeCursor<C1, C2> {
     fn id(&self) -> CursorId {
         match self {
-            Self::Left(c) => c.id(),
-            Self::Right(c) => c.id(),
+            Self::Left(c) => c.id().prefixed("left").expect("valid left cursor id"),
+            Self::Right(c) => c.id().prefixed("right").expect("valid right cursor id"),
+        }
+    }
+
+    fn order_key(&self) -> crate::io::CursorOrder {
+        match self {
+            Self::Left(c) => c.order_key(),
+            Self::Right(c) => c.order_key(),
         }
     }
 }
@@ -132,7 +139,7 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
     struct TestCursor(u64);
 
     impl Cursor for TestCursor {}
@@ -209,10 +216,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_cursor_id_delegates_to_inner() {
+    async fn merge_cursor_ids_are_prefixed() {
         let left: MergeCursor<TestCursor, TestCursor> = MergeCursor::Left(TestCursor(1));
         let right: MergeCursor<TestCursor, TestCursor> = MergeCursor::Right(TestCursor(2));
-        assert_eq!(left.id(), TestCursor(1).id());
-        assert_eq!(right.id(), TestCursor(2).id());
+        assert_eq!(left.id().as_str(), "left:global");
+        assert_eq!(right.id().as_str(), "right:global");
+    }
+
+    #[tokio::test]
+    async fn merge_cursor_order_passes_through_active_side() {
+        let l: MergeCursor<TestCursor, TestCursor> = MergeCursor::Left(TestCursor(7));
+        assert_eq!(l.order_key(), TestCursor(7).order_key());
     }
 }

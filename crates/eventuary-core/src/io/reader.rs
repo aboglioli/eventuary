@@ -217,6 +217,7 @@ pub mod buffer;
 pub mod checkpoint;
 pub mod concurrency_limit;
 pub mod dedupe;
+pub mod encoded_cursor;
 pub mod filtered;
 pub mod inspect;
 pub mod map;
@@ -239,6 +240,7 @@ pub use checkpoint::{
 };
 pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
+pub use encoded_cursor::{EncodedCursorReader, EncodedCursorSubscription};
 pub use filtered::{FilteredReader, FilteredStream};
 pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
 pub use map::{MapReader, MapStream};
