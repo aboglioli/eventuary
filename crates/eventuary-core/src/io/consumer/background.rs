@@ -167,6 +167,7 @@ mod tests {
 
     use crate::event::Event;
     use crate::io::Message;
+    use crate::io::NoCursor;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
@@ -188,9 +189,8 @@ mod tests {
     impl Reader for VecReader {
         type Subscription = TestSub;
         type Acker = NoopAcker;
-        type Cursor = crate::io::NoCursor;
-        type Stream =
-            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, crate::io::NoCursor>>> + Send>>;
+        type Cursor = NoCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor>>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
             let events = self
@@ -202,7 +202,7 @@ mod tests {
             let stream = futures::stream::iter(
                 events
                     .into_iter()
-                    .map(|e| Ok(Message::new(e, NoopAcker, crate::io::NoCursor))),
+                    .map(|e| Ok(Message::new(e, NoopAcker, NoCursor))),
             );
             Ok(Box::pin(stream))
         }

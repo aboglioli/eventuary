@@ -76,6 +76,7 @@ mod tests {
     use futures::{Stream, StreamExt, stream};
 
     use super::*;
+    use crate::error::Error;
     use crate::event::Event;
     use crate::io::acker::NoopAcker;
     use crate::io::{Message, Reader};
@@ -142,9 +143,7 @@ mod tests {
     #[tokio::test]
     async fn map_reader_forwards_inner_errors() {
         let reader = VecReader {
-            items: Mutex::new(Some(vec![Err(crate::error::Error::Store(
-                "inner failed".into(),
-            ))])),
+            items: Mutex::new(Some(vec![Err(Error::Store("inner failed".into()))])),
         };
         let mapped = MapReader::new(reader, |e| e);
         let mut stream = mapped.read(()).await.unwrap();

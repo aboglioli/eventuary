@@ -9,12 +9,12 @@ use rdkafka::consumer::{Consumer, StreamConsumer};
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
 use eventuary_core::io::stream::BatchedStream;
-use eventuary_core::io::{Cursor, Message, Reader};
-
-use crate::flusher::KafkaFlusher;
-use eventuary_core::io::ConsumerGroupId;
+use eventuary_core::io::{
+    ConsumerGroupId, Cursor, CursorId, CursorOrder, JsonCursorCodec, Message, Reader,
+};
 use eventuary_core::{Error, Event, Result, SerializedEvent, StartFrom, StartableSubscription};
 
+use crate::flusher::KafkaFlusher;
 use crate::flusher::KafkaOffsetToken;
 use crate::reader_config::KafkaReaderConfig;
 
@@ -41,19 +41,19 @@ impl Ord for KafkaCursor {
 }
 
 impl Cursor for KafkaCursor {
-    fn id(&self) -> eventuary_core::io::CursorId {
-        eventuary_core::io::CursorId::new(format!("kafka:{}:{}", self.topic, self.partition))
+    fn id(&self) -> CursorId {
+        CursorId::new(format!("kafka:{}:{}", self.topic, self.partition))
             .expect("valid kafka cursor id")
     }
 
-    fn order_key(&self) -> eventuary_core::io::CursorOrder {
-        eventuary_core::io::CursorOrder::from_i64(self.offset)
+    fn order_key(&self) -> CursorOrder {
+        CursorOrder::from_i64(self.offset)
     }
 }
 
 impl KafkaCursor {
-    pub fn codec() -> Result<eventuary_core::io::JsonCursorCodec<Self>> {
-        eventuary_core::io::JsonCursorCodec::new("eventuary.kafka.kafka_cursor.v1")
+    pub fn codec() -> Result<JsonCursorCodec<Self>> {
+        JsonCursorCodec::new("eventuary.kafka.kafka_cursor.v1")
     }
 }
 
@@ -122,7 +122,7 @@ impl KafkaReader {
     }
 
     pub async fn read(&self) -> Result<BatchedStream<KafkaOffsetToken, KafkaFlusher, KafkaCursor>> {
-        eventuary_core::io::Reader::read(self, self.default_subscription()).await
+        Reader::read(self, self.default_subscription()).await
     }
 }
 

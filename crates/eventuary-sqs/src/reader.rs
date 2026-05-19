@@ -4,7 +4,7 @@ use aws_sdk_sqs::Client;
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
 use eventuary_core::io::stream::BatchedStream;
-use eventuary_core::io::{Message, Reader};
+use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
 use crate::flusher::SqsFlusher;
@@ -41,14 +41,14 @@ impl SqsReader {
     }
 
     pub async fn read(&self) -> Result<BatchedStream<String, SqsFlusher>> {
-        eventuary_core::io::Reader::read(self, self.default_subscription()).await
+        Reader::read(self, self.default_subscription()).await
     }
 }
 
 impl Reader for SqsReader {
     type Subscription = SqsSubscription;
     type Acker = BatchedAcker<String>;
-    type Cursor = eventuary_core::io::NoCursor;
+    type Cursor = NoCursor;
     type Stream = BatchedStream<String, SqsFlusher>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
@@ -113,7 +113,7 @@ impl Reader for SqsReader {
                             };
                             let acker = BatchedAcker::new(receipt, tx_ack.clone());
                             if tx
-                                .send(Ok(Message::new(event, acker, eventuary_core::io::NoCursor)))
+                                .send(Ok(Message::new(event, acker, NoCursor)))
                                 .await
                                 .is_err()
                             {

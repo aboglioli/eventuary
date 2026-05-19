@@ -52,7 +52,7 @@ use crate::event::Event;
 use crate::event_key::Partition;
 use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, NoCursor, Reader};
 
 #[derive(Debug, Clone)]
 pub struct PartitionedReaderConfig {
@@ -90,7 +90,7 @@ enum PartitionedAckMode {
 /// non-empty (set by `CheckpointReader` via `with_starts`), it
 /// overrides `start`.
 #[derive(Debug, Clone)]
-pub struct PartitionedSubscription<S, C = crate::io::NoCursor> {
+pub struct PartitionedSubscription<S, C = NoCursor> {
     pub inner: S,
     pub start: StartFrom<PartitionedCursor<C>>,
     pub(crate) starts: Vec<StartFrom<PartitionedCursor<C>>>,
@@ -153,7 +153,7 @@ impl<C: Cursor> Cursor for PartitionedCursor<C> {
         CursorId::partition(self.partition.count(), self.partition.id())
     }
 
-    fn order_key(&self) -> crate::io::CursorOrder {
+    fn order_key(&self) -> CursorOrder {
         self.inner.order_key()
     }
 }
@@ -592,8 +592,8 @@ mod tests {
     struct TestCursor(i64);
 
     impl Cursor for TestCursor {
-        fn order_key(&self) -> crate::io::CursorOrder {
-            crate::io::CursorOrder::from_i64(self.0)
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_i64(self.0)
         }
     }
 

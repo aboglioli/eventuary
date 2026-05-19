@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
-use eventuary_core::io::{Acker, Cursor, Message, Reader};
+use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
 use eventuary_core::{
-    Error, Result, SerializedEvent, SerializedPayload, StartFrom, StartableSubscription,
-    TopicPattern,
+    Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
+    StartableSubscription, TopicPattern,
 };
 
 use crate::database::SqliteConn;
@@ -38,14 +38,14 @@ impl SqliteCursor {
 }
 
 impl Cursor for SqliteCursor {
-    fn order_key(&self) -> eventuary_core::io::CursorOrder {
-        eventuary_core::io::CursorOrder::from_i64(self.sequence)
+    fn order_key(&self) -> CursorOrder {
+        CursorOrder::from_i64(self.sequence)
     }
 }
 
 impl SqliteCursor {
-    pub fn codec() -> Result<eventuary_core::io::JsonCursorCodec<Self>> {
-        eventuary_core::io::JsonCursorCodec::new("eventuary.sqlite.sqlite_cursor.v1")
+    pub fn codec() -> Result<JsonCursorCodec<Self>> {
+        JsonCursorCodec::new("eventuary.sqlite.sqlite_cursor.v1")
     }
 }
 
@@ -355,9 +355,7 @@ async fn fetch_batch(
         TopicPattern::Exact(t) => t.as_str().to_owned(),
     });
     let ns_prefix = filter.namespace.as_ref().and_then(|p| match p {
-        eventuary_core::NamespacePattern::Prefix(ns) if !ns.is_root() => {
-            Some(ns.as_str().to_owned())
-        }
+        NamespacePattern::Prefix(ns) if !ns.is_root() => Some(ns.as_str().to_owned()),
         _ => None,
     });
     let ts_str = lower_bound_ts.map(|t| t.to_rfc3339());

@@ -33,7 +33,7 @@ use std::sync::Mutex;
 use futures::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
@@ -227,7 +227,7 @@ where
 
                 if let Err(e) = inner_acker.ack().await {
                     let _ = tx
-                        .send(Err(crate::error::Error::Store(format!(
+                        .send(Err(Error::Store(format!(
                             "buffer reader: inner ack failed: {e}"
                         ))))
                         .await;
@@ -258,6 +258,7 @@ mod tests {
     use futures::{Stream, StreamExt, stream};
 
     use super::*;
+    use crate::error::Error;
     use crate::io::acker::NoopAcker;
     use crate::io::{Message, Reader};
     use crate::payload::Payload;
@@ -513,7 +514,7 @@ mod tests {
                 Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
 
             async fn read(&self, _: ()) -> Result<Self::Stream> {
-                Err(crate::error::Error::Store("read failed".into()))
+                Err(Error::Store("read failed".into()))
             }
         }
 

@@ -5,7 +5,7 @@ use futures::{Stream, StreamExt};
 
 use crate::error::Result;
 use crate::io::start_from::{StartFrom, StartableSubscription};
-use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum MergeStrategy {
@@ -98,7 +98,7 @@ impl<C1: Cursor, C2: Cursor> Cursor for MergeCursor<C1, C2> {
         }
     }
 
-    fn order_key(&self) -> crate::io::CursorOrder {
+    fn order_key(&self) -> CursorOrder {
         match self {
             Self::Left(c) => c.order_key(),
             Self::Right(c) => c.order_key(),
@@ -216,8 +216,8 @@ mod tests {
     struct TestCursor(u64);
 
     impl Cursor for TestCursor {
-        fn order_key(&self) -> crate::io::CursorOrder {
-            crate::io::CursorOrder::from_u64(self.0)
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_u64(self.0)
         }
     }
 
