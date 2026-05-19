@@ -87,15 +87,6 @@ impl CursorOrder {
         Self::from_u64(mapped)
     }
 
-    pub fn concat(parts: &[CursorOrder]) -> Self {
-        let total: usize = parts.iter().map(|p| p.0.len()).sum();
-        let mut buf = Vec::with_capacity(total);
-        for p in parts {
-            buf.extend_from_slice(&p.0);
-        }
-        Self(Arc::from(buf.as_slice()))
-    }
-
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -210,6 +201,33 @@ impl<'de> Deserialize<'de> for EncodedCursor {
 }
 
 impl EncodedCursor {
+    pub fn new(
+        id: CursorId,
+        kind: CursorKind,
+        order: CursorOrder,
+        payload: impl Into<Arc<str>>,
+    ) -> Result<Self> {
+        let payload: Arc<str> = payload.into();
+        if payload.is_empty() {
+            return Err(Error::InvalidCursor(
+                "encoded cursor payload must not be empty".to_owned(),
+            ));
+        }
+
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        STANDARD.decode(payload.as_bytes()).map_err(|e| {
+            Error::InvalidCursor(format!("encoded cursor payload is not base64: {e}"))
+        })?;
+
+        Ok(Self {
+            id,
+            kind,
+            order,
+            payload,
+        })
+    }
+
     pub fn from_bytes(
         id: CursorId,
         kind: CursorKind,
@@ -282,9 +300,7 @@ impl PartialOrd for EncodedCursor {
 
 impl Ord for EncodedCursor {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.order
-            .cmp(&other.order)
-            .then_with(|| self.id.cmp(&other.id))
+        self.id.cmp(&other.id).then(self.order.cmp(&other.order))
     }
 }
 
@@ -348,7 +364,7 @@ where
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct NoCursor;
 
-pub trait Cursor: Ord {
+pub trait Cursor {
     fn id(&self) -> CursorId {
         CursorId::global()
     }
@@ -454,13 +470,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_order_concat_lex_orders_by_segment() {
-        let a1 = CursorOrder::concat(&[CursorOrder::from_u64(1), CursorOrder::from_u64(100)]);
-        let a2 = CursorOrder::concat(&[CursorOrder::from_u64(2), CursorOrder::from_u64(0)]);
-        assert!(a1 < a2);
-    }
-
-    #[test]
     fn cursor_order_roundtrips_via_json() {
         let v = CursorOrder::from_i64(-42);
         let s = serde_json::to_string(&v).unwrap();
@@ -516,21 +525,62 @@ mod tests {
     }
 
     #[test]
-    fn encoded_cursor_ord_follows_order_then_id() {
+    fn encoded_cursor_orders_by_id_then_order() {
         let kind = CursorKind::new("eventuary.test.cursor.v1").unwrap();
-        let id_a = CursorId::new("a").unwrap();
-        let id_b = CursorId::new("b").unwrap();
+        let a9 = EncodedCursor::from_bytes(
+            CursorId::new("a").unwrap(),
+            kind.clone(),
+            CursorOrder::from_i64(9),
+            b"x",
+        );
+        let a10 = EncodedCursor::from_bytes(
+            CursorId::new("a").unwrap(),
+            kind.clone(),
+            CursorOrder::from_i64(10),
+            b"x",
+        );
+        let b0 = EncodedCursor::from_bytes(
+            CursorId::new("b").unwrap(),
+            kind,
+            CursorOrder::from_i64(0),
+            b"x",
+        );
 
-        let lo =
-            EncodedCursor::from_bytes(id_a.clone(), kind.clone(), CursorOrder::from_i64(9), b"x");
-        let hi =
-            EncodedCursor::from_bytes(id_a.clone(), kind.clone(), CursorOrder::from_i64(10), b"x");
-        assert!(lo < hi);
+        assert!(a9 < a10);
+        assert!(a10 < b0);
+    }
 
-        let same_order_a =
-            EncodedCursor::from_bytes(id_a, kind.clone(), CursorOrder::from_i64(5), b"x");
-        let same_order_b = EncodedCursor::from_bytes(id_b, kind, CursorOrder::from_i64(5), b"x");
-        assert!(same_order_a < same_order_b);
+    #[test]
+    fn encoded_cursor_new_validates_payload() {
+        let kind = CursorKind::new("eventuary.test.cursor.v1").unwrap();
+        let err = EncodedCursor::new(
+            CursorId::global(),
+            kind.clone(),
+            CursorOrder::from_i64(0),
+            "",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+
+        let err = EncodedCursor::new(
+            CursorId::global(),
+            kind.clone(),
+            CursorOrder::from_i64(0),
+            "not-base64-$$",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not base64"));
+
+        let ok =
+            EncodedCursor::from_bytes(CursorId::global(), kind, CursorOrder::from_i64(0), b"x");
+        let rebuilt = EncodedCursor::new(
+            ok.id_ref().clone(),
+            ok.kind().clone(),
+            ok.order().clone(),
+            ok.payload().to_owned(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt, ok);
     }
 
     #[test]
@@ -611,7 +661,6 @@ mod tests {
 
     #[test]
     fn cursor_trait_default_is_global() {
-        #[derive(Eq, PartialEq, Ord, PartialOrd)]
         struct SomeCursor;
         impl Cursor for SomeCursor {}
         assert_eq!(SomeCursor.id(), CursorId::global());
@@ -619,7 +668,6 @@ mod tests {
 
     #[test]
     fn cursor_trait_named_example() {
-        #[derive(Eq, PartialEq, Ord, PartialOrd)]
         struct NamedCursor;
         impl Cursor for NamedCursor {
             fn id(&self) -> CursorId {
@@ -631,7 +679,6 @@ mod tests {
 
     #[test]
     fn cursor_trait_default_order_key_is_min() {
-        #[derive(Eq, PartialEq, Ord, PartialOrd)]
         struct Probe;
         impl Cursor for Probe {}
         assert_eq!(Probe.order_key(), CursorOrder::min());
@@ -639,7 +686,6 @@ mod tests {
 
     #[test]
     fn cursor_trait_named_example_supports_custom_order() {
-        #[derive(Eq, PartialEq, Ord, PartialOrd)]
         struct OrderedCursor(i64);
         impl Cursor for OrderedCursor {
             fn order_key(&self) -> CursorOrder {
@@ -650,12 +696,13 @@ mod tests {
     }
 
     #[test]
-    fn cursor_supertrait_ord_is_compile_time_checked() {
-        fn requires_cursor<C: Cursor>(_: &C) {}
-        #[derive(Eq, PartialEq, Ord, PartialOrd)]
-        struct Ok;
-        impl Cursor for Ok {}
-        requires_cursor(&Ok);
+    fn cursor_trait_does_not_require_ord() {
+        struct UnorderedCursor;
+
+        impl Cursor for UnorderedCursor {}
+
+        assert_eq!(UnorderedCursor.id(), CursorId::global());
+        assert_eq!(UnorderedCursor.order_key(), CursorOrder::min());
     }
 
     #[test]

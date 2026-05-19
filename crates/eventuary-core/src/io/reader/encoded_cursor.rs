@@ -28,19 +28,23 @@ impl<R, Codec> EncodedCursorReader<R, Codec> {
 #[derive(Debug, Clone)]
 pub struct EncodedCursorSubscription<S> {
     inner: S,
-    start: StartFrom<EncodedCursor>,
+    starts: Vec<StartFrom<EncodedCursor>>,
 }
 
 impl<S> EncodedCursorSubscription<S> {
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            start: StartFrom::Latest,
+            starts: Vec::new(),
         }
     }
 
     pub fn inner(&self) -> &S {
         &self.inner
+    }
+
+    pub fn starts(&self) -> &[StartFrom<EncodedCursor>] {
+        &self.starts
     }
 
     pub fn into_inner(self) -> S {
@@ -53,7 +57,12 @@ where
     S: Clone + Send + 'static,
 {
     fn with_start(mut self, start: StartFrom<EncodedCursor>) -> Self {
-        self.start = start;
+        self.starts = vec![start];
+        self
+    }
+
+    fn with_starts(mut self, starts: Vec<StartFrom<EncodedCursor>>) -> Self {
+        self.starts = starts;
         self
     }
 }
@@ -64,7 +73,7 @@ where
     R::Subscription: StartableSubscription<C> + Clone + Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Stream: Send + 'static,
-    C: Cursor + Clone + Send + Sync + 'static,
+    C: Cursor + Clone + Ord + Send + Sync + 'static,
     Codec: CursorCodec<C>,
 {
     type Subscription = EncodedCursorSubscription<R::Subscription>;
@@ -73,14 +82,21 @@ where
     type Stream = Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, EncodedCursor>>> + Send>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        let inner_subscription = match subscription.start {
-            StartFrom::Earliest => subscription.inner.with_start(StartFrom::Earliest),
-            StartFrom::Latest => subscription.inner.with_start(StartFrom::Latest),
-            StartFrom::Timestamp(ts) => subscription.inner.with_start(StartFrom::Timestamp(ts)),
-            StartFrom::After(encoded) => {
-                let decoded = self.codec.decode(&encoded)?;
-                subscription.inner.with_start(StartFrom::After(decoded))
-            }
+        let mut decoded_starts = Vec::with_capacity(subscription.starts.len());
+        for start in subscription.starts {
+            let decoded = match start {
+                StartFrom::Earliest => StartFrom::Earliest,
+                StartFrom::Latest => StartFrom::Latest,
+                StartFrom::Timestamp(timestamp) => StartFrom::Timestamp(timestamp),
+                StartFrom::After(encoded) => StartFrom::After(self.codec.decode(&encoded)?),
+            };
+            decoded_starts.push(decoded);
+        }
+
+        let inner_subscription = if decoded_starts.is_empty() {
+            subscription.inner
+        } else {
+            subscription.inner.with_starts(decoded_starts)
         };
 
         let inner_stream = self.inner.read(inner_subscription).await?;
@@ -108,7 +124,7 @@ mod tests {
     use crate::payload::Payload;
 
     #[derive(
-        Debug, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+        Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
     )]
     struct TestCursor(i64);
 
@@ -118,26 +134,31 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Clone, Default, Eq, PartialEq)]
     struct TestSubscription {
-        start: StartFrom<TestCursor>,
+        starts: Vec<StartFrom<TestCursor>>,
     }
 
     impl StartableSubscription<TestCursor> for TestSubscription {
         fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
-            self.start = start;
+            self.starts = vec![start];
+            self
+        }
+
+        fn with_starts(mut self, starts: Vec<StartFrom<TestCursor>>) -> Self {
+            self.starts = starts;
             self
         }
     }
 
     struct VecReader {
-        seen_start: Mutex<Option<StartFrom<TestCursor>>>,
+        seen_starts: Mutex<Option<Vec<StartFrom<TestCursor>>>>,
     }
 
     impl VecReader {
         fn new() -> Self {
             Self {
-                seen_start: Mutex::new(None),
+                seen_starts: Mutex::new(None),
             }
         }
     }
@@ -149,7 +170,7 @@ mod tests {
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
 
         async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-            *self.seen_start.lock().unwrap() = Some(subscription.start);
+            *self.seen_starts.lock().unwrap() = Some(subscription.starts);
             let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
                 .unwrap()
                 .build()
@@ -177,19 +198,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decodes_start_after_cursor_for_inner_subscription() {
+    async fn empty_starts_passes_inner_subscription_unchanged() {
+        let reader = EncodedCursorReader::new(
+            VecReader::new(),
+            JsonCursorCodec::<TestCursor>::new("eventuary.test.cursor.v1").unwrap(),
+        );
+        let mut stream = reader
+            .read(EncodedCursorSubscription::new(TestSubscription::default()))
+            .await
+            .unwrap();
+        let _ = stream.next().await.unwrap().unwrap();
+
+        let seen = reader.inner().seen_starts.lock().unwrap().clone();
+        assert_eq!(seen, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn decodes_all_start_after_cursors_for_inner_subscription() {
         let inner = VecReader::new();
         let codec = JsonCursorCodec::<TestCursor>::new("eventuary.test.cursor.v1").unwrap();
-        let encoded = codec.encode(&TestCursor(7)).unwrap();
+        let first = codec.encode(&TestCursor(7)).unwrap();
+        let second = codec.encode(&TestCursor(9)).unwrap();
         let reader = EncodedCursorReader::new(inner, codec);
         let subscription = EncodedCursorSubscription::new(TestSubscription::default())
-            .with_start(StartFrom::After(encoded));
+            .with_starts(vec![StartFrom::After(first), StartFrom::After(second)]);
 
         let mut stream = reader.read(subscription).await.unwrap();
         let _ = stream.next().await.unwrap().unwrap();
 
-        let seen = reader.inner().seen_start.lock().unwrap().clone();
-        assert_eq!(seen, Some(StartFrom::After(TestCursor(7))));
+        let seen = reader.inner().seen_starts.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            Some(vec![
+                StartFrom::After(TestCursor(7)),
+                StartFrom::After(TestCursor(9)),
+            ])
+        );
     }
 
     #[tokio::test]
@@ -207,7 +251,7 @@ mod tests {
         let mut stream = reader.read(subscription).await.unwrap();
         let _ = stream.next().await.unwrap().unwrap();
 
-        let seen = reader.inner().seen_start.lock().unwrap().clone();
-        assert_eq!(seen, Some(StartFrom::Timestamp(ts)));
+        let seen = reader.inner().seen_starts.lock().unwrap().clone();
+        assert_eq!(seen, Some(vec![StartFrom::Timestamp(ts)]));
     }
 }

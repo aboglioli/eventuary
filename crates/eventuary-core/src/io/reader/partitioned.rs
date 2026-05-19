@@ -109,7 +109,7 @@ impl<S, C> PartitionedSubscription<S, C> {
 impl<S, C> StartableSubscription<PartitionedCursor<C>> for PartitionedSubscription<S, C>
 where
     S: Clone + Send + 'static,
-    C: Cursor + Clone + Send + 'static,
+    C: Cursor + Clone + Ord + Send + 'static,
 {
     fn with_start(mut self, start: StartFrom<PartitionedCursor<C>>) -> Self {
         self.start = start;
@@ -275,7 +275,7 @@ impl<R> PartitionedReader<R> {
 impl<R> Reader for PartitionedReader<R>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: Cursor + Clone + Send + Sync + 'static,
+    R::Cursor: Cursor + Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Clone + Send + Sync + 'static,
     R::Stream: Send + 'static,

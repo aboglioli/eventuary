@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::event::EventId;
+use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
@@ -41,6 +42,7 @@ impl<R, L> ReplayThenLiveReader<R, L> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ReplayThenLiveSubscription<RS, LS> {
     pub replay: RS,
     pub live: LS,
@@ -48,6 +50,81 @@ pub struct ReplayThenLiveSubscription<RS, LS> {
 
 impl<RS, LS> ReplayThenLiveSubscription<RS, LS> {
     pub fn new(replay: RS, live: LS) -> Self {
+        Self { replay, live }
+    }
+}
+
+impl<RS, LS, RC, LC> StartableSubscription<ReplayLiveCursor<RC, LC>>
+    for ReplayThenLiveSubscription<RS, LS>
+where
+    RS: StartableSubscription<RC> + Clone + Send + 'static,
+    LS: StartableSubscription<LC> + Clone + Send + 'static,
+    RC: Ord + Send + 'static,
+    LC: Ord + Send + 'static,
+{
+    fn with_start(self, start: StartFrom<ReplayLiveCursor<RC, LC>>) -> Self {
+        match start {
+            StartFrom::Earliest => Self {
+                replay: self.replay.with_start(StartFrom::Earliest),
+                live: self.live.with_start(StartFrom::Earliest),
+            },
+            StartFrom::Latest => Self {
+                replay: self.replay.with_start(StartFrom::Latest),
+                live: self.live.with_start(StartFrom::Latest),
+            },
+            StartFrom::Timestamp(timestamp) => Self {
+                replay: self.replay.with_start(StartFrom::Timestamp(timestamp)),
+                live: self.live.with_start(StartFrom::Timestamp(timestamp)),
+            },
+            StartFrom::After(ReplayLiveCursor::Replay(cursor)) => Self {
+                replay: self.replay.with_start(StartFrom::After(cursor)),
+                live: self.live,
+            },
+            StartFrom::After(ReplayLiveCursor::Live(cursor)) => Self {
+                replay: self.replay,
+                live: self.live.with_start(StartFrom::After(cursor)),
+            },
+        }
+    }
+
+    fn with_starts(self, starts: Vec<StartFrom<ReplayLiveCursor<RC, LC>>>) -> Self {
+        let mut replay_starts = Vec::new();
+        let mut live_starts = Vec::new();
+
+        for start in starts {
+            match start {
+                StartFrom::Earliest => {
+                    replay_starts.push(StartFrom::Earliest);
+                    live_starts.push(StartFrom::Earliest);
+                }
+                StartFrom::Latest => {
+                    replay_starts.push(StartFrom::Latest);
+                    live_starts.push(StartFrom::Latest);
+                }
+                StartFrom::Timestamp(timestamp) => {
+                    replay_starts.push(StartFrom::Timestamp(timestamp));
+                    live_starts.push(StartFrom::Timestamp(timestamp));
+                }
+                StartFrom::After(ReplayLiveCursor::Replay(cursor)) => {
+                    replay_starts.push(StartFrom::After(cursor));
+                }
+                StartFrom::After(ReplayLiveCursor::Live(cursor)) => {
+                    live_starts.push(StartFrom::After(cursor));
+                }
+            }
+        }
+
+        let replay = if replay_starts.is_empty() {
+            self.replay
+        } else {
+            self.replay.with_starts(replay_starts)
+        };
+        let live = if live_starts.is_empty() {
+            self.live
+        } else {
+            self.live.with_starts(live_starts)
+        };
+
         Self { replay, live }
     }
 }
@@ -229,7 +306,11 @@ mod tests {
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
     struct TestCursor(u64);
 
-    impl crate::io::Cursor for TestCursor {}
+    impl crate::io::Cursor for TestCursor {
+        fn order_key(&self) -> crate::io::CursorOrder {
+            crate::io::CursorOrder::from_u64(self.0)
+        }
+    }
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -345,6 +426,55 @@ mod tests {
                 .id()
                 .as_str(),
             "live:global"
+        );
+    }
+
+    #[test]
+    fn replay_live_cursor_order_key_passes_through_active_side() {
+        let replay: ReplayLiveCursor<TestCursor, TestCursor> =
+            ReplayLiveCursor::Replay(TestCursor(7));
+        let live: ReplayLiveCursor<TestCursor, TestCursor> = ReplayLiveCursor::Live(TestCursor(9));
+
+        assert_eq!(replay.order_key(), crate::io::CursorOrder::from_u64(7));
+        assert_eq!(live.order_key(), crate::io::CursorOrder::from_u64(9));
+    }
+
+    #[derive(Debug, Clone, Default, Eq, PartialEq)]
+    struct TestSub {
+        starts: Vec<StartFrom<TestCursor>>,
+    }
+
+    impl StartableSubscription<TestCursor> for TestSub {
+        fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
+            self.starts = vec![start];
+            self
+        }
+
+        fn with_starts(mut self, starts: Vec<StartFrom<TestCursor>>) -> Self {
+            self.starts = starts;
+            self
+        }
+    }
+
+    #[test]
+    fn replay_live_subscription_routes_starts_by_phase() {
+        let subscription = ReplayThenLiveSubscription::new(TestSub::default(), TestSub::default())
+            .with_starts(vec![
+                StartFrom::After(ReplayLiveCursor::Replay(TestCursor(3))),
+                StartFrom::After(ReplayLiveCursor::Live(TestCursor(8))),
+                StartFrom::After(ReplayLiveCursor::Replay(TestCursor(5))),
+            ]);
+
+        assert_eq!(
+            subscription.replay.starts,
+            vec![
+                StartFrom::After(TestCursor(3)),
+                StartFrom::After(TestCursor(5))
+            ]
+        );
+        assert_eq!(
+            subscription.live.starts,
+            vec![StartFrom::After(TestCursor(8))]
         );
     }
 }

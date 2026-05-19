@@ -231,7 +231,7 @@ pub type CheckpointStream<A, C, S> = SpawnedStream<CheckpointAcker<A, C, S>, C>;
 /// # Cursor bounds
 ///
 /// The inner reader's cursor must implement
-/// `Cursor + Clone + Send + Sync + 'static`:
+/// `Cursor + Clone + Ord + Send + Sync + 'static`:
 /// - [`Cursor`]: provides the `CursorId` used as the checkpoint key.
 /// - `Ord`: used to skip-already-stored cursors on resume and to track
 ///   contiguous in-order progress per cursor id.
@@ -269,7 +269,7 @@ impl<R, S> CheckpointReader<R, S> {
 impl<R, S> Reader for CheckpointReader<R, S>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: Clone + Cursor + Send + Sync + 'static,
+    R::Cursor: Cursor + Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
