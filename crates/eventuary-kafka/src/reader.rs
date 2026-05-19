@@ -18,7 +18,7 @@ use eventuary_core::{Error, Event, Result, SerializedEvent, StartFrom, Startable
 use crate::flusher::KafkaOffsetToken;
 use crate::reader_config::KafkaReaderConfig;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KafkaCursor {
     pub topic: String,
     pub partition: i32,
@@ -40,7 +40,22 @@ impl Ord for KafkaCursor {
     }
 }
 
-impl Cursor for KafkaCursor {}
+impl Cursor for KafkaCursor {
+    fn id(&self) -> eventuary_core::io::CursorId {
+        eventuary_core::io::CursorId::new(format!("kafka:{}:{}", self.topic, self.partition))
+            .expect("valid kafka cursor id")
+    }
+
+    fn order_key(&self) -> eventuary_core::io::CursorOrder {
+        eventuary_core::io::CursorOrder::from_i64(self.offset)
+    }
+}
+
+impl KafkaCursor {
+    pub fn codec() -> Result<eventuary_core::io::JsonCursorCodec<Self>> {
+        eventuary_core::io::JsonCursorCodec::new("eventuary.kafka.kafka_cursor.v1")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct KafkaSubscription {
@@ -247,15 +262,44 @@ impl Reader for KafkaReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary_core::io::{Cursor, CursorId};
+    use eventuary_core::io::{Cursor, CursorCodec, CursorOrder};
+
+    fn cursor(topic: &str, partition: i32, offset: i64) -> KafkaCursor {
+        KafkaCursor {
+            topic: topic.to_owned(),
+            partition,
+            offset,
+        }
+    }
 
     #[test]
-    fn kafka_cursor_id_is_global() {
-        let cursor = KafkaCursor {
-            topic: "events".to_owned(),
-            partition: 0,
-            offset: 42,
-        };
-        assert_eq!(cursor.id(), CursorId::global());
+    fn kafka_cursor_id_scopes_per_topic_partition() {
+        let c = cursor("events", 0, 42);
+        assert_eq!(c.id().as_str(), "kafka:events:0");
+    }
+
+    #[test]
+    fn kafka_cursor_order_key_from_offset() {
+        let c = cursor("events", 0, 42);
+        assert_eq!(c.order_key(), CursorOrder::from_i64(42));
+        assert!(cursor("events", 0, 9).order_key() < cursor("events", 0, 10).order_key());
+    }
+
+    #[test]
+    fn kafka_cursor_codec_roundtrips() {
+        let codec = KafkaCursor::codec().unwrap();
+        let c = cursor("events", 0, 42);
+        let encoded = codec.encode(&c).unwrap();
+        assert_eq!(encoded.kind().as_str(), "eventuary.kafka.kafka_cursor.v1");
+        assert_eq!(encoded.order(), &CursorOrder::from_i64(42));
+        assert_eq!(codec.decode(&encoded).unwrap(), c);
+    }
+
+    #[test]
+    fn kafka_cursor_codec_preserves_typed_ord() {
+        let codec = KafkaCursor::codec().unwrap();
+        let lo = codec.encode(&cursor("events", 0, 9)).unwrap();
+        let hi = codec.encode(&cursor("events", 0, 10)).unwrap();
+        assert!(lo < hi);
     }
 }

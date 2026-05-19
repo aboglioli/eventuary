@@ -1082,6 +1082,7 @@ dependencies = [
  "eventuary-core",
  "futures",
  "rdkafka",
+ "serde",
  "serde_json",
  "testcontainers",
  "thiserror",
@@ -1097,6 +1098,8 @@ dependencies = [
  "chrono",
  "eventuary-core",
  "futures",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

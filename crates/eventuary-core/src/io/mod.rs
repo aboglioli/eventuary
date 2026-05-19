@@ -15,7 +15,10 @@ pub mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
 pub use consumer_group_id::ConsumerGroupId;
-pub use cursor::{Cursor, CursorId, NoCursor};
+pub use cursor::{
+    Cursor, CursorCodec, CursorId, CursorKind, CursorOrder, EncodedCursor, JsonCursorCodec,
+    NoCursor,
+};
 pub use filter::{ArcFilter, BoxFilter, Filter, FilterExt};
 pub use handler::{ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt};
 pub use message::Message;

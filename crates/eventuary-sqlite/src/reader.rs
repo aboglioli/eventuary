@@ -37,7 +37,17 @@ impl SqliteCursor {
     }
 }
 
-impl Cursor for SqliteCursor {}
+impl Cursor for SqliteCursor {
+    fn order_key(&self) -> eventuary_core::io::CursorOrder {
+        eventuary_core::io::CursorOrder::from_i64(self.sequence)
+    }
+}
+
+impl SqliteCursor {
+    pub fn codec() -> Result<eventuary_core::io::JsonCursorCodec<Self>> {
+        eventuary_core::io::JsonCursorCodec::new("eventuary.sqlite.sqlite_cursor.v1")
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SqliteSubscription {
@@ -488,10 +498,34 @@ async fn fetch_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary_core::io::{Cursor, CursorId};
+    use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder};
 
     #[test]
     fn sqlite_cursor_id_is_global() {
         assert_eq!(SqliteCursor::new(42).id(), CursorId::global());
+    }
+
+    #[test]
+    fn sqlite_cursor_order_key_from_sequence() {
+        assert_eq!(SqliteCursor::new(42).order_key(), CursorOrder::from_i64(42));
+        assert!(SqliteCursor::new(9).order_key() < SqliteCursor::new(10).order_key());
+    }
+
+    #[test]
+    fn sqlite_cursor_codec_roundtrips() {
+        let codec = SqliteCursor::codec().unwrap();
+        let cursor = SqliteCursor::new(42);
+        let encoded = codec.encode(&cursor).unwrap();
+        assert_eq!(encoded.kind().as_str(), "eventuary.sqlite.sqlite_cursor.v1");
+        assert_eq!(encoded.order(), &CursorOrder::from_i64(42));
+        assert_eq!(codec.decode(&encoded).unwrap(), cursor);
+    }
+
+    #[test]
+    fn sqlite_cursor_codec_preserves_typed_ord() {
+        let codec = SqliteCursor::codec().unwrap();
+        let lo = codec.encode(&SqliteCursor::new(9)).unwrap();
+        let hi = codec.encode(&SqliteCursor::new(10)).unwrap();
+        assert!(lo < hi);
     }
 }

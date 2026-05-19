@@ -269,7 +269,7 @@ impl<R, S> CheckpointReader<R, S> {
 impl<R, S> Reader for CheckpointReader<R, S>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: Clone + Ord + Cursor + Send + Sync + 'static,
+    R::Cursor: Cursor + Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,

@@ -109,7 +109,7 @@ impl<S, C> PartitionedSubscription<S, C> {
 impl<S, C> StartableSubscription<PartitionedCursor<C>> for PartitionedSubscription<S, C>
 where
     S: Clone + Send + 'static,
-    C: Clone + Ord + Send + 'static,
+    C: Cursor + Clone + Ord + Send + 'static,
 {
     fn with_start(mut self, start: StartFrom<PartitionedCursor<C>>) -> Self {
         self.start = start;
@@ -148,9 +148,13 @@ impl<C> PartitionedCursor<C> {
     }
 }
 
-impl<C> Cursor for PartitionedCursor<C> {
+impl<C: Cursor> Cursor for PartitionedCursor<C> {
     fn id(&self) -> CursorId {
         CursorId::partition(self.partition.count(), self.partition.id())
+    }
+
+    fn order_key(&self) -> crate::io::CursorOrder {
+        self.inner.order_key()
     }
 }
 
@@ -271,7 +275,7 @@ impl<R> PartitionedReader<R> {
 impl<R> Reader for PartitionedReader<R>
 where
     R: Reader + Send + Sync + 'static,
-    R::Cursor: Clone + Ord + Send + Sync + 'static,
+    R::Cursor: Cursor + Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Clone + Send + Sync + 'static,
     R::Stream: Send + 'static,
@@ -587,7 +591,11 @@ mod tests {
     )]
     struct TestCursor(i64);
 
-    impl Cursor for TestCursor {}
+    impl Cursor for TestCursor {
+        fn order_key(&self) -> crate::io::CursorOrder {
+            crate::io::CursorOrder::from_i64(self.0)
+        }
+    }
 
     impl StartableSubscription<TestCursor> for () {
         fn with_start(self, _: StartFrom<TestCursor>) -> Self {}
@@ -598,6 +606,15 @@ mod tests {
         let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
         assert_eq!(cursor.id(), CursorId::partition(100, 17));
+    }
+
+    #[test]
+    fn partitioned_cursor_order_passes_through_inner() {
+        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let inner = TestCursor(7);
+        let expected = inner.order_key();
+        let cursor = PartitionedCursor::new(inner, partition);
+        assert_eq!(cursor.order_key(), expected);
     }
 
     #[test]

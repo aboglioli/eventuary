@@ -4,6 +4,7 @@ use futures::stream::{PollNext, select_with_strategy};
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
+use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
@@ -83,7 +84,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MergeCursor<C1, C2> {
     Left(C1),
     Right(C2),
@@ -92,9 +93,88 @@ pub enum MergeCursor<C1, C2> {
 impl<C1: Cursor, C2: Cursor> Cursor for MergeCursor<C1, C2> {
     fn id(&self) -> CursorId {
         match self {
-            Self::Left(c) => c.id(),
-            Self::Right(c) => c.id(),
+            Self::Left(c) => c.id().prefixed("left").expect("valid left cursor id"),
+            Self::Right(c) => c.id().prefixed("right").expect("valid right cursor id"),
         }
+    }
+
+    fn order_key(&self) -> crate::io::CursorOrder {
+        match self {
+            Self::Left(c) => c.order_key(),
+            Self::Right(c) => c.order_key(),
+        }
+    }
+}
+
+impl<S1, S2, C1, C2> StartableSubscription<MergeCursor<C1, C2>> for (S1, S2)
+where
+    S1: StartableSubscription<C1> + Clone + Send + 'static,
+    S2: StartableSubscription<C2> + Clone + Send + 'static,
+    C1: Ord + Send + 'static,
+    C2: Ord + Send + 'static,
+{
+    fn with_start(self, start: StartFrom<MergeCursor<C1, C2>>) -> Self {
+        match start {
+            StartFrom::Earliest => (
+                self.0.with_start(StartFrom::Earliest),
+                self.1.with_start(StartFrom::Earliest),
+            ),
+            StartFrom::Latest => (
+                self.0.with_start(StartFrom::Latest),
+                self.1.with_start(StartFrom::Latest),
+            ),
+            StartFrom::Timestamp(timestamp) => (
+                self.0.with_start(StartFrom::Timestamp(timestamp)),
+                self.1.with_start(StartFrom::Timestamp(timestamp)),
+            ),
+            StartFrom::After(MergeCursor::Left(cursor)) => {
+                (self.0.with_start(StartFrom::After(cursor)), self.1)
+            }
+            StartFrom::After(MergeCursor::Right(cursor)) => {
+                (self.0, self.1.with_start(StartFrom::After(cursor)))
+            }
+        }
+    }
+
+    fn with_starts(self, starts: Vec<StartFrom<MergeCursor<C1, C2>>>) -> Self {
+        let mut left_starts = Vec::new();
+        let mut right_starts = Vec::new();
+
+        for start in starts {
+            match start {
+                StartFrom::Earliest => {
+                    left_starts.push(StartFrom::Earliest);
+                    right_starts.push(StartFrom::Earliest);
+                }
+                StartFrom::Latest => {
+                    left_starts.push(StartFrom::Latest);
+                    right_starts.push(StartFrom::Latest);
+                }
+                StartFrom::Timestamp(timestamp) => {
+                    left_starts.push(StartFrom::Timestamp(timestamp));
+                    right_starts.push(StartFrom::Timestamp(timestamp));
+                }
+                StartFrom::After(MergeCursor::Left(cursor)) => {
+                    left_starts.push(StartFrom::After(cursor));
+                }
+                StartFrom::After(MergeCursor::Right(cursor)) => {
+                    right_starts.push(StartFrom::After(cursor));
+                }
+            }
+        }
+
+        let left = if left_starts.is_empty() {
+            self.0
+        } else {
+            self.0.with_starts(left_starts)
+        };
+        let right = if right_starts.is_empty() {
+            self.1
+        } else {
+            self.1.with_starts(right_starts)
+        };
+
+        (left, right)
     }
 }
 
@@ -132,10 +212,14 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
-    #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
     struct TestCursor(u64);
 
-    impl Cursor for TestCursor {}
+    impl Cursor for TestCursor {
+        fn order_key(&self) -> crate::io::CursorOrder {
+            crate::io::CursorOrder::from_u64(self.0)
+        }
+    }
 
     struct VecReader {
         events: Mutex<Option<Vec<Event>>>,
@@ -209,10 +293,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_cursor_id_delegates_to_inner() {
+    async fn merge_cursor_ids_are_prefixed() {
         let left: MergeCursor<TestCursor, TestCursor> = MergeCursor::Left(TestCursor(1));
         let right: MergeCursor<TestCursor, TestCursor> = MergeCursor::Right(TestCursor(2));
-        assert_eq!(left.id(), TestCursor(1).id());
-        assert_eq!(right.id(), TestCursor(2).id());
+        assert_eq!(left.id().as_str(), "left:global");
+        assert_eq!(right.id().as_str(), "right:global");
+    }
+
+    #[tokio::test]
+    async fn merge_cursor_order_passes_through_active_side() {
+        let l: MergeCursor<TestCursor, TestCursor> = MergeCursor::Left(TestCursor(7));
+        assert_eq!(l.order_key(), TestCursor(7).order_key());
+    }
+
+    #[derive(Debug, Clone, Default, Eq, PartialEq)]
+    struct TestSub {
+        starts: Vec<StartFrom<TestCursor>>,
+    }
+
+    impl StartableSubscription<TestCursor> for TestSub {
+        fn with_start(mut self, start: StartFrom<TestCursor>) -> Self {
+            self.starts = vec![start];
+            self
+        }
+
+        fn with_starts(mut self, starts: Vec<StartFrom<TestCursor>>) -> Self {
+            self.starts = starts;
+            self
+        }
+    }
+
+    #[test]
+    fn merge_subscription_routes_starts_by_branch() {
+        let subscription = (TestSub::default(), TestSub::default()).with_starts(vec![
+            StartFrom::After(MergeCursor::Left(TestCursor(3))),
+            StartFrom::After(MergeCursor::Right(TestCursor(8))),
+            StartFrom::After(MergeCursor::Left(TestCursor(5))),
+        ]);
+
+        assert_eq!(
+            subscription.0.starts,
+            vec![
+                StartFrom::After(TestCursor(3)),
+                StartFrom::After(TestCursor(5))
+            ]
+        );
+        assert_eq!(subscription.1.starts, vec![StartFrom::After(TestCursor(8))]);
     }
 }
