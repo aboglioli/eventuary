@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::event::EventId;
 use crate::io::start_from::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
 pub type ReplayThenLiveStream<RA, LA, RC, LC> =
     SpawnedStream<ReplayLiveAcker<RA, LA>, ReplayLiveCursor<RC, LC>>;
@@ -143,7 +143,7 @@ impl<RC: Cursor, LC: Cursor> Cursor for ReplayLiveCursor<RC, LC> {
         }
     }
 
-    fn order_key(&self) -> crate::io::CursorOrder {
+    fn order_key(&self) -> CursorOrder {
         match self {
             Self::Replay(c) => c.order_key(),
             Self::Live(c) => c.order_key(),
@@ -300,15 +300,16 @@ mod tests {
 
     use super::*;
     use crate::event::Event;
+    use crate::io::CursorOrder;
     use crate::io::acker::NoopAcker;
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
     struct TestCursor(u64);
 
-    impl crate::io::Cursor for TestCursor {
-        fn order_key(&self) -> crate::io::CursorOrder {
-            crate::io::CursorOrder::from_u64(self.0)
+    impl Cursor for TestCursor {
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_u64(self.0)
         }
     }
 
@@ -435,8 +436,8 @@ mod tests {
             ReplayLiveCursor::Replay(TestCursor(7));
         let live: ReplayLiveCursor<TestCursor, TestCursor> = ReplayLiveCursor::Live(TestCursor(9));
 
-        assert_eq!(replay.order_key(), crate::io::CursorOrder::from_u64(7));
-        assert_eq!(live.order_key(), crate::io::CursorOrder::from_u64(9));
+        assert_eq!(replay.order_key(), CursorOrder::from_u64(7));
+        assert_eq!(live.order_key(), CursorOrder::from_u64(9));
     }
 
     #[derive(Debug, Clone, Default, Eq, PartialEq)]

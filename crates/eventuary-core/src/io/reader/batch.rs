@@ -4,10 +4,10 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Cursor, CursorId, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
 pub struct BatchReader<R> {
     inner: R,
@@ -127,7 +127,7 @@ impl<A: Acker> BatchAcker<A> {
     pub async fn ack_subset(&self, indices: &[usize]) -> Result<()> {
         for &i in indices {
             let Some(a) = self.inner.get(i) else {
-                return Err(crate::error::Error::Config(format!(
+                return Err(Error::Config(format!(
                     "batch acker: index {i} out of range (len {})",
                     self.inner.len()
                 )));
@@ -140,7 +140,7 @@ impl<A: Acker> BatchAcker<A> {
     pub async fn nack_subset(&self, indices: &[usize]) -> Result<()> {
         for &i in indices {
             let Some(a) = self.inner.get(i) else {
-                return Err(crate::error::Error::Config(format!(
+                return Err(Error::Config(format!(
                     "batch acker: index {i} out of range (len {})",
                     self.inner.len()
                 )));
@@ -214,11 +214,11 @@ impl<C: Cursor> Cursor for BatchCursor<C> {
             .unwrap_or(CursorId::global())
     }
 
-    fn order_key(&self) -> crate::io::CursorOrder {
+    fn order_key(&self) -> CursorOrder {
         self.inner
             .last()
             .map(|c| c.order_key())
-            .unwrap_or_else(crate::io::CursorOrder::min)
+            .unwrap_or_else(CursorOrder::min)
     }
 }
 
