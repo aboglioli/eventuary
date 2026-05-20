@@ -7,7 +7,7 @@ use tokio::time::timeout;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::{Reader, Writer};
 use eventuary_core::{
-    Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, Topic,
+    Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt, Topic,
     TopicPattern,
 };
 use eventuary_sqlite::database::SqliteDatabase;
@@ -26,6 +26,7 @@ fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
 fn sub_for(org: &str) -> SqliteSubscription {
     SqliteSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new(org).unwrap()),
         batch_size: Some(10),
         limit: None,
@@ -264,6 +265,7 @@ async fn topic_filter() {
     filter.topic = Some(TopicPattern::exact(Topic::new("task.created").unwrap()));
     let subscription = SqliteSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter,
         batch_size: Some(10),
         limit: None,
@@ -308,6 +310,7 @@ async fn namespace_filter() {
     ));
     let subscription = SqliteSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter,
         batch_size: Some(10),
         limit: None,
@@ -327,4 +330,130 @@ async fn namespace_filter() {
         .unwrap()
         .unwrap();
     assert_eq!(m2.event().key().unwrap().as_str(), "b2");
+}
+
+#[tokio::test]
+async fn stop_at_current_end_finishes_after_existing_events() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    let writer = SqliteWriter::new(db.conn());
+    for i in 0..3 {
+        writer
+            .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let subscription = SqliteSubscription {
+        stop_at: StopAt::CurrentEnd,
+        ..sub_for("acme")
+    };
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut stream = reader.read(subscription).await.unwrap();
+
+    for i in 0..3 {
+        let msg = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.event().key().unwrap().as_str(), format!("k{i}"));
+        msg.ack().await.unwrap();
+    }
+
+    let done = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap();
+    assert!(done.is_none());
+}
+
+#[tokio::test]
+async fn stop_at_cursor_finishes_at_inclusive_cursor() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    let writer = SqliteWriter::new(db.conn());
+    for i in 0..4 {
+        writer
+            .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut probe = reader
+        .read(SqliteSubscription {
+            stop_at: StopAt::CurrentEnd,
+            ..sub_for("acme")
+        })
+        .await
+        .unwrap();
+    let first = timeout(Duration::from_secs(5), probe.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    first.ack().await.unwrap();
+    let second = timeout(Duration::from_secs(5), probe.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let stop_cursor = *second.cursor();
+    second.ack().await.unwrap();
+    drop(probe);
+
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut stream = reader
+        .read(SqliteSubscription {
+            stop_at: StopAt::Cursor(stop_cursor),
+            ..sub_for("acme")
+        })
+        .await
+        .unwrap();
+
+    let first = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.event().key().unwrap().as_str(), "k0");
+    first.ack().await.unwrap();
+
+    let second = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.event().key().unwrap().as_str(), "k1");
+    second.ack().await.unwrap();
+
+    let done = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap();
+    assert!(done.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_at_never_waits_for_future_events() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    let writer = SqliteWriter::new(db.conn());
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut stream = reader
+        .read(SqliteSubscription {
+            stop_at: StopAt::Never,
+            ..sub_for("acme")
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "future"))
+        .await
+        .unwrap();
+
+    let msg = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.event().key().unwrap().as_str(), "future");
 }

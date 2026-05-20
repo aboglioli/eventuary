@@ -12,7 +12,7 @@ use eventuary_core::io::reader::{
 use eventuary_core::io::{
     CursorId, CursorKind, CursorOrder, EncodedCursor, Reader, StreamId, Writer,
 };
-use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
+use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
 use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::SqliteDatabase;
 use eventuary_sqlite::reader::{
@@ -39,6 +39,7 @@ fn fast_config() -> SqliteReaderConfig {
 fn sub_for(org: &str) -> SqliteSubscription {
     SqliteSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new(org).unwrap()),
         batch_size: Some(10),
         limit: None,
