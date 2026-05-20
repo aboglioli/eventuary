@@ -4,7 +4,7 @@ use futures::stream::{PollNext, select_with_strategy};
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
-use crate::io::start_from::{StartFrom, StartableSubscription};
+use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]

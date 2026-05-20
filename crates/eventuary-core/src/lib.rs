@@ -52,7 +52,7 @@ pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
 
-pub use io::start_from::{StartFrom, StartableSubscription};
+pub use io::position::{StartFrom, StartableSubscription, StopAt};
 pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};
 pub use snapshot::{Snapshot, SnapshotEventId};

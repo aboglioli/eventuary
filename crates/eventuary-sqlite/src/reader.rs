@@ -13,7 +13,7 @@ use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
 use eventuary_core::{
     Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
-    StartableSubscription, TopicPattern,
+    StartableSubscription, StopAt, TopicPattern,
 };
 
 use crate::database::SqliteConn;
@@ -52,6 +52,7 @@ impl SqliteCursor {
 #[derive(Debug, Clone)]
 pub struct SqliteSubscription {
     pub start: StartFrom<SqliteCursor>,
+    pub stop_at: StopAt<SqliteCursor>,
     pub filter: EventFilter,
     pub batch_size: Option<usize>,
     pub limit: Option<usize>,
@@ -61,6 +62,7 @@ impl Default for SqliteSubscription {
     fn default() -> Self {
         Self {
             start: StartFrom::Latest,
+            stop_at: StopAt::Never,
             filter: EventFilter::default(),
             batch_size: None,
             limit: None,
@@ -161,6 +163,14 @@ impl Reader for SqliteReader {
                 }
             };
 
+        let stop_seq = match resolve_stop_position(&conn, &events_relation, &subscription).await {
+            Ok(pos) => pos,
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+                return Ok(SpawnedStream::from_receiver(rx));
+            }
+        };
+
         let state = Arc::new(Mutex::new(CursorState {
             last_acked: after_seq,
             pending_nack: false,
@@ -176,6 +186,7 @@ impl Reader for SqliteReader {
                         &conn,
                         &events_relation,
                         after_seq,
+                        stop_seq,
                         batch_size,
                         lower_bound_ts,
                         &filter,
@@ -189,6 +200,9 @@ impl Reader for SqliteReader {
                         }
                     };
                     if fetched.is_empty() {
+                        if stop_seq.is_some() {
+                            return;
+                        }
                         tokio::time::sleep(poll_interval).await;
                         continue;
                     }
@@ -340,10 +354,55 @@ async fn resolve_initial_position(
     }
 }
 
+async fn resolve_stop_position(
+    conn: &SqliteConn,
+    events_relation: &str,
+    subscription: &SqliteSubscription,
+) -> Result<Option<i64>> {
+    match subscription.stop_at {
+        StopAt::Never => Ok(None),
+        StopAt::Cursor(cursor) => Ok(Some(cursor.sequence)),
+        StopAt::CurrentEnd => {
+            let conn = Arc::clone(conn);
+            let org = subscription
+                .filter
+                .organization
+                .as_ref()
+                .map(|o| o.as_str().to_owned());
+            let relation = events_relation.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+                let seq: i64 = match org {
+                    Some(o) => guard
+                        .query_row(
+                            &format!(
+                                "SELECT COALESCE(MAX(sequence), 0) FROM {relation} WHERE organization = ?1"
+                            ),
+                            rusqlite::params![o],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| Error::Store(e.to_string()))?,
+                    None => guard
+                        .query_row(
+                            &format!("SELECT COALESCE(MAX(sequence), 0) FROM {relation}"),
+                            [],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| Error::Store(e.to_string()))?,
+                };
+                Ok::<Option<i64>, Error>(Some(seq))
+            })
+            .await
+            .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        }
+    }
+}
+
 async fn fetch_batch(
     conn: &SqliteConn,
     events_relation: &str,
     after_seq: i64,
+    stop_seq: Option<i64>,
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
     filter: &EventFilter,
@@ -370,6 +429,12 @@ async fn fetch_batch(
         );
         let mut params: Vec<Value> = vec![Value::Integer(after_seq)];
         let mut idx = 2usize;
+
+        if let Some(stop) = stop_seq {
+            sql.push_str(&format!(" AND sequence <= ?{idx}"));
+            params.push(Value::Integer(stop));
+            idx += 1;
+        }
 
         if let Some(o) = &org {
             sql.push_str(&format!(" AND organization = ?{idx}"));

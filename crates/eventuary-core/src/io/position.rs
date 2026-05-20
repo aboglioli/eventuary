@@ -11,6 +11,14 @@ pub enum StartFrom<C = NoCursor> {
     After(C),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StopAt<C = NoCursor> {
+    #[default]
+    Never,
+    CurrentEnd,
+    Cursor(C),
+}
+
 /// Marker for subscriptions that can be told to resume from a cursor.
 /// `CheckpointReader` calls `with_start(StartFrom::After(cursor))` on the
 /// inner subscription when it has a stored checkpoint.
@@ -49,26 +57,45 @@ mod tests {
     struct TestCursor(i64);
 
     #[test]
-    fn default_is_latest() {
-        let s: StartFrom = StartFrom::default();
-        assert_eq!(s, StartFrom::Latest);
+    fn start_from_default_is_latest() {
+        let start: StartFrom = StartFrom::default();
+        assert_eq!(start, StartFrom::Latest);
     }
 
     #[test]
-    fn timestamp_variant() {
-        let t = Utc::now();
-        let s: StartFrom = StartFrom::Timestamp(t);
-        if let StartFrom::Timestamp(t2) = s {
-            assert_eq!(t, t2);
-        } else {
-            panic!("expected timestamp variant");
-        }
+    fn start_from_timestamp_variant() {
+        let timestamp = Utc::now();
+        let start: StartFrom = StartFrom::Timestamp(timestamp);
+
+        assert_eq!(start, StartFrom::Timestamp(timestamp));
     }
 
     #[test]
-    fn after_variant_carries_cursor() {
+    fn start_from_after_variant_carries_cursor() {
         let start = StartFrom::After(TestCursor(9));
+
         assert_eq!(start, StartFrom::After(TestCursor(9)));
+    }
+
+    #[test]
+    fn stop_at_default_is_never() {
+        let stop: StopAt = StopAt::default();
+
+        assert_eq!(stop, StopAt::Never);
+    }
+
+    #[test]
+    fn stop_at_current_end_variant() {
+        let stop: StopAt<TestCursor> = StopAt::CurrentEnd;
+
+        assert_eq!(stop, StopAt::CurrentEnd);
+    }
+
+    #[test]
+    fn stop_at_cursor_variant_carries_cursor() {
+        let stop = StopAt::Cursor(TestCursor(10));
+
+        assert_eq!(stop, StopAt::Cursor(TestCursor(10)));
     }
 
     #[derive(Debug, Clone, Default)]

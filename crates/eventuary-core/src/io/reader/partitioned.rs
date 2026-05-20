@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::event_key::Partition;
-use crate::io::start_from::{StartFrom, StartableSubscription};
+use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, NoCursor, Reader};
 

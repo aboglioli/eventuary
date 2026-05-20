@@ -3,7 +3,7 @@ use std::pin::Pin;
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
-use crate::io::start_from::{StartFrom, StartableSubscription};
+use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::{Cursor, CursorCodec, EncodedCursor, Message, Reader};
 
 pub struct EncodedCursorReader<R, Codec> {

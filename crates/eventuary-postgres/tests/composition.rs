@@ -14,7 +14,7 @@ use eventuary_core::io::reader::{
     PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
 use eventuary_core::io::{Reader, StreamId, Writer};
-use eventuary_core::{Event, OrganizationId, Payload, StartFrom};
+use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
 use eventuary_postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
@@ -58,6 +58,7 @@ fn fast_config() -> PgReaderConfig {
 fn sub_for(org: &str) -> PgSubscription {
     PgSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new(org).unwrap()),
         batch_size: Some(10),
         limit: None,
