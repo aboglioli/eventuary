@@ -4,6 +4,7 @@ pub mod acker;
 pub mod consumer;
 pub mod consumer_group_id;
 pub mod cursor;
+pub mod duplex;
 pub mod filter;
 pub mod handler;
 pub mod message;
@@ -19,6 +20,7 @@ pub use cursor::{
     Cursor, CursorCodec, CursorId, CursorKind, CursorOrder, EncodedCursor, JsonCursorCodec,
     NoCursor,
 };
+pub use duplex::Duplex;
 pub use filter::{ArcFilter, BoxFilter, Filter, FilterExt};
 pub use handler::{ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt};
 pub use message::Message;
