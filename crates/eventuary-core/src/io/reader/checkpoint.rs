@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
-use crate::io::start_from::{StartFrom, StartableSubscription};
+use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
@@ -395,7 +395,7 @@ mod tests {
     use crate::io::Message;
     use crate::io::StreamId;
     use crate::io::acker::NoopAcker;
-    use crate::io::start_from::{StartFrom, StartableSubscription};
+    use crate::io::position::{StartFrom, StartableSubscription};
     use crate::payload::Payload;
     use futures::Stream;
     use std::pin::Pin;

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::event::EventId;
-use crate::io::start_from::{StartFrom, StartableSubscription};
+use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 

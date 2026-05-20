@@ -7,8 +7,8 @@ pub mod cursor;
 pub mod filter;
 pub mod handler;
 pub mod message;
+pub mod position;
 pub mod reader;
-pub mod start_from;
 pub mod stream;
 pub mod stream_id;
 pub mod writer;
@@ -22,7 +22,7 @@ pub use cursor::{
 pub use filter::{ArcFilter, BoxFilter, Filter, FilterExt};
 pub use handler::{ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt};
 pub use message::Message;
+pub use position::{StartFrom, StartableSubscription, StopAt};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
-pub use start_from::{StartFrom, StartableSubscription};
 pub use stream_id::StreamId;
 pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};
