@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::{Reader, Writer};
 use eventuary_core::{
-    Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, Topic,
+    Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt, Topic,
     TopicPattern,
 };
 use eventuary_postgres::database::PgDatabase;
@@ -49,6 +49,7 @@ fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
 fn sub_for(org: &str) -> PgSubscription {
     PgSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new(org).unwrap()),
         batch_size: Some(10),
         limit: None,
@@ -202,6 +203,7 @@ async fn start_from_after_cursor_resumes() {
 
     let resume = PgSubscription {
         start: StartFrom::After(cursor),
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         batch_size: Some(10),
         limit: None,
@@ -228,6 +230,7 @@ async fn start_from_latest_skips_existing_events() {
     }
     let subscription = PgSubscription {
         start: StartFrom::Latest,
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         batch_size: Some(10),
         limit: None,
@@ -267,6 +270,7 @@ async fn start_from_timestamp_filters_old_events() {
 
     let subscription = PgSubscription {
         start: StartFrom::Timestamp(cutoff),
+        stop_at: StopAt::Never,
         filter: EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         batch_size: Some(10),
         limit: None,
@@ -302,6 +306,7 @@ async fn topic_filter() {
     filter.topic = Some(TopicPattern::exact(Topic::new("task.created").unwrap()));
     let subscription = PgSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter,
         batch_size: Some(10),
         limit: None,
@@ -347,6 +352,7 @@ async fn namespace_filter() {
     ));
     let subscription = PgSubscription {
         start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
         filter,
         batch_size: Some(10),
         limit: None,
@@ -372,4 +378,130 @@ async fn namespace_filter() {
 #[allow(dead_code)]
 fn _cursor_type_uses_pg_cursor() {
     let _: PgCursor = PgCursor::new(1);
+}
+
+#[tokio::test]
+async fn stop_at_current_end_finishes_after_existing_events() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+    for i in 0..3 {
+        writer
+            .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let subscription = PgSubscription {
+        stop_at: StopAt::CurrentEnd,
+        ..sub_for("acme")
+    };
+    let reader = PgReader::new(pool, fast_config());
+    let mut stream = reader.read(subscription).await.unwrap();
+
+    for i in 0..3 {
+        let msg = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(msg.event().key().unwrap().as_str(), format!("k{i}"));
+        msg.ack().await.unwrap();
+    }
+
+    let done = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap();
+    assert!(done.is_none());
+}
+
+#[tokio::test]
+async fn stop_at_cursor_finishes_at_inclusive_cursor() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+    for i in 0..4 {
+        writer
+            .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let reader = PgReader::new(pool.clone(), fast_config());
+    let mut probe = reader
+        .read(PgSubscription {
+            stop_at: StopAt::CurrentEnd,
+            ..sub_for("acme")
+        })
+        .await
+        .unwrap();
+    let first = timeout(Duration::from_secs(5), probe.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    first.ack().await.unwrap();
+    let second = timeout(Duration::from_secs(5), probe.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let stop_cursor = *second.cursor();
+    second.ack().await.unwrap();
+    drop(probe);
+
+    let reader = PgReader::new(pool, fast_config());
+    let mut stream = reader
+        .read(PgSubscription {
+            stop_at: StopAt::Cursor(stop_cursor),
+            ..sub_for("acme")
+        })
+        .await
+        .unwrap();
+
+    let first = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.event().key().unwrap().as_str(), "k0");
+    first.ack().await.unwrap();
+
+    let second = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.event().key().unwrap().as_str(), "k1");
+    second.ack().await.unwrap();
+
+    let done = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap();
+    assert!(done.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_at_never_waits_for_future_events() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+    let reader = PgReader::new(pool, fast_config());
+    let mut stream = reader
+        .read(PgSubscription {
+            stop_at: StopAt::Never,
+            ..sub_for("acme")
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "future"))
+        .await
+        .unwrap();
+
+    let msg = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.event().key().unwrap().as_str(), "future");
 }

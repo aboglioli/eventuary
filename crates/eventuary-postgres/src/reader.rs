@@ -13,7 +13,7 @@ use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
 use eventuary_core::{
     Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
-    StartableSubscription, TopicPattern,
+    StartableSubscription, StopAt, TopicPattern,
 };
 
 use crate::relation::PgRelationName;
@@ -51,6 +51,7 @@ impl PgCursor {
 #[derive(Debug, Clone)]
 pub struct PgSubscription {
     pub start: StartFrom<PgCursor>,
+    pub stop_at: StopAt<PgCursor>,
     pub filter: EventFilter,
     pub batch_size: Option<usize>,
     pub limit: Option<usize>,
@@ -60,6 +61,7 @@ impl Default for PgSubscription {
     fn default() -> Self {
         Self {
             start: StartFrom::Latest,
+            stop_at: StopAt::Never,
             filter: EventFilter::default(),
             batch_size: None,
             limit: None,
@@ -163,6 +165,14 @@ impl Reader for PgReader {
                 }
             };
 
+        let stop_seq = match resolve_stop_position(&pool, &events_relation, &subscription).await {
+            Ok(pos) => pos,
+            Err(e) => {
+                let _ = tx.send(Err(e)).await;
+                return Ok(SpawnedStream::from_receiver(rx));
+            }
+        };
+
         let state = Arc::new(Mutex::new(CursorState {
             last_acked: after_seq,
             pending_nack: false,
@@ -178,6 +188,7 @@ impl Reader for PgReader {
                         &pool,
                         &events_relation,
                         after_seq,
+                        stop_seq,
                         batch_size,
                         lower_bound_ts,
                         &filter,
@@ -191,6 +202,9 @@ impl Reader for PgReader {
                         }
                     };
                     if fetched.is_empty() {
+                        if stop_seq.is_some() {
+                            return;
+                        }
                         tokio::time::sleep(poll_interval).await;
                         continue;
                     }
@@ -310,10 +324,39 @@ async fn resolve_initial_position(
     }
 }
 
+async fn resolve_stop_position(
+    pool: &PgPool,
+    events_relation: &str,
+    subscription: &PgSubscription,
+) -> Result<Option<i64>> {
+    match subscription.stop_at {
+        StopAt::Never => Ok(None),
+        StopAt::Cursor(cursor) => Ok(Some(cursor.sequence)),
+        StopAt::CurrentEnd => {
+            let sql = match subscription.filter.organization.as_ref() {
+                Some(_) => format!(
+                    "SELECT COALESCE(MAX(sequence), 0) AS s FROM {events_relation} WHERE organization = $1",
+                ),
+                None => format!("SELECT COALESCE(MAX(sequence), 0) AS s FROM {events_relation}"),
+            };
+            let mut query = sqlx::query(&sql);
+            if let Some(org) = subscription.filter.organization.as_ref() {
+                query = query.bind(org.as_str());
+            }
+            let row = query
+                .fetch_one(pool)
+                .await
+                .map_err(|e| Error::Store(e.to_string()))?;
+            Ok(Some(row.get::<i64, _>("s")))
+        }
+    }
+}
+
 async fn fetch_batch(
     pool: &PgPool,
     events_relation: &str,
     after_seq: i64,
+    stop_seq: Option<i64>,
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
     filter: &EventFilter,
@@ -326,6 +369,11 @@ async fn fetch_batch(
          FROM {events_relation} WHERE sequence > $1",
     );
     let mut bind_index = 2usize;
+
+    if stop_seq.is_some() {
+        sql.push_str(&format!(" AND sequence <= ${bind_index}"));
+        bind_index += 1;
+    }
 
     if filter.organization.is_some() {
         sql.push_str(&format!(" AND organization = ${bind_index}"));
@@ -356,6 +404,10 @@ async fn fetch_batch(
     sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ${bind_index}"));
 
     let mut q = sqlx::query(&sql).bind(after_seq);
+
+    if let Some(stop_seq) = stop_seq {
+        q = q.bind(stop_seq);
+    }
 
     if let Some(org) = &filter.organization {
         q = q.bind(org.as_str());
