@@ -29,7 +29,8 @@ pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use stream_id::StreamId;
 pub use writer::{
     ArcWriter, BoxWriter, DynWriter, FanoutWriter, FilteredWriter, InspectWriter,
-    InspectWriterHooks, MapWriter, TryMapWriter, Writer, WriterExt,
+    InspectWriterHooks, MapWriter, RetryWriter, RetryWriterConfig, TimeoutWriter, TryMapWriter,
+    Writer, WriterExt,
 };
 
 #[cfg(test)]

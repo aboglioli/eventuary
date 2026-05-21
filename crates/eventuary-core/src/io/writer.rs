@@ -93,11 +93,15 @@ pub mod fanout;
 pub mod filtered;
 pub mod inspect;
 pub mod map;
+pub mod retry;
+pub mod timeout;
 
 pub use fanout::FanoutWriter;
 pub use filtered::FilteredWriter;
 pub use inspect::{InspectWriter, InspectWriterHooks};
 pub use map::{MapWriter, TryMapWriter};
+pub use retry::{RetryWriter, RetryWriterConfig};
+pub use timeout::TimeoutWriter;
 
 #[cfg(test)]
 mod tests {
