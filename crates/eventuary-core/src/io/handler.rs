@@ -143,15 +143,21 @@ mod tests {
 }
 
 pub mod filtered;
+pub mod inspect;
 pub mod multiplexer;
+pub mod rate_limit;
 pub mod retry;
+pub mod timeout;
 
 pub use filtered::FilteredHandler;
+pub use inspect::{InspectHandler, InspectHandlerHooks};
 pub use multiplexer::{
     Multiplexer, MultiplexerBuilder, MultiplexerKey, MultiplexerStore, NoMatchPolicy,
     NoMultiplexerStore, SubscriberId,
 };
+pub use rate_limit::{HandlerRateLimit, RateLimitHandler};
 pub use retry::{
     DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler, RetryPolicy,
     backoff_delay,
 };
+pub use timeout::TimeoutHandler;
