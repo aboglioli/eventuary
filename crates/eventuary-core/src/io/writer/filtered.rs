@@ -26,6 +26,12 @@ where
     }
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
+        if events.iter().all(|event| self.filter.matches(event)) {
+            if events.is_empty() {
+                return Ok(());
+            }
+            return self.inner.write_all(events).await;
+        }
         let filtered = events
             .iter()
             .filter(|event| self.filter.matches(event))

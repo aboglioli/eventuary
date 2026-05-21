@@ -25,7 +25,7 @@ pub struct OutcomeRouterReader<R> {
 
 pub struct OutcomeRouterAcker<A: Acker> {
     inner: A,
-    event: Arc<Event>,
+    event: Event,
     ack_writer: Option<ArcWriter>,
     nack_writer: Option<ArcWriter>,
     nack_disposition: NackDisposition,
@@ -168,16 +168,15 @@ where
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(message))) => {
                 let (event, inner, cursor) = message.into_parts();
-                let event = Arc::new(event);
                 let acker = OutcomeRouterAcker {
                     inner,
-                    event: Arc::clone(&event),
+                    event: event.clone(),
                     ack_writer: self.ack_writer.clone(),
                     nack_writer: self.nack_writer.clone(),
                     nack_disposition: self.nack_disposition,
                     completed: Arc::new(AtomicBool::new(false)),
                 };
-                Poll::Ready(Some(Ok(Message::new((*event).clone(), acker, cursor))))
+                Poll::Ready(Some(Ok(Message::new(event, acker, cursor))))
             }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),

@@ -143,13 +143,13 @@ async fn run_flusher<W>(
     }
 }
 
-async fn flush_requests<W>(inner: &W, requests: Vec<BatchWriteRequest>)
+async fn flush_requests<W>(inner: &W, mut requests: Vec<BatchWriteRequest>)
 where
     W: Writer,
 {
     let events = requests
-        .iter()
-        .flat_map(|request| request.events.iter().cloned())
+        .iter_mut()
+        .flat_map(|request| std::mem::take(&mut request.events))
         .collect::<Vec<_>>();
     let result = inner.write_all(&events).await;
 
