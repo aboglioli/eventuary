@@ -27,4 +27,6 @@ pub use message::Message;
 pub use position::{StartFrom, StartableSubscription, StopAt};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use stream_id::StreamId;
-pub use writer::{ArcWriter, BoxWriter, DynWriter, MapWriter, TryMapWriter, Writer, WriterExt};
+pub use writer::{
+    ArcWriter, BoxWriter, DynWriter, FanoutWriter, MapWriter, TryMapWriter, Writer, WriterExt,
+};
