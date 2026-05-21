@@ -66,7 +66,15 @@ crates/
 │       ├── serialization.rs # SerializedEvent wire format
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
-│           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt
+│           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt + submod owner
+│           ├── writer/
+│           │   ├── map.rs       # MapWriter + TryMapWriter
+│           │   ├── filtered.rs  # FilteredWriter
+│           │   ├── fanout.rs    # FanoutWriter
+│           │   ├── retry.rs     # RetryWriter + RetryWriterConfig
+│           │   ├── timeout.rs   # TimeoutWriter
+│           │   ├── inspect.rs   # InspectWriter + InspectWriterHooks
+│           │   └── batch.rs     # BatchWriter + BatchWriterConfig
 │           ├── reader.rs   # Reader trait + Dyn/Box/Arc + ReaderExt + BoxStream + submod owner
 │           ├── reader/
 │           │   ├── filtered.rs        # FilteredReader + FilteredStream
@@ -82,6 +90,7 @@ crates/
 │           │   ├── dedupe.rs          # DedupeReader + DedupeStore trait + DedupeAcker
 │           │   ├── watermark.rs       # WatermarkReader (static or per-entity key fn) + WatermarkStore trait + WatermarkAcker
 │           │   ├── merge.rs           # MergeReader + MergeAcker + MergeCursor + MergeStrategy
+│           │   ├── outcome_router.rs  # OutcomeRouterReader + OutcomeRouterAcker + NackDisposition
 │           │   ├── replay_then_live.rs # ReplayThenLiveReader + ReplayThenLiveConfig (overlap dedupe) + ReplayLiveAcker + ReplayLiveCursor
 │           │   ├── buffer.rs           # BufferedReader + BufferStore trait + BufferAcker + BufferEntry
 │           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
@@ -94,8 +103,11 @@ crates/
 │           │   └── either.rs    # Re-exports Either for variant ackers
 │           ├── handler.rs  # Handler trait + Dyn/Box/Arc + HandlerExt + submod owner
 │           ├── handler/
-│           │   ├── filtered.rs # FilteredHandler
-│           │   └── retry.rs    # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
+│           │   ├── filtered.rs   # FilteredHandler
+│           │   ├── timeout.rs    # TimeoutHandler
+│           │   ├── inspect.rs    # InspectHandler + InspectHandlerHooks
+│           │   ├── rate_limit.rs # RateLimitHandler + HandlerRateLimit
+│           │   └── retry.rs      # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
 │           ├── consumer.rs # BackgroundConsumer + ConsumerHandle re-exports (submod owner)
 │           ├── consumer/
 │           │   └── background.rs # BackgroundConsumer + ConsumerHandle
@@ -103,7 +115,8 @@ crates/
 │           ├── stream/
 │           │   ├── batched.rs # BatchedStream
 │           │   └── spawned.rs # SpawnedStream
-│           ├── start_from.rs # StartFrom<C> (Earliest / Latest / Timestamp / After) + StartableSubscription
+│           ├── duplex.rs   # Duplex<W, R> delegating Reader + Writer pair
+│           ├── position.rs # StartFrom<C> + StopAt<C> + StartableSubscription
 │           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter + Filter impls for TopicPattern/NamespacePattern
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
@@ -222,8 +235,8 @@ key set, metadata subset, `end_at`); positional/cursor concerns live on
 the subscription itself.
 
 - `MemorySubscription { filter, limit }`
-- `SqliteSubscription { start: StartFrom<SqliteCursor>, filter, batch_size, limit }`
-- `PgSubscription { start: StartFrom<PgCursor>, filter, batch_size, limit }`
+- `SqliteSubscription { start: StartFrom<SqliteCursor>, stop_at: StopAt<SqliteCursor>, filter, batch_size, limit }`
+- `PgSubscription { start: StartFrom<PgCursor>, stop_at: StopAt<PgCursor>, filter, batch_size, limit }`
 - `KafkaSubscription { topics, consumer_group_id, start_from, event_filter, limit }`
 - `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, event_filter, limit }`
 
@@ -232,7 +245,9 @@ SQL query to prune at the DB; Kafka/SQS apply them in the consumer loop.
 
 The `StartableSubscription<C>` trait abstracts `start: StartFrom<C>` so
 `CheckpointReader` can call `subscription.with_start(StartFrom::After(cursor))`
-when it resumes from a persisted checkpoint.
+when it resumes from a persisted checkpoint. SQL subscriptions also expose
+`StopAt<C>` for finite replay: `Never` live-tails, `CurrentEnd` snapshots the
+current end at read start, and `Cursor(c)` stops at an inclusive cursor.
 
 ### Message + Acker
 
@@ -281,7 +296,10 @@ each `BatchedAcker` carries a token (receipt handle for SQS,
 For retries, wrap the handler with `RetryHandler<H, P, W>` and provide a
 `RetryPolicy` (default: exponential backoff, then dead-letter). Failed
 events are written to a `*.dead_letter` topic via `DeadLetterWriter`,
-preserving the original event plus failure metadata.
+preserving the original event plus failure metadata. Generic event-flow routing
+should prefer composable reader/writer wrappers (`OutcomeRouterReader`,
+`TryMapWriter`, `FanoutWriter`, `RetryWriter`, `TimeoutWriter`) so dead-letter,
+audit, and side-channel flows are not hardcoded into handlers.
 
 ### Snapshots + Partitioning
 
@@ -375,13 +393,48 @@ single source. Cross-cutting concerns live in generic core wrappers in
 | `WindowReader<R>` | `BatchAcker` / `BatchCursor` | Same shape as `BatchReader` but flushes on `max_size: NonZeroUsize` **or** `max_wait: Duration`. Reuses `flush_batch` helper from `batch.rs`. |
 | `DedupeReader<R, S>` | `DedupeAcker<R::Acker, S>` / passthrough | Skip already-seen events via a `DedupeStore`. `exists` check on intake; `mark_processed` deferred until downstream ack so nack/crash before processing does not silently drop the event. Trait offers `mark_if_new(&Event) -> Result<bool>` (atomic; default impl built on `exists`+`mark`, override for native atomicity). Memory, PostgreSQL, and SQLite store implementations live in their backend crates. |
 | `WatermarkReader<R, S>` | `WatermarkAcker<R::Acker, S>` / passthrough | Drop events older than the stored watermark. `with_static_key(reader, store, key)` or `with_key_fn(reader, store, |event| ...)` for per-entity watermarks (e.g., `"orders:customer-N"`). Save deferred to ack; in-memory cache shared between intake and acker so nack leaves both the store and the in-memory cursor untouched. |
-| `MergeReader<R1, R2>` | `MergeAcker<R1::Acker, R2::Acker>` / `MergeCursor<R1::Cursor, R2::Cursor>` | Combine two readers into one stream. `MergeStrategy::Fair` (default; `futures::stream::select`) or `MergeStrategy::LeftPriority` (drain left first via `select_with_strategy` + `PollNext::Left`). `MergeCursor` impls `Cursor` so the merged stream composes under `CheckpointReader`. |
+| `MergeReader<R1, R2>` | `MergeAcker<R1::Acker, R2::Acker>` / `MergeCursor<R1::Cursor, R2::Cursor>` | Combine two readers into one stream. `MergeStrategy::Fair` (default; `futures::stream::select`), `LeftPriority`, or `Weighted { left, right }` for biased polling when both sides are ready. `MergeCursor` impls `Cursor` so the merged stream composes under `CheckpointReader`. |
+| `OutcomeRouterReader<R>` | `OutcomeRouterAcker<R::Acker>` / passthrough | Route original delivered events to optional ack/nack writers when downstream calls `ack` or `nack`. `NackDisposition::NackInner` preserves redelivery; `AckInnerAfterRoute` moves nacked events to the side flow after a successful route write. Mapping belongs in `MapWriter` / `TryMapWriter`, not in this reader. |
 | `ReplayThenLiveReader<R, L>` | `ReplayLiveAcker<R::Acker, L::Acker>` / `ReplayLiveCursor<R::Cursor, L::Cursor>` | Historical-then-live phase switch (e.g., Postgres replay → Kafka live). `ReplayThenLiveConfig::overlap_dedupe_capacity: Option<NonZeroUsize>` records the last N replay event ids and silently acks any live event whose id matches. |
 
 Identity for the checkpoint store is `CheckpointKey { scope: { group,
 stream_id }, cursor_id: CursorId }`. Unpartitioned consumers use
 `CursorId::Global`; partitioned consumers use the lane-named id so
 each lane checkpoints independently.
+
+
+### Writer and Handler Composition Wrappers
+
+Writer wrappers live in `eventuary-core/src/io/writer/` and compose around any
+`Writer`. They keep event transformation, routing, fanout, retry, timeout,
+inspection, and batching as separate responsibilities.
+
+| Wrapper | Purpose |
+|---|---|
+| `MapWriter<W, F>` | Transform `&Event -> Event` before writing. The mapper decides whether to clone the input or build a new event. |
+| `TryMapWriter<W, F>` | Fallibly transform `&Event -> Result<Event>` before writing. |
+| `FilteredWriter<W, F>` | Skip writes when `Filter::matches` is false. |
+| `FanoutWriter` | Write the same event or batch to multiple `ArcWriter` destinations concurrently; all destinations are awaited and the first error is returned. |
+| `RetryWriter<W>` | Retry `write` and `write_all` failures with validated exponential backoff. |
+| `TimeoutWriter<W>` | Bound write and batch-write latency with `Error::Timeout`. |
+| `InspectWriter<W, H>` | Observability hooks for write attempts, successes, and errors. |
+| `BatchWriter` | Background flusher that batches concurrent write requests by `max_events` or `max_wait` and answers each caller after the backend `write_all` completes. |
+
+Handler wrappers live in `eventuary-core/src/io/handler/` and compose around any
+`Handler`.
+
+| Wrapper | Purpose |
+|---|---|
+| `FilteredHandler<H, F>` | Skip handler execution when the filter does not match. |
+| `TimeoutHandler<H>` | Bound handler execution with `Error::Timeout`. |
+| `InspectHandler<H, Hooks>` | Observability hooks for handler start, success, error, and elapsed duration. |
+| `RateLimitHandler<H>` | Serialize handler calls through a calls-per-second rate limit. |
+| `RetryHandler<H, P, W>` | Retry handler failures and optionally write a dead-letter event after policy exhaustion. |
+
+Dead-letter-style flows should be assembled from generic wrappers where
+possible: route failed messages with `OutcomeRouterReader`, map the event with
+`TryMapWriter`, fan out with `FanoutWriter`, and protect side writes with
+`RetryWriter` / `TimeoutWriter`.
 
 **Backend capability matrix.**
 
@@ -608,7 +661,7 @@ Each crate exposes its base abstractions and cross-cutting value types at the to
 |---|---|---|
 | Base trait + companions (`Dyn`/`Box`/`Arc`/`Ext`) | `eventuary_core::*` or `eventuary_core::io::*` | `Acker`, `Reader`, `Writer`, `Handler`, `Filter`, `Cursor` |
 | Cross-cutting value type | `eventuary_core::*` or `eventuary_core::io::*` | `Message`, `NoCursor`, `CursorId`, `StreamId`, `ConsumerGroupId`, `BoxFuture` |
-| Trait implementation / wrapper | `eventuary_core::io::<module>::*` | `io::reader::CheckpointReader`, `io::handler::RetryHandler`, `io::consumer::BackgroundConsumer`, `io::stream::BatchedStream`, `io::acker::OnceAcker`, `io::filter::EventFilter` |
+| Trait implementation / wrapper | `eventuary_core::io::<module>::*` | `io::reader::CheckpointReader`, `io::writer::FanoutWriter`, `io::handler::RetryHandler`, `io::consumer::BackgroundConsumer`, `io::stream::BatchedStream`, `io::acker::OnceAcker`, `io::filter::EventFilter` |
 | Auxiliary type of an implementation | same submodule as the implementation | `io::reader::CheckpointKey`, `io::reader::PartitionedCursor`, `io::handler::RetryPolicy` |
 
 **Backend crates** (`eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`, `eventuary-sqs`, `eventuary-kafka`):
@@ -633,8 +686,9 @@ use eventuary::{Event, EventId, Topic, Namespace, OrganizationId, Payload};
 use eventuary::io::{Reader, Writer, Handler, Acker, Filter, Message};
 
 // IO wrappers / implementations (auxiliaries colocated with their wrapper)
-use eventuary::io::reader::{CheckpointReader, PartitionedReader, FilteredReader};
-use eventuary::io::handler::{RetryHandler, FilteredHandler, DeadLetterWriter};
+use eventuary::io::reader::{CheckpointReader, OutcomeRouterReader, PartitionedReader};
+use eventuary::io::writer::{FanoutWriter, FilteredWriter, TryMapWriter};
+use eventuary::io::handler::{RetryHandler, FilteredHandler, TimeoutHandler, DeadLetterWriter};
 use eventuary::io::consumer::BackgroundConsumer;
 use eventuary::io::stream::{BatchedStream, SpawnedStream};
 use eventuary::io::acker::{OnceAcker, NoopAcker, BatchedAcker};
@@ -668,7 +722,7 @@ The two routes are interchangeable — the umbrella does `pub use eventuary_core
 |---|---|---|
 | `<crate>::Type` | Domain value | `Event`, `Topic`, `Payload` |
 | `<crate>::io::Type` | IO base abstraction | `Reader`, `Acker`, `Message` |
-| `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::handler::RetryPolicy` |
+| `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::writer::FanoutWriter`, `io::handler::RetryPolicy` |
 | `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor`, `memory::multiplexer_store::MemoryMultiplexerStore` |
 
 No `prelude` module is provided by design — importing through these paths is the learning surface for the structure. Once the layering is understood, users may write personal preludes in their own crates.
@@ -767,7 +821,7 @@ Worth knowing when changing the codebase:
   - Constructors that pick distinct delivery semantics use named
     functions instead of an enum field (`PartitionedReader::source` vs
     `PartitionedReader::delivery`; `MergeReader::new` vs
-    `MergeReader::with_left_priority`).
+    `MergeReader::with_left_priority` vs `MergeReader::with_weighted`).
   - Observability hooks receive `&Event` (e.g., `InspectHooks::on_ack`)
     so consumers can tag metrics/logs without maintaining a parallel
     id→event map.
