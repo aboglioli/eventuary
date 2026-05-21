@@ -212,15 +212,17 @@ mod tests {
         }
     }
 
+    type ContextMessage = Message<ContextAcker, NoCursor>;
+
     struct ContextReader {
-        items: Mutex<Option<Vec<Result<Message<ContextAcker, NoCursor>>>>>,
+        items: Mutex<Option<Vec<Result<ContextMessage>>>>,
     }
 
     impl Reader for ContextReader {
         type Subscription = TestSub;
         type Acker = ContextAcker;
         type Cursor = NoCursor;
-        type Stream = Pin<Box<dyn Stream<Item = Result<Message<ContextAcker, NoCursor>>> + Send>>;
+        type Stream = Pin<Box<dyn Stream<Item = Result<ContextMessage>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
             let items = self.items.lock().unwrap().take().unwrap_or_default();
