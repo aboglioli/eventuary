@@ -65,7 +65,10 @@ where
                         if let Some(entry) = pending.remove(&id)
                             && !entry.shared.resolved.swap(true, Ordering::SeqCst)
                         {
-                            let _ = entry.shared.inner.nack().await;
+                            let context = NackContext::delivery_expired(
+                                "message delivery expired before ack or nack",
+                            );
+                            let _ = entry.shared.inner.nack_with(context).await;
                         }
                     }
                     item = inner.next(), if !inner_done => {
@@ -239,6 +242,7 @@ mod tests {
     struct NackCounter {
         nacks: Arc<std::sync::atomic::AtomicUsize>,
         acks: Arc<std::sync::atomic::AtomicUsize>,
+        contexts: Arc<Mutex<Vec<NackContext>>>,
     }
 
     impl Acker for NackCounter {
@@ -248,6 +252,11 @@ mod tests {
         }
         async fn nack(&self) -> Result<()> {
             self.nacks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.nacks.fetch_add(1, Ordering::SeqCst);
+            self.contexts.lock().unwrap().push(context);
             Ok(())
         }
     }
@@ -287,6 +296,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(counter.nacks.load(Ordering::SeqCst), 1);
         assert_eq!(counter.acks.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn timeout_reader_emits_delivery_expired_nack_context_on_expiry() {
+        use crate::io::acker::NackReason;
+        use futures::StreamExt;
+        let counter = NackCounter::default();
+        let reader = CountingReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                ev(),
+                counter.clone(),
+                TestCursor(1),
+            ))])),
+        };
+        let timed = TimeoutReader::new(reader, Duration::from_millis(20));
+        let mut stream = timed.read(()).await.unwrap();
+        let _msg = stream.next().await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let contexts = counter.contexts.lock().unwrap().clone();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].reason(), NackReason::DeliveryExpired);
     }
 
     #[tokio::test]

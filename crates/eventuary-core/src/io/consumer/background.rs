@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::error::{Error, Result};
+use crate::io::acker::NackContext;
 use crate::io::{Handler, Reader};
 
 pub struct BackgroundConsumer<R: Reader, H: Handler> {
@@ -116,7 +117,22 @@ where
                                 }
                                 Err(e) => {
                                     tracing::warn!("handler {} error: {e}", handler.id());
-                                    let _ = msg.nack().await;
+                                    let context = match &e {
+                                        Error::Timeout(message) => NackContext::handler_timeout(
+                                            handler.id(),
+                                            message.clone(),
+                                        ),
+                                        _ => NackContext::handler_error(handler.id(), e.clone()),
+                                    };
+                                    match context {
+                                        Ok(context) => {
+                                            let _ = msg.nack_with(context).await;
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!("failed to build nack context: {error}");
+                                            let _ = msg.nack().await;
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -165,11 +181,52 @@ mod tests {
 
     use futures::Stream;
 
+    use crate::context::ContextValue;
     use crate::event::Event;
     use crate::io::Message;
     use crate::io::NoCursor;
-    use crate::io::acker::NoopAcker;
+    use crate::io::acker::{NackReason, NoopAcker};
     use crate::payload::Payload;
+
+    #[derive(Clone, Default)]
+    struct ContextAcker {
+        contexts: Arc<Mutex<Vec<NackContext>>>,
+    }
+
+    impl ContextAcker {
+        fn contexts(&self) -> Vec<NackContext> {
+            self.contexts.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::io::Acker for ContextAcker {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.contexts.lock().unwrap().push(context);
+            Ok(())
+        }
+    }
+
+    struct ContextReader {
+        items: Mutex<Option<Vec<Result<Message<ContextAcker, NoCursor>>>>>,
+    }
+
+    impl Reader for ContextReader {
+        type Subscription = TestSub;
+        type Acker = ContextAcker;
+        type Cursor = NoCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<ContextAcker, NoCursor>>> + Send>>;
+
+        async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
+            let items = self.items.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(futures::stream::iter(items)))
+        }
+    }
 
     #[derive(Debug, Clone, Default)]
     struct TestSub;
@@ -306,6 +363,73 @@ mod tests {
                 .with_handler_timeout(Duration::from_millis(20));
         let handle = consumer.spawn();
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handler_error_emits_handler_error_nack_context() {
+        let acker = ContextAcker::default();
+        let reader = ContextReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                make_event(0),
+                acker.clone(),
+                NoCursor,
+            ))])),
+        };
+        let count = Arc::new(AtomicUsize::new(0));
+        let consumer = BackgroundConsumer::new(
+            reader,
+            subscription(),
+            FailingHandler {
+                id: "billing".into(),
+                count: Arc::clone(&count),
+            },
+            1,
+        );
+        let handle = consumer.spawn();
+        handle.shutdown().await.unwrap();
+
+        let contexts = acker.contexts();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].reason(), NackReason::HandlerError);
+        assert_eq!(
+            contexts[0].context().get("handler_id"),
+            Some(&ContextValue::String("billing".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_timeout_emits_handler_timeout_nack_context() {
+        struct SlowHandler;
+        impl Handler for SlowHandler {
+            fn id(&self) -> &str {
+                "slow"
+            }
+            async fn handle(&self, _: &Event) -> Result<()> {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(())
+            }
+        }
+
+        let acker = ContextAcker::default();
+        let reader = ContextReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                make_event(0),
+                acker.clone(),
+                NoCursor,
+            ))])),
+        };
+        let consumer = BackgroundConsumer::new(reader, subscription(), SlowHandler, 1)
+            .with_handler_timeout(Duration::from_millis(20));
+        let handle = consumer.spawn();
+        handle.shutdown().await.unwrap();
+
+        let contexts = acker.contexts();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].reason(), NackReason::HandlerTimeout);
+        assert_eq!(
+            contexts[0].context().get("handler_id"),
+            Some(&ContextValue::String("slow".to_owned()))
+        );
     }
 
     #[tokio::test]
