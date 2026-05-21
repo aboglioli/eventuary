@@ -7,6 +7,7 @@ use futures::Stream;
 
 use crate::error::Result;
 use crate::event::Event;
+use crate::io::acker::NackContext;
 use crate::io::{Acker, ArcWriter, Message, Reader, Writer, WriterExt};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
@@ -128,6 +129,26 @@ where
 
         match self.nack_disposition {
             NackDisposition::NackInner => self.inner.nack().await,
+            NackDisposition::AckInnerAfterRoute => self.inner.ack().await,
+        }
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        if !self.mark_started() {
+            return Ok(());
+        }
+
+        let Some(writer) = self.nack_writer.as_ref() else {
+            return self.inner.nack_with(context).await;
+        };
+
+        if let Err(error) = writer.write(&self.event).await {
+            self.best_effort_nack_inner().await;
+            return Err(error);
+        }
+
+        match self.nack_disposition {
+            NackDisposition::NackInner => self.inner.nack_with(context).await,
             NackDisposition::AckInnerAfterRoute => self.inner.ack().await,
         }
     }
@@ -581,6 +602,70 @@ mod tests {
 
         assert!(err.to_string().contains("upstream broken"));
         assert!(captured.events().is_empty());
+    }
+
+    #[derive(Clone, Default)]
+    struct ContextAcker {
+        captured: Arc<Mutex<Vec<NackContext>>>,
+        nack_count: Arc<AtomicUsize>,
+    }
+
+    impl Acker for ContextAcker {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            self.nack_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.captured.lock().unwrap().push(context);
+            self.nack_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct SingleContextReader {
+        event: Mutex<Option<Event>>,
+        acker: ContextAcker,
+    }
+
+    impl Reader for SingleContextReader {
+        type Subscription = ();
+        type Acker = ContextAcker;
+        type Cursor = NoCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<ContextAcker, NoCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let event = self.event.lock().unwrap().take().expect("event available");
+            let acker = self.acker.clone();
+            Ok(Box::pin(stream::once(async move {
+                Ok(Message::new(event, acker, NoCursor))
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn outcome_router_forwards_nack_context_to_inner() {
+        let nack_writer = CapturingWriter::default();
+        let acker = ContextAcker::default();
+        let captured = Arc::clone(&acker.captured);
+        let source = SingleContextReader {
+            event: Mutex::new(Some(ev("source.topic"))),
+            acker: acker.clone(),
+        };
+        let reader = OutcomeRouterReader::on_nack(source, nack_writer);
+        let mut stream = reader.read(()).await.unwrap();
+
+        let message = stream.next().await.unwrap().unwrap();
+        message
+            .nack_with(NackContext::processing_rejected("downstream rejected").unwrap())
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].context().message(), "downstream rejected");
     }
 
     #[tokio::test]

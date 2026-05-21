@@ -9,6 +9,7 @@ use tokio_util::time::DelayQueue;
 use tokio_util::time::delay_queue::Key as DelayKey;
 
 use crate::error::Result;
+use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
 
@@ -150,6 +151,14 @@ impl<A: Acker> Acker for TimeoutAcker<A> {
         }
         let _ = self.tx_resolve.send(self.id).await;
         self.shared.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        if self.shared.resolved.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let _ = self.tx_resolve.send(self.id).await;
+        self.shared.inner.nack_with(context).await
     }
 }
 

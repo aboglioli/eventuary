@@ -50,6 +50,7 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::event_key::Partition;
+use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, NoCursor, Reader};
@@ -218,6 +219,34 @@ where
     async fn nack(&self) -> Result<()> {
         if matches!(self.ack_mode, PartitionedAckMode::AckInnerOnDownstreamAck) {
             self.inner_acker.nack().await?;
+            let mut state = self.state.lock().await;
+            let lane = &mut state.lanes[self.lane_id];
+            if matches!(&lane.in_flight, Some(f) if f.id == self.id) {
+                lane.in_flight = None;
+            }
+            drop(state);
+            self.notify.notify_waiters();
+            return Ok(());
+        }
+        let mut state = self.state.lock().await;
+        let lane = &mut state.lanes[self.lane_id];
+        if let Some(in_flight) = lane.in_flight.take()
+            && in_flight.id == self.id
+        {
+            lane.queue.push_front(BufferedItem {
+                event: in_flight.event,
+                acker: in_flight.acker,
+                cursor: in_flight.cursor,
+            });
+        }
+        drop(state);
+        self.notify.notify_waiters();
+        Ok(())
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        if matches!(self.ack_mode, PartitionedAckMode::AckInnerOnDownstreamAck) {
+            self.inner_acker.nack_with(context).await?;
             let mut state = self.state.lock().await;
             let lane = &mut state.lanes[self.lane_id];
             if matches!(&lane.in_flight, Some(f) if f.id == self.id) {

@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::Acker;
+use crate::io::acker::NackContext;
 
 pub struct Message<A: Acker, C> {
     event: Event,
@@ -35,6 +36,10 @@ impl<A: Acker, C> Message<A, C> {
 
     pub async fn nack(&self) -> Result<()> {
         self.acker.nack().await
+    }
+
+    pub async fn nack_with(&self, context: NackContext) -> Result<()> {
+        self.acker.nack_with(context).await
     }
 
     pub fn acker(&self) -> &A {
@@ -84,8 +89,10 @@ impl<A: Acker, C> Message<A, C> {
 mod tests {
     use super::*;
 
+    use std::sync::{Arc, Mutex};
+
     use crate::io::NoCursor;
-    use crate::io::acker::NoopAcker;
+    use crate::io::acker::{NackReason, NoopAcker};
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -152,5 +159,37 @@ mod tests {
         let msg = Message::new(ev(), NoopAcker, TestCursor(7));
         let (_event, _acker, cursor) = msg.into_parts();
         assert_eq!(cursor, TestCursor(7));
+    }
+
+    struct ContextAcker {
+        captured: Arc<Mutex<Vec<NackContext>>>,
+    }
+
+    impl Acker for ContextAcker {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.captured.lock().unwrap().push(context);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn nack_with_forwards_context_to_acker() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let acker = ContextAcker {
+            captured: Arc::clone(&captured),
+        };
+        let msg = Message::new(ev(), acker, NoCursor);
+        let context = NackContext::processing_rejected("bad payload").unwrap();
+        msg.nack_with(context).await.unwrap();
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].reason(), NackReason::ProcessingRejected);
+        assert_eq!(captured[0].context().message(), "bad payload");
     }
 }

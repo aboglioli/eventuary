@@ -2,6 +2,7 @@ use either::Either;
 
 use crate::error::Result;
 use crate::io::Acker;
+use crate::io::acker::NackContext;
 
 impl<L: Acker, R: Acker> Acker for Either<L, R> {
     async fn ack(&self) -> Result<()> {
@@ -15,6 +16,13 @@ impl<L: Acker, R: Acker> Acker for Either<L, R> {
         match self {
             Either::Left(a) => a.nack().await,
             Either::Right(a) => a.nack().await,
+        }
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        match self {
+            Either::Left(a) => a.nack_with(context).await,
+            Either::Right(a) => a.nack_with(context).await,
         }
     }
 }

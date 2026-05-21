@@ -8,6 +8,7 @@ use tokio::time::interval;
 
 use crate::error::{Error, Result};
 use crate::io::Acker;
+use crate::io::acker::NackContext;
 
 pub trait BatchFlusher: Send + Sync {
     type Token: Send + Sync + Clone + 'static;
@@ -146,6 +147,13 @@ impl<T: Send + Sync + Clone + 'static> Acker for BatchedAcker<T> {
     }
 
     async fn nack(&self) -> Result<()> {
+        self.tx
+            .send(AckCmd::Nack(self.token.clone()))
+            .await
+            .map_err(|e| Error::Store(format!("nack send: {e}")))
+    }
+
+    async fn nack_with(&self, _context: NackContext) -> Result<()> {
         self.tx
             .send(AckCmd::Nack(self.token.clone()))
             .await

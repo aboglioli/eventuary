@@ -5,6 +5,7 @@ use futures::StreamExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::error::Result;
+use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
 
@@ -89,6 +90,10 @@ impl<A: Acker> Acker for LimitAcker<A> {
 
     async fn nack(&self) -> Result<()> {
         self.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        self.inner.nack_with(context).await
     }
 }
 

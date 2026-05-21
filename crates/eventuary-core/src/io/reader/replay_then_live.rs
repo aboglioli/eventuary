@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::event::EventId;
+use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
@@ -168,6 +169,13 @@ impl<RA: Acker, LA: Acker> Acker for ReplayLiveAcker<RA, LA> {
         match self {
             Self::Replay(a) => a.nack().await,
             Self::Live(a) => a.nack().await,
+        }
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        match self {
+            Self::Replay(a) => a.nack_with(context).await,
+            Self::Live(a) => a.nack_with(context).await,
         }
     }
 }

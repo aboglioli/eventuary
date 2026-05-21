@@ -6,6 +6,7 @@ use futures::Stream;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::io::acker::NackContext;
 use crate::io::{Acker, Message, Reader};
 
 pub trait InspectHooks: Send + Sync {
@@ -67,6 +68,11 @@ impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
     async fn nack(&self) -> Result<()> {
         self.hooks.on_nack(&self.event);
         self.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        self.hooks.on_nack(&self.event);
+        self.inner.nack_with(context).await
     }
 }
 

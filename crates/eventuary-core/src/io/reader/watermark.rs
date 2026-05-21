@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::event::Event;
+use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
 
@@ -184,6 +185,10 @@ impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
 
     async fn nack(&self) -> Result<()> {
         self.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        self.inner.nack_with(context).await
     }
 }
 
