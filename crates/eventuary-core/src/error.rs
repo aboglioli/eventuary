@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum Error {
     #[error("invalid topic: {0}")]
     InvalidTopic(String),
@@ -63,5 +63,13 @@ mod tests {
         let err = Error::InvalidCursor("partition count changed".to_owned());
         assert!(matches!(err, Error::InvalidCursor(_)));
         assert_eq!(err.to_string(), "invalid cursor: partition count changed");
+    }
+
+    #[test]
+    fn error_is_cloneable() {
+        let err = Error::Store("write failed".to_owned());
+        let cloned = err.clone();
+
+        assert_eq!(err.to_string(), cloned.to_string());
     }
 }

@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 
 use futures::stream::{PollNext, select_with_strategy};
@@ -12,6 +13,10 @@ pub enum MergeStrategy {
     #[default]
     Fair,
     LeftPriority,
+    Weighted {
+        left: NonZeroUsize,
+        right: NonZeroUsize,
+    },
 }
 
 pub struct MergeReader<R1, R2> {
@@ -35,6 +40,46 @@ impl<R1, R2> MergeReader<R1, R2> {
             r2,
             strategy: MergeStrategy::LeftPriority,
         }
+    }
+
+    pub fn with_weighted(r1: R1, r2: R2, left: NonZeroUsize, right: NonZeroUsize) -> Self {
+        Self {
+            r1,
+            r2,
+            strategy: MergeStrategy::Weighted { left, right },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WeightedState {
+    left: NonZeroUsize,
+    right: NonZeroUsize,
+    remaining_left: usize,
+    remaining_right: usize,
+}
+
+impl WeightedState {
+    fn new(left: NonZeroUsize, right: NonZeroUsize) -> Self {
+        Self {
+            left,
+            right,
+            remaining_left: left.get(),
+            remaining_right: right.get(),
+        }
+    }
+
+    fn next(&mut self) -> PollNext {
+        if self.remaining_left == 0 && self.remaining_right == 0 {
+            self.remaining_left = self.left.get();
+            self.remaining_right = self.right.get();
+        }
+        if self.remaining_left > 0 {
+            self.remaining_left -= 1;
+            return PollNext::Left;
+        }
+        self.remaining_right -= 1;
+        PollNext::Right
     }
 }
 
@@ -78,6 +123,10 @@ where
             MergeStrategy::Fair => Box::pin(futures::stream::select(s1, s2)),
             MergeStrategy::LeftPriority => {
                 Box::pin(select_with_strategy(s1, s2, |_: &mut ()| PollNext::Left))
+            }
+            MergeStrategy::Weighted { left, right } => {
+                let mut state = WeightedState::new(left, right);
+                Box::pin(select_with_strategy(s1, s2, move |_: &mut ()| state.next()))
             }
         };
         Ok(merged)
@@ -321,6 +370,124 @@ mod tests {
             self.starts = starts;
             self
         }
+    }
+
+    #[tokio::test]
+    async fn weighted_strategy_prefers_left_by_weight() {
+        let reader1 = VecReader {
+            events: Mutex::new(Some(vec![
+                ev("left.1"),
+                ev("left.2"),
+                ev("left.3"),
+                ev("left.4"),
+            ])),
+        };
+        let reader2 = VecReader {
+            events: Mutex::new(Some(vec![ev("right.1"), ev("right.2")])),
+        };
+        let merged = MergeReader::with_weighted(
+            reader1,
+            reader2,
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        );
+        let mut stream = merged.read(((), ())).await.unwrap();
+
+        let mut topics = Vec::new();
+        for _ in 0..6 {
+            let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            topics.push(msg.event().topic().as_str().to_owned());
+        }
+
+        assert_eq!(
+            topics,
+            vec!["left.1", "left.2", "right.1", "left.3", "left.4", "right.2",]
+        );
+    }
+
+    #[tokio::test]
+    async fn weighted_strategy_equal_weights_alternates() {
+        let left = VecReader {
+            events: Mutex::new(Some(vec![ev("l1"), ev("l2"), ev("l3")])),
+        };
+        let right = VecReader {
+            events: Mutex::new(Some(vec![ev("r1"), ev("r2"), ev("r3")])),
+        };
+        let merged = MergeReader::with_weighted(
+            left,
+            right,
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+        );
+        let mut stream = merged.read(((), ())).await.unwrap();
+
+        let mut topics = Vec::new();
+        for _ in 0..6 {
+            let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            topics.push(msg.event().topic().as_str().to_owned());
+        }
+
+        assert_eq!(topics, vec!["l1", "r1", "l2", "r2", "l3", "r3"]);
+    }
+
+    #[tokio::test]
+    async fn weighted_strategy_drains_left_when_right_is_empty() {
+        let left = VecReader {
+            events: Mutex::new(Some(vec![ev("l1"), ev("l2"), ev("l3")])),
+        };
+        let right = VecReader {
+            events: Mutex::new(Some(vec![])),
+        };
+        let merged = MergeReader::with_weighted(
+            left,
+            right,
+            NonZeroUsize::new(2).unwrap(),
+            NonZeroUsize::new(5).unwrap(),
+        );
+        let mut stream = merged.read(((), ())).await.unwrap();
+
+        let mut topics = Vec::new();
+        for _ in 0..3 {
+            let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            topics.push(msg.event().topic().as_str().to_owned());
+        }
+
+        assert_eq!(topics, vec!["l1", "l2", "l3"]);
+    }
+
+    #[test]
+    fn merge_strategy_default_is_fair() {
+        assert_eq!(MergeStrategy::default(), MergeStrategy::Fair);
+    }
+
+    #[test]
+    fn weighted_strategy_equality_matches_components() {
+        let a = MergeStrategy::Weighted {
+            left: NonZeroUsize::new(3).unwrap(),
+            right: NonZeroUsize::new(1).unwrap(),
+        };
+        let b = MergeStrategy::Weighted {
+            left: NonZeroUsize::new(3).unwrap(),
+            right: NonZeroUsize::new(1).unwrap(),
+        };
+        let c = MergeStrategy::Weighted {
+            left: NonZeroUsize::new(2).unwrap(),
+            right: NonZeroUsize::new(1).unwrap(),
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

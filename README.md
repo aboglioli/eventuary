@@ -254,10 +254,15 @@ positioning and protocol concerns.
 Common subscription/config types:
 
 - `memory::reader::MemorySubscription { limit }`
-- `sqlite::reader::SqliteSubscription { start, filter, batch_size, limit }`
-- `postgres::reader::PgSubscription { start, filter, batch_size, limit }`
+- `sqlite::reader::SqliteSubscription { start, stop_at, filter, batch_size, limit }`
+- `postgres::reader::PgSubscription { start, stop_at, filter, batch_size, limit }`
 - `sqs::reader_config::SqsReaderConfig`
 - `kafka::reader_config::KafkaReaderConfig`
+
+`StartFrom<C>` controls where replay begins. SQL subscriptions also support
+`StopAt<C>` so callers can choose live tailing (`StopAt::Never`, the default), a
+finite snapshot ending at the current log end (`StopAt::CurrentEnd`), or a
+finite range ending at a specific cursor (`StopAt::Cursor(cursor)`).
 
 Shared event filtering lives in `eventuary::io::filter::EventFilter`:
 
@@ -400,7 +405,7 @@ composed around backend readers.
 | `InspectReader` | Run hooks around reader delivery/ack activity |
 | `MapReader` | Transform events infallibly |
 | `TryMapReader` | Transform events fallibly |
-| `MergeReader` | Merge multiple readers into one stream |
+| `MergeReader` | Merge two readers with fair, left-priority, or weighted scheduling |
 | `RateLimitReader` | Throttle delivery rate |
 | `RecoverReader` | Recover from transient stream errors |
 | `ReplayThenLiveReader` | Replay a historical source, then switch to live delivery |
@@ -409,10 +414,50 @@ composed around backend readers.
 | `WindowReader` | Window event delivery |
 | `PartitionedReader` | Route events into deterministic logical lanes |
 | `CheckpointReader` | Persist cursor progress on ack |
+| `OutcomeRouterReader` | Route acked and/or nacked events to writers while preserving message lifecycle semantics |
 
 Wrappers are generic over the `Reader` trait, so they are backend-independent.
 
-## Consumer Driver and Retry
+## Writer Wrappers
+
+Writer-side flow behavior lives in `eventuary::io::writer` and composes with any
+backend writer. Wrappers are deliberately small: mapping, filtering, fanout,
+retry, timeout, inspection, and batching are separate responsibilities.
+
+| Wrapper | Purpose |
+|---------|---------|
+| `MapWriter` | Transform `&Event` into a new event before writing |
+| `TryMapWriter` | Fallibly transform `&Event` into a new event before writing |
+| `FilteredWriter` | Skip non-matching events |
+| `FanoutWriter` | Write the same event to multiple writers concurrently |
+| `RetryWriter` | Retry failed writes with exponential backoff |
+| `TimeoutWriter` | Bound write and batch-write latency |
+| `InspectWriter` | Run hooks around write attempts, successes, and errors |
+| `BatchWriter` | Batch concurrent writes by size or wait time and flush through `write_all` |
+
+These wrappers are useful with `OutcomeRouterReader`: route nacked events to a
+writer, map them into a dead-letter envelope with `TryMapWriter`, fan them out to
+multiple destinations with `FanoutWriter`, and protect the route with
+`RetryWriter` or `TimeoutWriter`.
+
+```rust,ignore
+use eventuary::io::reader::{NackDisposition, OutcomeRouterReader};
+use eventuary::io::writer::{FanoutWriter, TryMapWriter};
+
+let dead_letter_writer = TryMapWriter::new(writer, |event: &eventuary::Event| {
+    build_dead_letter_event(event)
+});
+
+let failed_writer = FanoutWriter::new(vec![
+    audit_writer.into_arced(),
+    dead_letter_writer.into_arced(),
+])?;
+
+let reader = OutcomeRouterReader::on_nack(source_reader, failed_writer)
+    .with_nack_disposition(NackDisposition::AckInnerAfterRoute);
+```
+
+## Consumer Driver and Handler Wrappers
 
 `BackgroundConsumer` connects a reader, subscription, and handler:
 
@@ -441,6 +486,17 @@ The consumer driver:
 - acks on success,
 - nacks on handler error or timeout,
 - supports bounded concurrency and graceful shutdown.
+
+Handler wrappers live in `eventuary::io::handler` and compose around any
+handler:
+
+| Wrapper | Purpose |
+|---------|---------|
+| `FilteredHandler` | Skip events that do not match a filter |
+| `TimeoutHandler` | Bound handler execution latency |
+| `InspectHandler` | Run hooks around handler start, success, and error |
+| `RateLimitHandler` | Throttle handler executions |
+| `RetryHandler` | Retry handler failures and optionally dead-letter final failures |
 
 For retries and dead-letter routing, wrap a handler with `RetryHandler`:
 
