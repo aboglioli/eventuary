@@ -30,3 +30,23 @@ pub use stream_id::StreamId;
 pub use writer::{
     ArcWriter, BoxWriter, DynWriter, FanoutWriter, MapWriter, TryMapWriter, Writer, WriterExt,
 };
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn flow_wrapper_reexports_are_available() {
+        fn assert_type<T>() {}
+
+        assert_type::<crate::io::writer::MapWriter<(), fn(&crate::Event) -> crate::Event>>();
+        assert_type::<
+            crate::io::writer::TryMapWriter<(), fn(&crate::Event) -> crate::Result<crate::Event>>,
+        >();
+        assert_type::<crate::io::writer::FanoutWriter>();
+        assert_type::<crate::io::reader::OutcomeRouterReader<()>>();
+        assert_type::<crate::io::reader::NackDisposition>();
+        assert_type::<crate::io::MapWriter<(), fn(&crate::Event) -> crate::Event>>();
+        assert_type::<crate::io::TryMapWriter<(), fn(&crate::Event) -> crate::Result<crate::Event>>>(
+        );
+        assert_type::<crate::io::FanoutWriter>();
+    }
+}
