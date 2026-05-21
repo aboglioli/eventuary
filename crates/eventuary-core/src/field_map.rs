@@ -55,18 +55,45 @@ impl<V> FieldMap<V> {
         if key.is_empty() {
             return Err(Error::InvalidMetadataKey("must not be empty".to_owned()));
         }
-        if key.trim() != key {
+        if key.len() > MAX_KEY_LEN {
+            return Err(Error::InvalidMetadataKey(format!(
+                "must be at most {MAX_KEY_LEN} characters"
+            )));
+        }
+        let bytes = key.as_bytes();
+        if !is_alphanumeric(bytes[0]) {
             return Err(Error::InvalidMetadataKey(
-                "must not have leading or trailing whitespace".to_owned(),
+                "must start with an ASCII alphanumeric character".to_owned(),
             ));
         }
-        if key.contains('\n') || key.contains('\r') {
+        if !is_alphanumeric(bytes[bytes.len() - 1]) {
             return Err(Error::InvalidMetadataKey(
-                "must not contain newlines".to_owned(),
+                "must end with an ASCII alphanumeric character".to_owned(),
             ));
+        }
+        if bytes.len() < 3 {
+            return Ok(());
+        }
+        for &byte in &bytes[1..bytes.len() - 1] {
+            if !is_key_byte(byte) {
+                return Err(Error::InvalidMetadataKey(format!(
+                    "contains unsupported character: {:?}",
+                    byte as char
+                )));
+            }
         }
         Ok(())
     }
+}
+
+const MAX_KEY_LEN: usize = 128;
+
+fn is_alphanumeric(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+
+fn is_key_byte(byte: u8) -> bool {
+    is_alphanumeric(byte) || matches!(byte, b'_' | b'-' | b'.' | b':' | b'/')
 }
 
 #[cfg(test)]
@@ -106,6 +133,63 @@ mod tests {
             FieldMap::<String>::new().with("k\rv", "v".to_owned()),
             Err(Error::InvalidMetadataKey(_))
         ));
+    }
+
+    #[test]
+    fn accepts_documented_valid_keys() {
+        for key in [
+            "handler_id",
+            "error.kind",
+            "http.status",
+            "route/destination",
+            "aws:receipt_handle",
+            "retry-attempt",
+            "a",
+            "ABC123",
+        ] {
+            FieldMap::<String>::new()
+                .with(key, "v".to_owned())
+                .unwrap_or_else(|_| panic!("expected {key} to be valid"));
+        }
+    }
+
+    #[test]
+    fn rejects_keys_starting_or_ending_with_symbol() {
+        for key in ["_handler_id", "handler_id_", ".kind", "kind.", "-x", "x-"] {
+            assert!(
+                matches!(
+                    FieldMap::<String>::new().with(key, "v".to_owned()),
+                    Err(Error::InvalidMetadataKey(_))
+                ),
+                "expected {key} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_keys_with_unsupported_characters() {
+        for key in ["handler id", "handler$id", "händler", "key\u{0007}id"] {
+            assert!(
+                matches!(
+                    FieldMap::<String>::new().with(key, "v".to_owned()),
+                    Err(Error::InvalidMetadataKey(_))
+                ),
+                "expected {key} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_keys_exceeding_max_length() {
+        let too_long = "a".repeat(129);
+        assert!(matches!(
+            FieldMap::<String>::new().with(&too_long, "v".to_owned()),
+            Err(Error::InvalidMetadataKey(_))
+        ));
+        let max_ok = "a".repeat(128);
+        FieldMap::<String>::new()
+            .with(&max_ok, "v".to_owned())
+            .unwrap();
     }
 
     #[test]
