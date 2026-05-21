@@ -89,6 +89,10 @@ pub trait WriterExt: Writer + Sized + 'static {
 
 impl<T: Writer + 'static> WriterExt for T {}
 
+pub mod map;
+
+pub use map::{MapWriter, TryMapWriter};
+
 #[cfg(test)]
 mod tests {
     use super::*;
