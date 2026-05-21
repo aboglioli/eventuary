@@ -32,8 +32,8 @@ pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use stream_id::StreamId;
 pub use writer::{
     ArcWriter, BatchWriter, BatchWriterConfig, BoxWriter, DynWriter, FanoutWriter, FilteredWriter,
-    InspectWriter, InspectWriterHooks, MapWriter, RetryWriter, RetryWriterConfig, TimeoutWriter,
-    TryMapWriter, Writer, WriterExt,
+    FlatMapWriter, InspectWriter, InspectWriterHooks, MapWriter, RetryWriter, RetryWriterConfig,
+    TimeoutWriter, TryFlatMapWriter, TryMapWriter, Writer, WriterExt,
 };
 
 #[cfg(test)]
@@ -64,6 +64,10 @@ mod tests {
         assert_type::<crate::io::TimeoutWriter<()>>();
         assert_type::<crate::io::InspectWriter<(), ()>>();
         assert_type::<crate::io::BatchWriter>();
+        assert_type::<crate::io::FlatMapWriter<(), fn(&crate::Event) -> Vec<crate::Event>>>();
+        assert_type::<
+            crate::io::TryFlatMapWriter<(), fn(&crate::Event) -> crate::Result<Vec<crate::Event>>>,
+        >();
         assert_type::<crate::io::TimeoutHandler<()>>();
         assert_type::<crate::io::InspectHandler<(), ()>>();
         assert_type::<crate::io::RateLimitHandler<()>>();
