@@ -121,7 +121,12 @@ impl SerializedEvent {
             namespace: event.namespace().to_string(),
             topic: event.topic().to_string(),
             payload: SerializedPayload::from_payload(event.payload())?,
-            metadata: event.metadata().as_map().clone(),
+            metadata: event
+                .metadata()
+                .as_map()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             timestamp: event.timestamp(),
             version: event.version(),
             key: event.key().map(|key| key.to_string()),
@@ -152,7 +157,7 @@ impl SerializedEvent {
             Namespace::new(&self.namespace)?,
             Topic::new(&self.topic)?,
             payload,
-            Metadata::from(self.metadata.clone()),
+            Metadata::try_from(self.metadata.clone())?,
             self.timestamp,
             self.version,
             key,
