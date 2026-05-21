@@ -29,6 +29,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod collector;
+mod context;
 mod error;
 mod event;
 mod event_key;
@@ -45,6 +46,7 @@ mod topic;
 mod topic_pattern;
 
 pub use collector::EventCollector;
+pub use context::{Context, ContextError, ContextValue};
 pub use error::{Error, Result};
 pub use event::{Event, EventId};
 pub use event_key::{EventKey, Partition};
