@@ -1,5 +1,6 @@
 mod batched;
 mod either;
+mod nack_context;
 mod noop;
 mod once;
 
@@ -12,6 +13,7 @@ use crate::error::Result;
 
 pub use ::either::Either;
 pub use batched::{AckBuffer, AckBufferConfig, AckCmd, BatchFlusher, BatchedAcker};
+pub use nack_context::{NackContext, NackReason};
 pub use noop::NoopAcker;
 pub use once::OnceAcker;
 
@@ -25,6 +27,9 @@ pub use once::OnceAcker;
 pub trait Acker: Send + Sync {
     fn ack(&self) -> impl Future<Output = Result<()>> + Send;
     fn nack(&self) -> impl Future<Output = Result<()>> + Send;
+    fn nack_with(&self, _context: NackContext) -> impl Future<Output = Result<()>> + Send {
+        self.nack()
+    }
 }
 
 impl<T: Acker + ?Sized> Acker for Arc<T> {
@@ -33,6 +38,9 @@ impl<T: Acker + ?Sized> Acker for Arc<T> {
     }
     fn nack(&self) -> impl Future<Output = Result<()>> + Send {
         (**self).nack()
+    }
+    fn nack_with(&self, context: NackContext) -> impl Future<Output = Result<()>> + Send {
+        (**self).nack_with(context)
     }
 }
 
@@ -43,11 +51,15 @@ impl<T: Acker + ?Sized> Acker for Box<T> {
     fn nack(&self) -> impl Future<Output = Result<()>> + Send {
         (**self).nack()
     }
+    fn nack_with(&self, context: NackContext) -> impl Future<Output = Result<()>> + Send {
+        (**self).nack_with(context)
+    }
 }
 
 pub trait DynAcker: Send + Sync {
     fn ack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
     fn nack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>>;
+    fn nack_with_dyn<'a>(&'a self, context: NackContext) -> BoxFuture<'a, Result<()>>;
 }
 
 impl<T: Acker + ?Sized> DynAcker for T {
@@ -56,6 +68,9 @@ impl<T: Acker + ?Sized> DynAcker for T {
     }
     fn nack_dyn<'a>(&'a self) -> BoxFuture<'a, Result<()>> {
         Box::pin(<Self as Acker>::nack(self))
+    }
+    fn nack_with_dyn<'a>(&'a self, context: NackContext) -> BoxFuture<'a, Result<()>> {
+        Box::pin(<Self as Acker>::nack_with(self, context))
     }
 }
 
@@ -68,6 +83,9 @@ impl Acker for dyn DynAcker + '_ {
     }
     fn nack(&self) -> impl Future<Output = Result<()>> + Send {
         DynAcker::nack_dyn(self)
+    }
+    fn nack_with(&self, context: NackContext) -> impl Future<Output = Result<()>> + Send {
+        DynAcker::nack_with_dyn(self, context)
     }
 }
 
@@ -165,5 +183,20 @@ mod tests {
         .into_arced();
         take(arced).await;
         assert_eq!(acks.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn boxed_acker_forwards_nack_context() {
+        let (acks, nacks) = counters();
+        let acker: BoxAcker = CountingAcker {
+            acks: Arc::clone(&acks),
+            nacks: Arc::clone(&nacks),
+        }
+        .into_boxed();
+        acker
+            .nack_with(NackContext::processing_rejected("bad").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(nacks.load(Ordering::SeqCst), 1);
     }
 }
