@@ -90,9 +90,13 @@ pub trait WriterExt: Writer + Sized + 'static {
 impl<T: Writer + 'static> WriterExt for T {}
 
 pub mod fanout;
+pub mod filtered;
+pub mod inspect;
 pub mod map;
 
 pub use fanout::FanoutWriter;
+pub use filtered::FilteredWriter;
+pub use inspect::{InspectWriter, InspectWriterHooks};
 pub use map::{MapWriter, TryMapWriter};
 
 #[cfg(test)]
