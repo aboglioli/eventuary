@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
+use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
@@ -220,6 +221,10 @@ where
 
     async fn nack(&self) -> Result<()> {
         self.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        self.inner.nack_with(context).await
     }
 }
 

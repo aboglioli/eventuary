@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
@@ -162,6 +163,13 @@ impl<A: Acker> Acker for BatchAcker<A> {
     async fn nack(&self) -> Result<()> {
         for a in self.inner.iter() {
             a.nack().await?;
+        }
+        Ok(())
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        for a in self.inner.iter() {
+            a.nack_with(context.clone()).await?;
         }
         Ok(())
     }

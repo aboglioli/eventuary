@@ -6,12 +6,16 @@ use futures::Stream;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::io::acker::NackContext;
 use crate::io::{Acker, Message, Reader};
 
 pub trait InspectHooks: Send + Sync {
     fn on_deliver(&self, _event: &Event) {}
     fn on_ack(&self, _event: &Event) {}
     fn on_nack(&self, _event: &Event) {}
+    fn on_nack_with(&self, event: &Event, _context: &NackContext) {
+        self.on_nack(event);
+    }
     fn on_error(&self, _error: &Error) {}
 }
 
@@ -67,6 +71,11 @@ impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
     async fn nack(&self) -> Result<()> {
         self.hooks.on_nack(&self.event);
         self.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        self.hooks.on_nack_with(&self.event, &context);
+        self.inner.nack_with(context).await
     }
 }
 
@@ -207,6 +216,55 @@ mod tests {
         msg.nack().await.unwrap();
         assert_eq!(hooks.nacked.lock().unwrap().as_slice(), &[event_id]);
         assert!(hooks.acked.lock().unwrap().is_empty());
+    }
+
+    #[derive(Clone, Default)]
+    struct NackContextHooks {
+        reasons: Arc<Mutex<Vec<crate::io::acker::NackReason>>>,
+    }
+
+    impl InspectHooks for NackContextHooks {
+        fn on_nack_with(&self, _event: &Event, context: &NackContext) {
+            self.reasons.lock().unwrap().push(context.reason());
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_reader_passes_nack_context_to_on_nack_with_hook() {
+        use crate::io::acker::{NackContext, NackReason};
+        let hooks = NackContextHooks::default();
+        let reader = VecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(ev(), NoopAcker, TestCursor(1)))])),
+        };
+        let inspect = InspectReader::new(reader, hooks.clone());
+        let mut stream = inspect.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        let context = NackContext::delivery_expired("expired");
+        msg.nack_with(context).await.unwrap();
+        let reasons = hooks.reasons.lock().unwrap().clone();
+        assert_eq!(reasons, vec![NackReason::DeliveryExpired]);
+    }
+
+    #[tokio::test]
+    async fn inspect_reader_default_on_nack_with_delegates_to_on_nack() {
+        use crate::io::acker::NackContext;
+        let hooks = RecordingHooks::default();
+        let event = ev();
+        let event_id = event.id();
+        let reader = VecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                event,
+                NoopAcker,
+                TestCursor(1),
+            ))])),
+        };
+        let inspect = InspectReader::new(reader, hooks.clone());
+        let mut stream = inspect.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        msg.nack_with(NackContext::delivery_expired("expired"))
+            .await
+            .unwrap();
+        assert_eq!(hooks.nacked.lock().unwrap().as_slice(), &[event_id]);
     }
 
     #[tokio::test]

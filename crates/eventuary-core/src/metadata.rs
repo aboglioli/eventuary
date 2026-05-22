@@ -1,22 +1,25 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
+use crate::field_map::FieldMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Metadata(HashMap<String, String>);
+#[serde(transparent)]
+pub struct Metadata(FieldMap<String>);
 
 impl Metadata {
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Self(FieldMap::new())
     }
 
-    pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Result<Self> {
-        let key = key.into();
-        Self::validate_key(&key)?;
-        self.0.insert(key, value.into());
-        Ok(self)
+    pub fn with(self, key: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        Ok(Self(self.0.with(key, value.into())?))
+    }
+
+    pub fn from_map(map: BTreeMap<String, String>) -> Result<Self> {
+        Ok(Self(FieldMap::try_from_map(map)?))
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -24,7 +27,7 @@ impl Metadata {
     }
 
     pub fn has(&self, key: &str) -> bool {
-        self.0.contains_key(key)
+        self.0.has(key)
     }
 
     pub fn len(&self) -> usize {
@@ -35,41 +38,35 @@ impl Metadata {
         self.0.is_empty()
     }
 
-    pub fn as_map(&self) -> &HashMap<String, String> {
-        &self.0
+    pub fn as_map(&self) -> &BTreeMap<String, String> {
+        self.0.as_map()
     }
 
-    pub fn into_map(self) -> HashMap<String, String> {
-        self.0
-    }
-
-    fn validate_key(key: &str) -> Result<()> {
-        if key.is_empty() {
-            return Err(Error::InvalidMetadataKey("must not be empty".to_owned()));
-        }
-        if key.trim() != key {
-            return Err(Error::InvalidMetadataKey(
-                "must not have leading or trailing whitespace".to_owned(),
-            ));
-        }
-        if key.contains('\n') || key.contains('\r') {
-            return Err(Error::InvalidMetadataKey(
-                "must not contain newlines".to_owned(),
-            ));
-        }
-        Ok(())
+    pub fn into_map(self) -> BTreeMap<String, String> {
+        self.0.into_map()
     }
 }
 
-impl From<HashMap<String, String>> for Metadata {
-    fn from(map: HashMap<String, String>) -> Self {
-        Self(map)
+impl TryFrom<BTreeMap<String, String>> for Metadata {
+    type Error = crate::error::Error;
+
+    fn try_from(map: BTreeMap<String, String>) -> Result<Self> {
+        Self::from_map(map)
+    }
+}
+
+impl TryFrom<HashMap<String, String>> for Metadata {
+    type Error = crate::error::Error;
+
+    fn try_from(map: HashMap<String, String>) -> Result<Self> {
+        Self::from_map(map.into_iter().collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
 
     #[test]
     fn with_inserts_pair() {
@@ -106,10 +103,40 @@ mod tests {
     }
 
     #[test]
-    fn from_map_skips_validation() {
-        let mut map = HashMap::new();
-        map.insert(String::new(), "v".to_owned());
-        let m = Metadata::from(map);
-        assert_eq!(m.len(), 1);
+    fn from_map_validates_keys() {
+        let mut valid = BTreeMap::new();
+        valid.insert("source".to_owned(), "billing".to_owned());
+        let m = Metadata::from_map(valid).unwrap();
+        assert_eq!(m.get("source"), Some("billing"));
+
+        let mut invalid = BTreeMap::new();
+        invalid.insert(String::new(), "v".to_owned());
+        assert!(matches!(
+            Metadata::from_map(invalid),
+            Err(Error::InvalidMetadataKey(_))
+        ));
+    }
+
+    #[test]
+    fn try_from_hashmap_validates_keys() {
+        let mut invalid = HashMap::new();
+        invalid.insert(String::new(), "v".to_owned());
+        assert!(matches!(
+            Metadata::try_from(invalid),
+            Err(Error::InvalidMetadataKey(_))
+        ));
+    }
+
+    #[test]
+    fn serializes_as_plain_map() {
+        let m = Metadata::new().with("source", "billing").unwrap();
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"source":"billing"}"#);
+    }
+
+    #[test]
+    fn deserializes_from_plain_map() {
+        let m: Metadata = serde_json::from_str(r#"{"source":"billing"}"#).unwrap();
+        assert_eq!(m.get("source"), Some("billing"));
     }
 }

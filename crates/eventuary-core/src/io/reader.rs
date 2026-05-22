@@ -246,7 +246,9 @@ pub use filtered::{FilteredReader, FilteredStream};
 pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
 pub use map::{MapReader, MapStream};
 pub use merge::{MergeAcker, MergeCursor, MergeReader, MergeStrategy};
-pub use outcome_router::{NackDisposition, OutcomeRouterAcker, OutcomeRouterReader};
+pub use outcome_router::{
+    DeliveryDisposition, NackDisposition, OutcomeRouterAcker, OutcomeRouterReader,
+};
 pub use partitioned::{
     LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
     PartitionedSubscription,

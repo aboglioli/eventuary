@@ -118,6 +118,33 @@ Important model types:
   causation IDs. It provides deterministic FNV-1a partitioning.
 - `Metadata` — validated string key/value metadata.
 - `SerializedEvent` — stable wire format used by every backend.
+- `FieldMap<V>` — reusable validated key/value storage backing `Metadata` and
+  `Context`. Keys must be non-empty, must not have leading or trailing
+  whitespace, and must not contain newlines.
+
+### Context Values
+
+`Context` is a serializable bag of typed fields used by `NackContext` and other
+contextual flows. Build it with `Context::new(message)` and chain `.with(key,
+value)` calls; values are converted into `ContextValue` through `From` impls for
+strings, booleans, integer and floating-point primitives, `serde_json::Value`,
+and `Error`.
+
+```rust
+use eventuary::Context;
+
+let context = Context::new("handler failed")
+    .with("handler_id", "billing")?
+    .with("attempt", 3_u64)?
+    .with("retryable", true)?;
+```
+
+`ContextValue` is a tagged enum (`String`, `Bool`, `U64`, `I64`, `F64`,
+`Error`, `Json`). A `serde_json::Value` is preserved as `ContextValue::Json`
+regardless of its shape, and non-finite `f64` values (`NaN`, `±∞`) are silently
+dropped so the context stays JSON-safe. `ContextError` stores a stable
+`(kind, message)` pair derived from `Error`, so errors round-trip through JSON
+without losing their variant tag.
 
 ## Async IO Model
 
@@ -162,6 +189,25 @@ where
 
 The handler receives only `&Event`; ack/nack and cursor state remain in the
 message envelope and are handled by the consumer driver or caller.
+
+`Acker::nack()` is the basic compatibility path and leaves the rejection cause
+implicit. `Acker::nack_with(NackContext)` is the additive contextual path: it
+carries a `NackReason` (`HandlerError`, `HandlerTimeout`, `ProcessingRejected`,
+`DeliveryExpired`, `RouteFailed`, `Unknown`) plus a serializable `Context` with
+typed fields. Built-in helpers cover the common cases; the default `nack_with`
+impl falls back to `nack`, so existing ackers keep working unchanged.
+
+```rust
+use eventuary::Error;
+use eventuary::io::acker::NackContext;
+
+let nack_context = NackContext::handler_error(
+    handler.id(),
+    Error::Handler("payment declined".to_owned()),
+)?;
+
+msg.nack_with(nack_context).await?;
+```
 
 ### Dynamic dispatch
 
@@ -414,9 +460,20 @@ composed around backend readers.
 | `WindowReader` | Window event delivery |
 | `PartitionedReader` | Route events into deterministic logical lanes |
 | `CheckpointReader` | Persist cursor progress on ack |
-| `OutcomeRouterReader` | Route acked and/or nacked events to writers while preserving message lifecycle semantics |
+| `OutcomeRouterReader` | Route delivered, acked, and/or nacked events to writers while preserving message lifecycle semantics |
 
 Wrappers are generic over the `Reader` trait, so they are backend-independent.
+
+`OutcomeRouterReader` exposes three constructors — `on_ack`, `on_nack`, and
+`on_delivery` — plus the `with_ack_writer` / `with_nack_writer` /
+`with_delivery_writer` builders for combining them, and
+`with_nack_disposition` / `with_delivery_disposition` for the routing policy.
+`NackDisposition::NackInner` preserves redelivery on routed nacks;
+`AckInnerAfterRoute` moves the event to the side flow after a successful route
+write. `DeliveryDisposition::RequireRoute` (default) nacks the inner with
+`NackReason::RouteFailed` and surfaces the error when the delivery route fails;
+`DeliveryDisposition::BestEffort` swallows the route error and still delivers
+the original message downstream.
 
 ## Writer Wrappers
 
@@ -428,6 +485,8 @@ retry, timeout, inspection, and batching are separate responsibilities.
 |---------|---------|
 | `MapWriter` | Transform `&Event` into a new event before writing |
 | `TryMapWriter` | Fallibly transform `&Event` into a new event before writing |
+| `FlatMapWriter` | Derive one or many events from `&Event` and forward them through `write_all` |
+| `TryFlatMapWriter` | Fallibly derive one or many events from `&Event` and forward them through `write_all` |
 | `FilteredWriter` | Skip non-matching events |
 | `FanoutWriter` | Write the same event to multiple writers concurrently |
 | `RetryWriter` | Retry failed writes with exponential backoff |
@@ -486,6 +545,14 @@ The consumer driver:
 - acks on success,
 - nacks on handler error or timeout,
 - supports bounded concurrency and graceful shutdown.
+
+Before nacking, `BackgroundConsumer` builds a `NackContext` and calls
+`Message::nack_with`. Handler failures use `NackReason::HandlerError` with the
+handler id and source error; per-call timeouts use `NackReason::HandlerTimeout`.
+`TimeoutReader` likewise nacks expired messages with `NackReason::DeliveryExpired`.
+`InspectReader` exposes the contextual path through
+`InspectHooks::on_nack_with(&Event, &NackContext)`; the default impl delegates
+to `on_nack` so existing hook implementations keep working.
 
 Handler wrappers live in `eventuary::io::handler` and compose around any
 handler:

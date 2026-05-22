@@ -35,6 +35,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
 
@@ -108,6 +109,12 @@ where
     }
 
     async fn nack(&self) -> Result<()> {
+        self.store.nack(&self.id).await?;
+        self.release_slot();
+        Ok(())
+    }
+
+    async fn nack_with(&self, _context: NackContext) -> Result<()> {
         self.store.nack(&self.id).await?;
         self.release_slot();
         Ok(())

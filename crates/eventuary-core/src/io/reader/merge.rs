@@ -5,6 +5,7 @@ use futures::stream::{PollNext, select_with_strategy};
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
+use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
@@ -244,6 +245,13 @@ impl<A1: Acker, A2: Acker> Acker for MergeAcker<A1, A2> {
         match self {
             Self::Left(a) => a.nack().await,
             Self::Right(a) => a.nack().await,
+        }
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        match self {
+            Self::Left(a) => a.nack_with(context).await,
+            Self::Right(a) => a.nack_with(context).await,
         }
     }
 }
@@ -488,6 +496,52 @@ mod tests {
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    struct ContextAcker {
+        side: &'static str,
+        captured: std::sync::Arc<Mutex<Vec<(&'static str, NackContext)>>>,
+    }
+
+    impl Acker for ContextAcker {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.captured.lock().unwrap().push((self.side, context));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_forwards_nack_context_to_selected_side() {
+        let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let left: MergeAcker<ContextAcker, ContextAcker> = MergeAcker::Left(ContextAcker {
+            side: "left",
+            captured: std::sync::Arc::clone(&captured),
+        });
+        left.nack_with(NackContext::processing_rejected("L").unwrap())
+            .await
+            .unwrap();
+
+        let right: MergeAcker<ContextAcker, ContextAcker> = MergeAcker::Right(ContextAcker {
+            side: "right",
+            captured: std::sync::Arc::clone(&captured),
+        });
+        right
+            .nack_with(NackContext::processing_rejected("R").unwrap())
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].0, "left");
+        assert_eq!(captured[0].1.context().message(), "L");
+        assert_eq!(captured[1].0, "right");
+        assert_eq!(captured[1].1.context().message(), "R");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::io::Acker;
+use crate::io::acker::NackContext;
 
 #[derive(Debug, Clone)]
 pub struct OnceAcker<A: Acker> {
@@ -37,6 +38,15 @@ impl<A: Acker> Acker for OnceAcker<A> {
         }
         *done = true;
         self.inner.nack().await
+    }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        let mut done = self.done.lock().await;
+        if *done {
+            return Ok(());
+        }
+        *done = true;
+        self.inner.nack_with(context).await
     }
 }
 
@@ -103,5 +113,41 @@ mod tests {
         acker.nack().await.unwrap();
         assert_eq!(acks.load(Ordering::SeqCst), 1);
         assert_eq!(nacks.load(Ordering::SeqCst), 0);
+    }
+
+    struct ContextAcker {
+        captured: Arc<std::sync::Mutex<Vec<NackContext>>>,
+    }
+
+    impl Acker for ContextAcker {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.captured.lock().unwrap().push(context);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn once_forwards_nack_context_only_once() {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let acker = OnceAcker::new(ContextAcker {
+            captured: Arc::clone(&captured),
+        });
+        acker
+            .nack_with(NackContext::processing_rejected("first").unwrap())
+            .await
+            .unwrap();
+        acker
+            .nack_with(NackContext::processing_rejected("second").unwrap())
+            .await
+            .unwrap();
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].context().message(), "first");
     }
 }

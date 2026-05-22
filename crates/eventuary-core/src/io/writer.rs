@@ -92,6 +92,7 @@ impl<T: Writer + 'static> WriterExt for T {}
 pub mod batch;
 pub mod fanout;
 pub mod filtered;
+pub mod flat_map;
 pub mod inspect;
 pub mod map;
 pub mod retry;
@@ -100,6 +101,7 @@ pub mod timeout;
 pub use batch::{BatchWriter, BatchWriterConfig};
 pub use fanout::FanoutWriter;
 pub use filtered::FilteredWriter;
+pub use flat_map::{FlatMapWriter, TryFlatMapWriter};
 pub use inspect::{InspectWriter, InspectWriterHooks};
 pub use map::{MapWriter, TryMapWriter};
 pub use retry::{RetryWriter, RetryWriterConfig};

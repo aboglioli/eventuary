@@ -60,7 +60,9 @@ crates/
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
 │       ├── payload.rs      # Payload (backed by bytes::Bytes) + ContentType
-│       ├── metadata.rs     # Metadata key/value pairs
+│       ├── metadata.rs     # Metadata key/value pairs (FieldMap<String>)
+│       ├── field_map.rs    # FieldMap<V> validated key/value storage
+│       ├── context.rs      # Context + ContextValue + ContextError
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
 │       ├── serialization.rs # SerializedEvent wire format
@@ -69,6 +71,7 @@ crates/
 │           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt + submod owner
 │           ├── writer/
 │           │   ├── map.rs       # MapWriter + TryMapWriter
+│           │   ├── flat_map.rs  # FlatMapWriter + TryFlatMapWriter
 │           │   ├── filtered.rs  # FilteredWriter
 │           │   ├── fanout.rs    # FanoutWriter
 │           │   ├── retry.rs     # RetryWriter + RetryWriterConfig
@@ -90,17 +93,18 @@ crates/
 │           │   ├── dedupe.rs          # DedupeReader + DedupeStore trait + DedupeAcker
 │           │   ├── watermark.rs       # WatermarkReader (static or per-entity key fn) + WatermarkStore trait + WatermarkAcker
 │           │   ├── merge.rs           # MergeReader + MergeAcker + MergeCursor + MergeStrategy
-│           │   ├── outcome_router.rs  # OutcomeRouterReader + OutcomeRouterAcker + NackDisposition
+│           │   ├── outcome_router.rs  # OutcomeRouterReader + OutcomeRouterAcker + NackDisposition + DeliveryDisposition
 │           │   ├── replay_then_live.rs # ReplayThenLiveReader + ReplayThenLiveConfig (overlap dedupe) + ReplayLiveAcker + ReplayLiveCursor
 │           │   ├── buffer.rs           # BufferedReader + BufferStore trait + BufferAcker + BufferEntry
 │           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
 │           │   └── checkpoint.rs      # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope + MissingCheckpointPolicy / InvalidCursorPolicy
 │           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
-│           │   ├── noop.rs      # NoopAcker
-│           │   ├── once.rs      # OnceAcker (single-shot wrapper)
-│           │   ├── batched.rs   # BatchedAcker + AckBuffer + BatchFlusher
-│           │   └── either.rs    # Re-exports Either for variant ackers
+│           │   ├── noop.rs         # NoopAcker
+│           │   ├── once.rs         # OnceAcker (single-shot wrapper)
+│           │   ├── batched.rs      # BatchedAcker + AckBuffer + BatchFlusher
+│           │   ├── nack_context.rs # NackContext + NackReason
+│           │   └── either.rs       # Re-exports Either for variant ackers
 │           ├── handler.rs  # Handler trait + Dyn/Box/Arc + HandlerExt + submod owner
 │           ├── handler/
 │           │   ├── filtered.rs   # FilteredHandler
@@ -220,6 +224,13 @@ For runtime composition / DI, every trait has a `Dyn*` sibling and
 Use `WriterExt::into_boxed()` / `into_arced()`, `ReaderExt::into_boxed()` /
 `into_arced()`, etc. to erase. `Box<dyn DynWriter>` still implements
 `Writer`, so erased values can pass back through generic APIs.
+
+`Acker::nack_with(NackContext)` is the additive contextual nack path; its
+default impl delegates to `Acker::nack()` so existing ackers keep working
+unchanged. `DynAcker::nack_with_dyn(NackContext)` is the concrete dyn variant
+that carries the context across the trait object boundary — no generic dyn
+method — which keeps `BoxAcker`/`ArcAcker` (and by extension `BoxReader` /
+`ArcReader`) object-safe.
 
 `Reader::Subscription` is an associated type so each backend can specialize
 (Kafka has a richer config than memory). `Reader::Cursor` is the matching
@@ -394,7 +405,7 @@ single source. Cross-cutting concerns live in generic core wrappers in
 | `DedupeReader<R, S>` | `DedupeAcker<R::Acker, S>` / passthrough | Skip already-seen events via a `DedupeStore`. `exists` check on intake; `mark_processed` deferred until downstream ack so nack/crash before processing does not silently drop the event. Trait offers `mark_if_new(&Event) -> Result<bool>` (atomic; default impl built on `exists`+`mark`, override for native atomicity). Memory, PostgreSQL, and SQLite store implementations live in their backend crates. |
 | `WatermarkReader<R, S>` | `WatermarkAcker<R::Acker, S>` / passthrough | Drop events older than the stored watermark. `with_static_key(reader, store, key)` or `with_key_fn(reader, store, |event| ...)` for per-entity watermarks (e.g., `"orders:customer-N"`). Save deferred to ack; in-memory cache shared between intake and acker so nack leaves both the store and the in-memory cursor untouched. |
 | `MergeReader<R1, R2>` | `MergeAcker<R1::Acker, R2::Acker>` / `MergeCursor<R1::Cursor, R2::Cursor>` | Combine two readers into one stream. `MergeStrategy::Fair` (default; `futures::stream::select`), `LeftPriority`, or `Weighted { left, right }` for biased polling when both sides are ready. `MergeCursor` impls `Cursor` so the merged stream composes under `CheckpointReader`. |
-| `OutcomeRouterReader<R>` | `OutcomeRouterAcker<R::Acker>` / passthrough | Route original delivered events to optional ack/nack writers when downstream calls `ack` or `nack`. `NackDisposition::NackInner` preserves redelivery; `AckInnerAfterRoute` moves nacked events to the side flow after a successful route write. Mapping belongs in `MapWriter` / `TryMapWriter`, not in this reader. |
+| `OutcomeRouterReader<R>` | `OutcomeRouterAcker<R::Acker>` / passthrough | Route original delivered events to optional delivery / ack / nack writers. Constructors: `on_ack`, `on_nack`, `on_ack_and_nack`, `on_delivery`; builders: `with_ack_writer`, `with_nack_writer`, `with_delivery_writer`, `with_nack_disposition`, `with_delivery_disposition`. `NackDisposition::NackInner` preserves redelivery; `AckInnerAfterRoute` moves nacked events to the side flow after a successful route write. `DeliveryDisposition::RequireRoute` (default) nacks the inner with `NackReason::RouteFailed` and surfaces the error when the delivery route fails; `BestEffort` swallows the route error and still delivers the original message. Mapping belongs in `MapWriter` / `TryMapWriter` / `FlatMapWriter`, not in this reader. |
 | `ReplayThenLiveReader<R, L>` | `ReplayLiveAcker<R::Acker, L::Acker>` / `ReplayLiveCursor<R::Cursor, L::Cursor>` | Historical-then-live phase switch (e.g., Postgres replay → Kafka live). `ReplayThenLiveConfig::overlap_dedupe_capacity: Option<NonZeroUsize>` records the last N replay event ids and silently acks any live event whose id matches. |
 
 Identity for the checkpoint store is `CheckpointKey { scope: { group,
@@ -413,6 +424,8 @@ inspection, and batching as separate responsibilities.
 |---|---|
 | `MapWriter<W, F>` | Transform `&Event -> Event` before writing. The mapper decides whether to clone the input or build a new event. |
 | `TryMapWriter<W, F>` | Fallibly transform `&Event -> Result<Event>` before writing. |
+| `FlatMapWriter<W, F>` | One-to-many event derivation `&Event -> Vec<Event>`; both `write` and `write_all` forward the mapped events through the inner `write_all`. |
+| `TryFlatMapWriter<W, F>` | Fallible one-to-many derivation `&Event -> Result<Vec<Event>>`; forwards through the inner `write_all`. |
 | `FilteredWriter<W, F>` | Skip writes when `Filter::matches` is false. |
 | `FanoutWriter` | Write the same event or batch to multiple `ArcWriter` destinations concurrently; all destinations are awaited and the first error is returned. |
 | `RetryWriter<W>` | Retry `write` and `write_all` failures with validated exponential backoff. |
@@ -839,6 +852,17 @@ Worth knowing when changing the codebase:
   by the intake task, not one `tokio::spawn` per delivered message. At
   high throughput this keeps the timer wheel cost flat. The pattern is
   the template for any future "per-message timer" wrapper.
+- **One-to-many event derivation is writer-side.** `FlatMapWriter` and
+  `TryFlatMapWriter` derive `Vec<Event>` from a single `&Event` and forward
+  through `write_all`. Reader-side flat-map is intentionally deferred because
+  source-message ack semantics become ambiguous when one inner message expands
+  into many delivered messages (whose ack/nack drives the source cursor, and
+  when). Keep fanout on the writer side until a clear semantic story exists.
+- **`Acker::nack_with(NackContext)` is additive.** `Acker::nack()` is preserved
+  and `nack_with` has a default impl that delegates to it, so existing ackers
+  keep compiling. The dyn bridge exposes `DynAcker::nack_with_dyn(NackContext)`
+  as a concrete method (no generic dyn methods) so `BoxAcker`, `ArcAcker`,
+  `BoxReader`, and `ArcReader` stay object-safe.
 - **Handler-level multiplexing, not reader-level fanout.** `Multiplexer`
   is a `Handler` that routes one delivered event to multiple filtered
   subscribers. The original backend message keeps one ack/nack

@@ -1,12 +1,13 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 
-use futures::Stream;
+use futures::StreamExt;
+use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::event::Event;
+use crate::io::acker::NackContext;
+use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, ArcWriter, Message, Reader, Writer, WriterExt};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
@@ -16,11 +17,20 @@ pub enum NackDisposition {
     AckInnerAfterRoute,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum DeliveryDisposition {
+    #[default]
+    RequireRoute,
+    BestEffort,
+}
+
 pub struct OutcomeRouterReader<R> {
     inner: R,
     ack_writer: Option<ArcWriter>,
     nack_writer: Option<ArcWriter>,
     nack_disposition: NackDisposition,
+    delivery_writer: Option<ArcWriter>,
+    delivery_disposition: DeliveryDisposition,
 }
 
 pub struct OutcomeRouterAcker<A: Acker> {
@@ -30,13 +40,6 @@ pub struct OutcomeRouterAcker<A: Acker> {
     nack_writer: Option<ArcWriter>,
     nack_disposition: NackDisposition,
     completed: Arc<AtomicBool>,
-}
-
-pub struct OutcomeRouterStream<R: Reader> {
-    inner: Pin<Box<R::Stream>>,
-    ack_writer: Option<ArcWriter>,
-    nack_writer: Option<ArcWriter>,
-    nack_disposition: NackDisposition,
 }
 
 impl<R> OutcomeRouterReader<R> {
@@ -49,6 +52,8 @@ impl<R> OutcomeRouterReader<R> {
             ack_writer: Some(ack_writer.into_arced()),
             nack_writer: None,
             nack_disposition: NackDisposition::NackInner,
+            delivery_writer: None,
+            delivery_disposition: DeliveryDisposition::default(),
         }
     }
 
@@ -61,6 +66,8 @@ impl<R> OutcomeRouterReader<R> {
             ack_writer: None,
             nack_writer: Some(nack_writer.into_arced()),
             nack_disposition: NackDisposition::NackInner,
+            delivery_writer: None,
+            delivery_disposition: DeliveryDisposition::default(),
         }
     }
 
@@ -74,11 +81,56 @@ impl<R> OutcomeRouterReader<R> {
             ack_writer: Some(ack_writer.into_arced()),
             nack_writer: Some(nack_writer.into_arced()),
             nack_disposition: NackDisposition::NackInner,
+            delivery_writer: None,
+            delivery_disposition: DeliveryDisposition::default(),
         }
+    }
+
+    pub fn on_delivery<W>(inner: R, delivery_writer: W) -> Self
+    where
+        W: Writer + 'static,
+    {
+        Self {
+            inner,
+            ack_writer: None,
+            nack_writer: None,
+            nack_disposition: NackDisposition::NackInner,
+            delivery_writer: Some(delivery_writer.into_arced()),
+            delivery_disposition: DeliveryDisposition::default(),
+        }
+    }
+
+    pub fn with_ack_writer<W>(mut self, writer: W) -> Self
+    where
+        W: Writer + 'static,
+    {
+        self.ack_writer = Some(writer.into_arced());
+        self
+    }
+
+    pub fn with_nack_writer<W>(mut self, writer: W) -> Self
+    where
+        W: Writer + 'static,
+    {
+        self.nack_writer = Some(writer.into_arced());
+        self
+    }
+
+    pub fn with_delivery_writer<W>(mut self, writer: W) -> Self
+    where
+        W: Writer + 'static,
+    {
+        self.delivery_writer = Some(writer.into_arced());
+        self
     }
 
     pub fn with_nack_disposition(mut self, disposition: NackDisposition) -> Self {
         self.nack_disposition = disposition;
+        self
+    }
+
+    pub fn with_delivery_disposition(mut self, disposition: DeliveryDisposition) -> Self {
+        self.delivery_disposition = disposition;
         self
     }
 }
@@ -131,6 +183,26 @@ where
             NackDisposition::AckInnerAfterRoute => self.inner.ack().await,
         }
     }
+
+    async fn nack_with(&self, context: NackContext) -> Result<()> {
+        if !self.mark_started() {
+            return Ok(());
+        }
+
+        let Some(writer) = self.nack_writer.as_ref() else {
+            return self.inner.nack_with(context).await;
+        };
+
+        if let Err(error) = writer.write(&self.event).await {
+            self.best_effort_nack_inner().await;
+            return Err(error);
+        }
+
+        match self.nack_disposition {
+            NackDisposition::NackInner => self.inner.nack_with(context).await,
+            NackDisposition::AckInnerAfterRoute => self.inner.ack().await,
+        }
+    }
 }
 
 impl<R> Reader for OutcomeRouterReader<R>
@@ -139,49 +211,73 @@ where
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
-    R::Stream: 'static,
+    R::Stream: Send + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = OutcomeRouterAcker<R::Acker>;
     type Cursor = R::Cursor;
-    type Stream = OutcomeRouterStream<R>;
+    type Stream = SpawnedStream<OutcomeRouterAcker<R::Acker>, R::Cursor>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
-        Ok(OutcomeRouterStream {
-            inner: Box::pin(inner),
-            ack_writer: self.ack_writer.clone(),
-            nack_writer: self.nack_writer.clone(),
-            nack_disposition: self.nack_disposition,
-        })
-    }
-}
+        let ack_writer = self.ack_writer.clone();
+        let nack_writer = self.nack_writer.clone();
+        let nack_disposition = self.nack_disposition;
+        let delivery_writer = self.delivery_writer.clone();
+        let delivery_disposition = self.delivery_disposition;
+        let (tx, rx) = mpsc::channel(64);
 
-impl<R> Stream for OutcomeRouterStream<R>
-where
-    R: Reader,
-    R::Acker: Send + Sync + 'static,
-{
-    type Item = Result<Message<OutcomeRouterAcker<R::Acker>, R::Cursor>>;
+        let handle = tokio::spawn(async move {
+            let mut stream = Box::pin(inner);
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(message) => {
+                        let (event, inner_acker, cursor) = message.into_parts();
+                        if let Some(writer) = delivery_writer.as_ref()
+                            && let Err(error) = writer.write(&event).await
+                        {
+                            match delivery_disposition {
+                                DeliveryDisposition::RequireRoute => {
+                                    if let Ok(context) =
+                                        NackContext::route_failed("delivery", error.clone())
+                                    {
+                                        let _ = inner_acker.nack_with(context).await;
+                                    } else {
+                                        let _ = inner_acker.nack().await;
+                                    }
+                                    let _ = tx.send(Err(error)).await;
+                                    return;
+                                }
+                                DeliveryDisposition::BestEffort => {}
+                            }
+                        }
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(message))) => {
-                let (event, inner, cursor) = message.into_parts();
-                let acker = OutcomeRouterAcker {
-                    inner,
-                    event: event.clone(),
-                    ack_writer: self.ack_writer.clone(),
-                    nack_writer: self.nack_writer.clone(),
-                    nack_disposition: self.nack_disposition,
-                    completed: Arc::new(AtomicBool::new(false)),
-                };
-                Poll::Ready(Some(Ok(Message::new(event, acker, cursor))))
+                        let acker = OutcomeRouterAcker {
+                            inner: inner_acker,
+                            event: event.clone(),
+                            ack_writer: ack_writer.clone(),
+                            nack_writer: nack_writer.clone(),
+                            nack_disposition,
+                            completed: Arc::new(AtomicBool::new(false)),
+                        };
+                        if tx
+                            .send(Ok(Message::new(event, acker, cursor)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        if tx.send(Err(error)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
+        });
+
+        Ok(SpawnedStream::new(rx, handle))
     }
 }
 
@@ -189,10 +285,11 @@ where
 mod tests {
     use super::*;
 
+    use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
-    use futures::{StreamExt, stream};
+    use futures::{Stream, stream};
 
     use crate::error::Error;
     use crate::io::NoCursor;
@@ -583,6 +680,70 @@ mod tests {
         assert!(captured.events().is_empty());
     }
 
+    #[derive(Clone, Default)]
+    struct ContextAcker {
+        captured: Arc<Mutex<Vec<NackContext>>>,
+        nack_count: Arc<AtomicUsize>,
+    }
+
+    impl Acker for ContextAcker {
+        async fn ack(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn nack(&self) -> Result<()> {
+            self.nack_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn nack_with(&self, context: NackContext) -> Result<()> {
+            self.captured.lock().unwrap().push(context);
+            self.nack_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct SingleContextReader {
+        event: Mutex<Option<Event>>,
+        acker: ContextAcker,
+    }
+
+    impl Reader for SingleContextReader {
+        type Subscription = ();
+        type Acker = ContextAcker;
+        type Cursor = NoCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<ContextAcker, NoCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let event = self.event.lock().unwrap().take().expect("event available");
+            let acker = self.acker.clone();
+            Ok(Box::pin(stream::once(async move {
+                Ok(Message::new(event, acker, NoCursor))
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn outcome_router_forwards_nack_context_to_inner() {
+        let nack_writer = CapturingWriter::default();
+        let acker = ContextAcker::default();
+        let captured = Arc::clone(&acker.captured);
+        let source = SingleContextReader {
+            event: Mutex::new(Some(ev("source.topic"))),
+            acker: acker.clone(),
+        };
+        let reader = OutcomeRouterReader::on_nack(source, nack_writer);
+        let mut stream = reader.read(()).await.unwrap();
+
+        let message = stream.next().await.unwrap().unwrap();
+        message
+            .nack_with(NackContext::processing_rejected("downstream rejected").unwrap())
+            .await
+            .unwrap();
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].context().message(), "downstream rejected");
+    }
+
     #[tokio::test]
     async fn outcome_router_composes_with_try_map_writer_and_fanout_writer() {
         use crate::io::writer::{FanoutWriter, TryMapWriter};
@@ -616,5 +777,98 @@ mod tests {
         assert_eq!(second_seen.events()[0].topic().as_str(), "dead.letter");
         assert_eq!(acker.acked.load(Ordering::SeqCst), 1);
         assert_eq!(acker.nacked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn routes_delivery_before_downstream_receives_message() {
+        let delivery_writer = CapturingWriter::default();
+        let captured = delivery_writer.clone();
+        let acker = CountingAcker::default();
+        let source = SingleReader::new(ev("source.topic"), acker.clone());
+        let reader = OutcomeRouterReader::on_delivery(source, delivery_writer);
+        let mut stream = reader.read(()).await.unwrap();
+
+        let message = stream.next().await.unwrap().unwrap();
+
+        assert_eq!(captured.events().len(), 1);
+        assert_eq!(captured.events()[0].topic().as_str(), "source.topic");
+
+        message.ack().await.unwrap();
+        assert_eq!(acker.acked.load(Ordering::SeqCst), 1);
+        assert_eq!(acker.nacked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn best_effort_delivery_route_failure_still_delivers_message() {
+        let acker = CountingAcker::default();
+        let source = SingleReader::new(ev("source.topic"), acker.clone());
+        let reader = OutcomeRouterReader::on_delivery(source, FailingWriter)
+            .with_delivery_disposition(DeliveryDisposition::BestEffort);
+        let mut stream = reader.read(()).await.unwrap();
+
+        let message = stream.next().await.unwrap().unwrap();
+        assert_eq!(message.event().topic().as_str(), "source.topic");
+        assert_eq!(acker.acked.load(Ordering::SeqCst), 0);
+        assert_eq!(acker.nacked.load(Ordering::SeqCst), 0);
+
+        message.ack().await.unwrap();
+        assert_eq!(acker.acked.load(Ordering::SeqCst), 1);
+        assert_eq!(acker.nacked.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn required_delivery_route_failure_nacks_inner_and_surfaces_error() {
+        let acker = ContextAcker::default();
+        let captured = Arc::clone(&acker.captured);
+        let source = SingleContextReader {
+            event: Mutex::new(Some(ev("source.topic"))),
+            acker: acker.clone(),
+        };
+        let reader = OutcomeRouterReader::on_delivery(source, FailingWriter);
+        let mut stream = reader.read(()).await.unwrap();
+
+        let item = stream.next().await.unwrap();
+        let err = match item {
+            Ok(_) => panic!("expected error"),
+            Err(error) => error,
+        };
+
+        assert!(err.to_string().contains("route failed"));
+        assert_eq!(acker.nack_count.load(Ordering::SeqCst), 1);
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].reason(),
+            crate::io::acker::NackReason::RouteFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn required_delivery_route_failure_uses_route_failed_context() {
+        use crate::context::ContextValue;
+
+        let acker = ContextAcker::default();
+        let captured = Arc::clone(&acker.captured);
+        let source = SingleContextReader {
+            event: Mutex::new(Some(ev("source.topic"))),
+            acker: acker.clone(),
+        };
+        let reader = OutcomeRouterReader::on_delivery(source, FailingWriter);
+        let mut stream = reader.read(()).await.unwrap();
+
+        let item = stream.next().await.unwrap();
+        assert!(item.is_err());
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let context = captured[0].context();
+        assert_eq!(
+            context.get("destination"),
+            Some(&ContextValue::String("delivery".to_owned()))
+        );
+        assert!(matches!(
+            context.get("error"),
+            Some(ContextValue::Error(e)) if e.message().contains("route failed")
+        ));
     }
 }
