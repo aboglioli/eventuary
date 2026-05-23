@@ -18,6 +18,7 @@
 pub mod buffer_store;
 pub mod checkpoint_store;
 pub mod coordinated_acker;
+pub mod coordinated_reader;
 pub mod database;
 pub mod dedupe_store;
 pub mod multiplexer_store;
@@ -31,6 +32,9 @@ pub mod writer;
 pub use buffer_store::{PgBufferStore, PgBufferStoreConfig, PgBufferStoreId};
 pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 pub use coordinated_acker::PgCoordinatedAcker;
+pub use coordinated_reader::{
+    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedSubscription,
+};
 pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
 pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
 pub use partition_coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};

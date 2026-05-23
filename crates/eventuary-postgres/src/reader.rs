@@ -153,6 +153,7 @@ impl Acker for PgCursorAcker {
     }
 }
 
+#[derive(Clone)]
 pub struct PgReader {
     pool: PgPool,
     config: PgReaderConfig,
