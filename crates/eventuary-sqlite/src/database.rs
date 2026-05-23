@@ -38,6 +38,10 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0004_partition_columns.sql",
         template: include_str!("../migrations/0004_partition_columns.sql"),
     },
+    Migration {
+        filename: "0005_partition_coordination.sql",
+        template: include_str!("../migrations/0005_partition_coordination.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {
@@ -52,6 +56,8 @@ pub struct SqliteDatabaseConfig {
     pub dedupe_keys_relation: SqliteRelationName,
     pub buffer_entries_relation: SqliteRelationName,
     pub watermarks_relation: SqliteRelationName,
+    pub consumers_relation: SqliteRelationName,
+    pub partitions_relation: SqliteRelationName,
 }
 
 impl Default for SqliteDatabaseConfig {
@@ -68,6 +74,10 @@ impl Default for SqliteDatabaseConfig {
                 .expect("default buffer relation"),
             watermarks_relation: SqliteRelationName::new("watermarks")
                 .expect("default watermarks relation"),
+            consumers_relation: SqliteRelationName::new("event_stream_consumers")
+                .expect("default consumers relation"),
+            partitions_relation: SqliteRelationName::new("event_stream_partitions")
+                .expect("default partitions relation"),
         }
     }
 }
@@ -84,6 +94,8 @@ pub fn render_migration_sql(migration: &Migration, config: &SqliteDatabaseConfig
         .replace("{dedupe_keys}", &config.dedupe_keys_relation.render())
         .replace("{buffer_entries}", &config.buffer_entries_relation.render())
         .replace("{watermarks}", &config.watermarks_relation.render())
+        .replace("{consumers}", &config.consumers_relation.render())
+        .replace("{partitions}", &config.partitions_relation.render())
 }
 
 pub fn render_schema_sql(config: &SqliteDatabaseConfig) -> String {

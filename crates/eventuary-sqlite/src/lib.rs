@@ -20,6 +20,7 @@ pub mod checkpoint_store;
 pub mod database;
 pub mod dedupe_store;
 pub mod multiplexer_store;
+pub mod partition_coordinator;
 pub mod reader;
 pub mod relation;
 pub mod watermark_store;
@@ -29,4 +30,5 @@ pub use buffer_store::{SqliteBufferStore, SqliteBufferStoreConfig, SqliteBufferS
 pub use checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 pub use dedupe_store::{SqliteDedupeStore, SqliteDedupeStoreConfig};
 pub use multiplexer_store::{SqliteMultiplexerStore, SqliteMultiplexerStoreConfig};
+pub use partition_coordinator::{SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig};
 pub use watermark_store::{SqliteWatermarkStore, SqliteWatermarkStoreConfig};
