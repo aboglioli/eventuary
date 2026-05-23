@@ -9,6 +9,7 @@ pub mod filter;
 pub mod handler;
 pub mod message;
 pub mod owner_id;
+pub mod partition_coordinator;
 pub mod position;
 pub mod reader;
 pub mod stream;
@@ -29,6 +30,7 @@ pub use handler::{
 };
 pub use message::Message;
 pub use owner_id::OwnerId;
+pub use partition_coordinator::{PartitionCoordinator, PartitionLease};
 pub use position::{StartFrom, StartableSubscription, StopAt};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use stream_id::StreamId;

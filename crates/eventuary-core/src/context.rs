@@ -43,6 +43,7 @@ impl From<&Error> for ContextError {
             Error::InvalidEventKey(m) => ("invalid_event_key", m.clone()),
             Error::InvalidConsumerGroupId(m) => ("invalid_consumer_group_id", m.clone()),
             Error::InvalidOwnerId(m) => ("invalid_owner_id", m.clone()),
+            Error::OwnershipLost(m) => ("ownership_lost", m.clone()),
             Error::InvalidStartFrom(m) => ("invalid_start_from", m.clone()),
             Error::InvalidCursor(m) => ("invalid_cursor", m.clone()),
             Error::Serialization(m) => ("serialization", m.clone()),
