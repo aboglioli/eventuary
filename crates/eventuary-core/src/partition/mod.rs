@@ -1,5 +1,6 @@
 mod composite;
 mod event_key;
+mod hasher;
 mod metadata;
 mod namespace;
 mod organization;
@@ -21,6 +22,7 @@ pub enum UnkeyedPartitionMode {
     EventId,
 }
 
+pub use self::hasher::{Fnv1a64PartitionHasher, PartitionHasher};
 pub use composite::CompositePartitionKeyResolver;
 pub use event_key::EventKeyPartitionKeyResolver;
 pub use metadata::MetadataPartitionKeyResolver;
