@@ -120,6 +120,20 @@ struct CursorState {
     pending_nack: bool,
 }
 
+impl PgCursorAcker {
+    #[doc(hidden)]
+    pub fn dummy(sequence: i64) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CursorState {
+                last_acked: 0,
+                pending_nack: false,
+            })),
+            notify: Arc::new(Notify::new()),
+            sequence,
+        }
+    }
+}
+
 impl Acker for PgCursorAcker {
     async fn ack(&self) -> Result<()> {
         let mut state = self.state.lock().await;
