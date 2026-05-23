@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +19,16 @@ use eventuary_core::{
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum SqlitePartitionSelection {
+    #[default]
+    All,
+    One {
+        count: NonZeroU16,
+        id: u16,
+    },
+}
 
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -56,6 +67,7 @@ pub struct SqliteSubscription {
     pub filter: EventFilter,
     pub batch_size: Option<usize>,
     pub limit: Option<usize>,
+    pub partitions: SqlitePartitionSelection,
 }
 
 impl Default for SqliteSubscription {
@@ -66,6 +78,7 @@ impl Default for SqliteSubscription {
             filter: EventFilter::default(),
             batch_size: None,
             limit: None,
+            partitions: SqlitePartitionSelection::All,
         }
     }
 }
@@ -152,6 +165,7 @@ impl Reader for SqliteReader {
             .clamp(1, 1000);
         let filter = subscription.filter.clone();
         let limit = subscription.limit;
+        let partitions = subscription.partitions;
         let (tx, rx) = mpsc::channel(64);
 
         let (mut after_seq, lower_bound_ts) =
@@ -184,12 +198,15 @@ impl Reader for SqliteReader {
                 if buffer.is_empty() {
                     let fetched = match fetch_batch(
                         &conn,
-                        &events_relation,
-                        after_seq,
-                        stop_seq,
-                        batch_size,
-                        lower_bound_ts,
-                        &filter,
+                        FetchBatchParams {
+                            events_relation: &events_relation,
+                            after_seq,
+                            stop_seq,
+                            take: batch_size,
+                            lower_bound_ts,
+                            filter: &filter,
+                            partitions: &partitions,
+                        },
                     )
                     .await
                     {
@@ -398,15 +415,29 @@ async fn resolve_stop_position(
     }
 }
 
-async fn fetch_batch(
-    conn: &SqliteConn,
-    events_relation: &str,
+struct FetchBatchParams<'a> {
+    events_relation: &'a str,
     after_seq: i64,
     stop_seq: Option<i64>,
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
-    filter: &EventFilter,
+    filter: &'a EventFilter,
+    partitions: &'a SqlitePartitionSelection,
+}
+
+async fn fetch_batch(
+    conn: &SqliteConn,
+    p: FetchBatchParams<'_>,
 ) -> Result<Vec<(SerializedEvent, i64)>> {
+    let FetchBatchParams {
+        events_relation,
+        after_seq,
+        stop_seq,
+        take,
+        lower_bound_ts,
+        filter,
+        partitions,
+    } = p;
     let conn = Arc::clone(conn);
     let relation = events_relation.to_owned();
     let org = filter.organization.as_ref().map(|o| o.as_str().to_owned());
@@ -418,6 +449,7 @@ async fn fetch_batch(
         _ => None,
     });
     let ts_str = lower_bound_ts.map(|t| t.to_rfc3339());
+    let partitions = *partitions;
 
     tokio::task::spawn_blocking(move || {
         let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
@@ -458,6 +490,15 @@ async fn fetch_batch(
             sql.push_str(&format!(" AND timestamp >= ?{idx}"));
             params.push(Value::Text(ts.clone()));
             idx += 1;
+        }
+        if let SqlitePartitionSelection::One { count, id } = partitions {
+            sql.push_str(&format!(
+                " AND partition_count = ?{idx} AND partition_id = ?{}",
+                idx + 1
+            ));
+            params.push(Value::Integer(count.get() as i64));
+            params.push(Value::Integer(id as i64));
+            idx += 2;
         }
         sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ?{idx}"));
         params.push(Value::Integer(take as i64));
@@ -560,8 +601,21 @@ async fn fetch_batch(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::num::NonZeroU16;
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use tokio::time::timeout;
+
     use super::*;
-    use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder};
+    use crate::database::SqliteDatabase;
+    use crate::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
+    use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder, Reader, Writer};
+    use eventuary_core::partition::{
+        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher,
+    };
+    use eventuary_core::{Event, Payload, StartFrom, StopAt};
 
     #[test]
     fn sqlite_cursor_id_is_global() {
@@ -590,5 +644,131 @@ mod tests {
         let lo = codec.encode(&SqliteCursor::new(9)).unwrap();
         let hi = codec.encode(&SqliteCursor::new(10)).unwrap();
         assert!(lo < hi);
+    }
+
+    const PARTITION_COUNT: u16 = 4;
+
+    fn event_with_key(key: &str) -> Event {
+        Event::builder(
+            "acme",
+            "/orders",
+            "order.placed",
+            Payload::from_string("{}"),
+        )
+        .unwrap()
+        .key(key)
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn partition_for_key(key: &str) -> u16 {
+        let hash = Fnv1a64PartitionHasher.hash(key);
+        (hash % PARTITION_COUNT as u64) as u16
+    }
+
+    fn fast_config() -> SqliteReaderConfig {
+        SqliteReaderConfig {
+            poll_interval: Duration::from_millis(10),
+            ..SqliteReaderConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_default_all_returns_every_event() {
+        let db = SqliteDatabase::open_in_memory().unwrap();
+        let config = SqliteWriterConfig {
+            partitioning: SqlitePartitioningConfig::inline(
+                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..SqliteWriterConfig::default()
+        };
+        let writer = SqliteWriter::new_with_config(db.conn(), config);
+
+        let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
+        for key in &keys {
+            writer.write(&event_with_key(key)).await.unwrap();
+        }
+
+        let reader = SqliteReader::new(db.conn(), fast_config());
+        let subscription = SqliteSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            ..SqliteSubscription::default()
+        };
+        let mut stream = reader.read(subscription).await.unwrap();
+
+        let mut count = 0usize;
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
+            msg.acker().ack().await.unwrap();
+            count += 1;
+        }
+
+        assert_eq!(count, keys.len());
+    }
+
+    #[tokio::test]
+    async fn reader_one_filters_to_single_partition() {
+        let db = SqliteDatabase::open_in_memory().unwrap();
+        let config = SqliteWriterConfig {
+            partitioning: SqlitePartitioningConfig::inline(
+                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..SqliteWriterConfig::default()
+        };
+        let writer = SqliteWriter::new_with_config(db.conn(), config);
+
+        let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
+        for key in &keys {
+            writer.write(&event_with_key(key)).await.unwrap();
+        }
+
+        let partitions_by_id: HashMap<u16, Vec<&str>> =
+            keys.iter().fold(HashMap::new(), |mut acc, key| {
+                acc.entry(partition_for_key(key)).or_default().push(key);
+                acc
+            });
+
+        let (chosen_partition, expected_keys) = partitions_by_id
+            .iter()
+            .find(|(_, ks)| ks.len() >= 2)
+            .map(|(id, ks)| (*id, ks.clone()))
+            .expect("expected at least one partition with >=2 events");
+
+        let reader = SqliteReader::new(db.conn(), fast_config());
+        let subscription = SqliteSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            partitions: SqlitePartitionSelection::One {
+                count: NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                id: chosen_partition,
+            },
+            ..SqliteSubscription::default()
+        };
+        let mut stream = reader.read(subscription).await.unwrap();
+
+        let mut received_keys: Vec<String> = Vec::new();
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
+            let key = msg
+                .event()
+                .key()
+                .map(|k| k.as_str().to_owned())
+                .unwrap_or_default();
+            msg.acker().ack().await.unwrap();
+            received_keys.push(key);
+        }
+
+        assert_eq!(received_keys.len(), expected_keys.len());
+        for key in &received_keys {
+            assert_eq!(
+                partition_for_key(key),
+                chosen_partition,
+                "event key {key} maps to wrong partition"
+            );
+        }
     }
 }
