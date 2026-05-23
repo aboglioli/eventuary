@@ -34,6 +34,10 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0004_partition_columns.sql",
         template: include_str!("../migrations/0004_partition_columns.sql"),
     },
+    Migration {
+        filename: "0005_partition_coordination.sql",
+        template: include_str!("../migrations/0005_partition_coordination.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {
@@ -48,6 +52,8 @@ pub struct PgDatabaseConfig {
     pub dedupe_keys_relation: PgRelationName,
     pub buffer_entries_relation: PgRelationName,
     pub watermarks_relation: PgRelationName,
+    pub consumers_relation: PgRelationName,
+    pub partitions_relation: PgRelationName,
     pub max_connections: u32,
 }
 
@@ -65,6 +71,10 @@ impl Default for PgDatabaseConfig {
                 .expect("default buffer relation"),
             watermarks_relation: PgRelationName::new("watermarks")
                 .expect("default watermarks relation"),
+            consumers_relation: PgRelationName::new("event_stream_consumers")
+                .expect("default consumers relation"),
+            partitions_relation: PgRelationName::new("event_stream_partitions")
+                .expect("default partitions relation"),
             max_connections: 20,
         }
     }
@@ -82,6 +92,8 @@ impl PgDatabaseConfig {
             dedupe_keys_relation: PgRelationName::new(format!("{schema}.dedupe_keys"))?,
             buffer_entries_relation: PgRelationName::new(format!("{schema}.buffer_entries"))?,
             watermarks_relation: PgRelationName::new(format!("{schema}.watermarks"))?,
+            consumers_relation: PgRelationName::new(format!("{schema}.event_stream_consumers"))?,
+            partitions_relation: PgRelationName::new(format!("{schema}.event_stream_partitions"))?,
             max_connections: 20,
         })
     }
@@ -99,6 +111,8 @@ pub fn render_migration_sql(migration: &Migration, config: &PgDatabaseConfig) ->
         .replace("{dedupe_keys}", &config.dedupe_keys_relation.render())
         .replace("{buffer_entries}", &config.buffer_entries_relation.render())
         .replace("{watermarks}", &config.watermarks_relation.render())
+        .replace("{consumers}", &config.consumers_relation.render())
+        .replace("{partitions}", &config.partitions_relation.render())
 }
 
 pub fn render_schema_sql(config: &PgDatabaseConfig) -> String {
@@ -111,6 +125,8 @@ pub fn render_schema_sql(config: &PgDatabaseConfig) -> String {
         &config.dedupe_keys_relation,
         &config.buffer_entries_relation,
         &config.watermarks_relation,
+        &config.consumers_relation,
+        &config.partitions_relation,
     ] {
         if let Some(schema) = relation.schema()
             && seen.insert(schema)
@@ -197,6 +213,8 @@ async fn apply_migrations(pool: &PgPool, config: &PgDatabaseConfig) -> Result<()
         config.dedupe_keys_relation.schema(),
         config.buffer_entries_relation.schema(),
         config.watermarks_relation.schema(),
+        config.consumers_relation.schema(),
+        config.partitions_relation.schema(),
     ]
     .into_iter()
     .flatten()
