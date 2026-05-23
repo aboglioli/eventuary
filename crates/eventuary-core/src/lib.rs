@@ -39,6 +39,7 @@ mod metadata;
 mod namespace;
 mod namespace_pattern;
 mod organization;
+pub mod partition;
 mod payload;
 mod serialization;
 mod snapshot;
