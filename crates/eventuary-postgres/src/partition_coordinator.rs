@@ -302,12 +302,14 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             match check_row {
                 Some(r) => {
                     let current_generation: i64 = r.get("generation");
-                    let current_owner: String = r.get("owner_id");
-                    if current_generation == generation && current_owner == owner_id.as_str() {
+                    let current_owner: Option<String> = r.get("owner_id");
+                    if current_generation == generation
+                        && current_owner.as_deref() == Some(owner_id.as_str())
+                    {
                         return Ok(());
                     }
                     Err(Error::OwnershipLost(format!(
-                        "partition {partition_id} generation {generation}"
+                        "checkpoint rejected for partition {partition_id}: stale owner/generation"
                     )))
                 }
                 None => Err(Error::OwnershipLost(format!(

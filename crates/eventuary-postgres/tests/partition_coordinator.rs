@@ -334,6 +334,35 @@ async fn pg_coordinator_checkpoint_is_monotonic() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_coordinator_checkpoint_after_release_returns_ownership_lost() {
+    let (_c, pool) = start_postgres().await;
+    let coord = coordinator(pool);
+
+    let group = ConsumerGroupId::new("group-1").unwrap();
+    let stream = StreamId::new("orders").unwrap();
+    let owner_a = OwnerId::new("worker-a").unwrap();
+    let lease_dur = std::time::Duration::from_secs(60);
+
+    let lease = coord
+        .claim(&group, &stream, 0, &owner_a, lease_dur)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.generation, 1);
+
+    coord
+        .release(&group, &stream, 0, &owner_a, lease.generation)
+        .await
+        .unwrap();
+
+    let err = coord
+        .checkpoint(&group, &stream, 0, &owner_a, lease.generation, 100)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pg_coordinator_checkpoint_with_stale_generation_returns_ownership_lost() {
     let (_c, pool) = start_postgres().await;
     let coord = coordinator(pool);
