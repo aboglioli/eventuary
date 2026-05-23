@@ -34,6 +34,10 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0003_monotonic_checkpoints.sql",
         template: include_str!("../migrations/0003_monotonic_checkpoints.sql"),
     },
+    Migration {
+        filename: "0004_partition_columns.sql",
+        template: include_str!("../migrations/0004_partition_columns.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {

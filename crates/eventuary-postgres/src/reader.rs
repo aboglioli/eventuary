@@ -379,7 +379,10 @@ struct FetchBatchParams<'a> {
     partitions: &'a PgPartitionSelection,
 }
 
-async fn fetch_batch(pool: &PgPool, p: FetchBatchParams<'_>) -> Result<Vec<(SerializedEvent, i64)>> {
+async fn fetch_batch(
+    pool: &PgPool,
+    p: FetchBatchParams<'_>,
+) -> Result<Vec<(SerializedEvent, i64)>> {
     let FetchBatchParams {
         events_relation,
         after_seq,
