@@ -30,3 +30,4 @@ pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
 pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
 pub use watermark_store::{PgWatermarkStore, PgWatermarkStoreConfig};
+pub use writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
