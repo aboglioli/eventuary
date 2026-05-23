@@ -53,6 +53,7 @@ fn sub_for(org: &str) -> PgSubscription {
         filter: EventFilter::for_organization(OrganizationId::new(org).unwrap()),
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     }
 }
 
@@ -207,6 +208,7 @@ async fn start_from_after_cursor_resumes() {
         filter: EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     };
     let reader2 = PgReader::new(pool, fast_config());
     let mut stream2 = reader2.read(resume).await.unwrap();
@@ -234,6 +236,7 @@ async fn start_from_latest_skips_existing_events() {
         filter: EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     };
     let reader = PgReader::new(pool, fast_config());
     let mut stream = reader.read(subscription).await.unwrap();
@@ -274,6 +277,7 @@ async fn start_from_timestamp_filters_old_events() {
         filter: EventFilter::for_organization(OrganizationId::new("acme").unwrap()),
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     };
     let reader = PgReader::new(pool, fast_config());
     let mut stream = reader.read(subscription).await.unwrap();
@@ -310,6 +314,7 @@ async fn topic_filter() {
         filter,
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     };
     let reader = PgReader::new(pool, fast_config());
     let mut stream = reader.read(subscription).await.unwrap();
@@ -356,6 +361,7 @@ async fn namespace_filter() {
         filter,
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     };
     let reader = PgReader::new(pool, fast_config());
     let mut stream = reader.read(subscription).await.unwrap();

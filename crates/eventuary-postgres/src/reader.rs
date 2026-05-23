@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +18,16 @@ use eventuary_core::{
 };
 
 use crate::relation::PgRelationName;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum PgPartitionSelection {
+    #[default]
+    All,
+    One {
+        count: NonZeroU16,
+        id: u16,
+    },
+}
 
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -55,6 +66,7 @@ pub struct PgSubscription {
     pub filter: EventFilter,
     pub batch_size: Option<usize>,
     pub limit: Option<usize>,
+    pub partitions: PgPartitionSelection,
 }
 
 impl Default for PgSubscription {
@@ -65,6 +77,7 @@ impl Default for PgSubscription {
             filter: EventFilter::default(),
             batch_size: None,
             limit: None,
+            partitions: PgPartitionSelection::All,
         }
     }
 }
@@ -155,6 +168,7 @@ impl Reader for PgReader {
             .clamp(1, 1000);
         let filter = subscription.filter.clone();
         let limit = subscription.limit;
+        let partitions = subscription.partitions;
 
         let (mut after_seq, lower_bound_ts) =
             match resolve_initial_position(&pool, &events_relation, &subscription).await {
@@ -186,12 +200,15 @@ impl Reader for PgReader {
                 if buffer.is_empty() {
                     let fetched = match fetch_batch(
                         &pool,
-                        &events_relation,
-                        after_seq,
-                        stop_seq,
-                        batch_size,
-                        lower_bound_ts,
-                        &filter,
+                        FetchBatchParams {
+                            events_relation: &events_relation,
+                            after_seq,
+                            stop_seq,
+                            take: batch_size,
+                            lower_bound_ts,
+                            filter: &filter,
+                            partitions: &partitions,
+                        },
                     )
                     .await
                     {
@@ -352,15 +369,26 @@ async fn resolve_stop_position(
     }
 }
 
-async fn fetch_batch(
-    pool: &PgPool,
-    events_relation: &str,
+struct FetchBatchParams<'a> {
+    events_relation: &'a str,
     after_seq: i64,
     stop_seq: Option<i64>,
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
-    filter: &EventFilter,
-) -> Result<Vec<(SerializedEvent, i64)>> {
+    filter: &'a EventFilter,
+    partitions: &'a PgPartitionSelection,
+}
+
+async fn fetch_batch(pool: &PgPool, p: FetchBatchParams<'_>) -> Result<Vec<(SerializedEvent, i64)>> {
+    let FetchBatchParams {
+        events_relation,
+        after_seq,
+        stop_seq,
+        take,
+        lower_bound_ts,
+        filter,
+        partitions,
+    } = p;
     let mut sql = format!(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
@@ -401,6 +429,13 @@ async fn fetch_batch(
         sql.push_str(&format!(" AND timestamp >= ${bind_index}::timestamptz"));
         bind_index += 1;
     }
+    if let PgPartitionSelection::One { .. } = partitions {
+        sql.push_str(&format!(
+            " AND partition_count = ${bind_index} AND partition_id = ${}",
+            bind_index + 1
+        ));
+        bind_index += 2;
+    }
     sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ${bind_index}"));
 
     let mut q = sqlx::query(&sql).bind(after_seq);
@@ -420,6 +455,10 @@ async fn fetch_batch(
     }
     if let Some(ts) = lower_bound_ts {
         q = q.bind(ts.to_rfc3339());
+    }
+    if let PgPartitionSelection::One { count, id } = partitions {
+        q = q.bind(count.get() as i32);
+        q = q.bind(*id as i32);
     }
     q = q.bind(take as i64);
 
