@@ -5,13 +5,8 @@ pub trait PartitionHasher: Send + Sync {
     fn strategy(&self) -> &str;
 }
 
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Fnv1a64PartitionHasher;
-
-impl Default for Fnv1a64PartitionHasher {
-    fn default() -> Self {
-        Self
-    }
-}
 
 impl PartitionHasher for Fnv1a64PartitionHasher {
     fn hash(&self, key: &str) -> u64 {
@@ -43,8 +38,8 @@ mod tests {
     #[test]
     fn known_fixed_vectors() {
         let hasher = Fnv1a64PartitionHasher;
-        assert_eq!(hasher.hash("order-123"), fnv1a_u64(b"order-123"));
-        assert_eq!(hasher.hash("customer-7"), fnv1a_u64(b"customer-7"));
+        assert_eq!(hasher.hash("order-123"), 0x1b96f9c28b5d5aba);
+        assert_eq!(hasher.hash("customer-7"), 0x660308ab83c6fdf1);
     }
 
     #[test]
