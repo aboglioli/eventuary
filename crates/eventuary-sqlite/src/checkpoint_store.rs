@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use eventuary_core::io::CursorId;
 use eventuary_core::io::reader::{CheckpointKey, CheckpointScope, CheckpointStore};
+use eventuary_core::io::{Cursor, CursorId};
 use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
@@ -69,7 +69,7 @@ fn decode_cursor<C: DeserializeOwned>(value: String) -> Result<C> {
 
 impl<C> CheckpointStore<C> for SqliteCheckpointStore<C>
 where
-    C: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    C: Cursor + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn load(&self, key: &CheckpointKey) -> Result<Option<C>> {
         let conn = Arc::clone(&self.conn);
@@ -141,18 +141,28 @@ where
         let group = key.scope.consumer_group_id.as_str().to_owned();
         let stream = key.scope.stream_id.as_str().to_owned();
         let cursor_json = encode_cursor(&cursor)?;
+        let cursor_order = cursor.order_key();
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             let sql = format!(
-                "INSERT INTO {relation} (consumer_group_id, stream_id, cursor_id, cursor) \
-                 VALUES (?1, ?2, ?3, ?4) \
+                "INSERT INTO {relation} \
+                   (consumer_group_id, stream_id, cursor_id, cursor, cursor_order) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
                  ON CONFLICT (consumer_group_id, stream_id, cursor_id) \
-                 DO UPDATE SET cursor = excluded.cursor"
+                 DO UPDATE SET cursor = excluded.cursor, \
+                               cursor_order = excluded.cursor_order \
+                 WHERE {relation}.cursor_order < excluded.cursor_order"
             );
             guard
                 .execute(
                     &sql,
-                    rusqlite::params![group, stream, cursor_id, cursor_json],
+                    rusqlite::params![
+                        group,
+                        stream,
+                        cursor_id,
+                        cursor_json,
+                        cursor_order.as_bytes()
+                    ],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             Ok(())
@@ -166,7 +176,75 @@ where
 mod tests {
     use super::*;
     use eventuary_core::Partition;
+    use eventuary_core::io::reader::CheckpointScope;
+    use eventuary_core::io::{ConsumerGroupId, CursorOrder, StreamId};
     use std::num::NonZeroU16;
+
+    use crate::database::SqliteDatabase;
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct SeqCursor(i64);
+
+    impl Cursor for SeqCursor {
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_i64(self.0)
+        }
+    }
+
+    fn checkpoint_key() -> CheckpointKey {
+        CheckpointKey::new(
+            CheckpointScope::new(
+                ConsumerGroupId::new("test-group").unwrap(),
+                StreamId::new("test-stream").unwrap(),
+            ),
+            CursorId::global(),
+        )
+    }
+
+    fn make_store() -> SqliteCheckpointStore<SeqCursor> {
+        let db = SqliteDatabase::open_in_memory().unwrap();
+        SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default())
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_older_cursor() {
+        let store = make_store();
+        let key = checkpoint_key();
+
+        store.commit(&key, SeqCursor(100)).await.unwrap();
+        store.commit(&key, SeqCursor(50)).await.unwrap();
+
+        let loaded = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(loaded.0, 100);
+    }
+
+    #[tokio::test]
+    async fn commit_advances_forward() {
+        let store = make_store();
+        let key = checkpoint_key();
+
+        store.commit(&key, SeqCursor(100)).await.unwrap();
+        store.commit(&key, SeqCursor(200)).await.unwrap();
+
+        let loaded = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(loaded.0, 200);
+    }
+
+    #[tokio::test]
+    async fn commit_is_idempotent_for_equal_cursor() {
+        let store = make_store();
+        let key = checkpoint_key();
+
+        store.commit(&key, SeqCursor(100)).await.unwrap();
+        store.commit(&key, SeqCursor(100)).await.unwrap();
+
+        let loaded = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(loaded.0, 100);
+
+        store.commit(&key, SeqCursor(150)).await.unwrap();
+        let loaded = store.load(&key).await.unwrap().unwrap();
+        assert_eq!(loaded.0, 150);
+    }
 
     #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     struct WrappedCursor {

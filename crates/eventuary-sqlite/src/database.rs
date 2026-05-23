@@ -30,6 +30,10 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0002_stores.sql",
         template: include_str!("../migrations/0002_stores.sql"),
     },
+    Migration {
+        filename: "0003_monotonic_checkpoints.sql",
+        template: include_str!("../migrations/0003_monotonic_checkpoints.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {
@@ -146,12 +150,24 @@ fn apply_migrations(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<
     // on every open is safe and avoids skipping configured-relation
     // creation when the previous opener wrote `PRAGMA user_version`
     // against a different relation pair.
+    //
+    // Exception: `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS`
+    // equivalent in SQLite, so we tolerate "duplicate column name" errors
+    // to achieve idempotency on re-open.
     for migration in migrations() {
         let sql = render_migration_sql(migration, config);
-        conn.execute_batch(&sql)
-            .map_err(|e| Error::Store(e.to_string()))?;
+        let result = conn.execute_batch(&sql);
+        match result {
+            Ok(()) => {}
+            Err(ref e) if is_duplicate_column_error(e) => {}
+            Err(e) => return Err(Error::Store(e.to_string())),
+        }
     }
     Ok(())
+}
+
+fn is_duplicate_column_error(e: &rusqlite::Error) -> bool {
+    e.to_string().contains("duplicate column name")
 }
 
 fn migration_version(filename: &str) -> i64 {
