@@ -18,6 +18,7 @@ use crate::partition_coordinator::PgPartitionCoordinator;
 use crate::partition_cursor::PgPartitionCursor;
 use crate::reader::{PgCursor, PgPartitionSelection, PgReader, PgSubscription};
 
+#[derive(Clone, Copy)]
 pub struct PgCoordinatedReaderConfig {
     pub partition_lease_duration: Duration,
     pub partition_renew_interval: Duration,
@@ -36,6 +37,7 @@ impl Default for PgCoordinatedReaderConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct PgCoordinatedSubscription {
     pub consumer_group_id: ConsumerGroupId,
     pub stream_id: StreamId,
@@ -44,6 +46,7 @@ pub struct PgCoordinatedSubscription {
     pub inner: PgSubscription,
 }
 
+#[derive(Clone)]
 pub struct PgCoordinatedReader {
     inner: PgReader,
     coordinator: Arc<PgPartitionCoordinator>,

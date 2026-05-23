@@ -94,24 +94,14 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         PgReader::new(pool.clone(), PgReaderConfig::default()),
         Arc::clone(&coordinator),
         OwnerId::new("owner-a").unwrap(),
-        PgCoordinatedReaderConfig {
-            partition_lease_duration: reader_config.partition_lease_duration,
-            partition_renew_interval: reader_config.partition_renew_interval,
-            consumer_lease_duration: reader_config.consumer_lease_duration,
-            consumer_heartbeat_interval: reader_config.consumer_heartbeat_interval,
-        },
+        reader_config,
     );
 
     let reader_b = PgCoordinatedReader::new(
         PgReader::new(pool.clone(), PgReaderConfig::default()),
         Arc::clone(&coordinator),
         OwnerId::new("owner-b").unwrap(),
-        PgCoordinatedReaderConfig {
-            partition_lease_duration: reader_config.partition_lease_duration,
-            partition_renew_interval: reader_config.partition_renew_interval,
-            consumer_lease_duration: reader_config.consumer_lease_duration,
-            consumer_heartbeat_interval: reader_config.consumer_heartbeat_interval,
-        },
+        reader_config,
     );
 
     let sub_a = PgCoordinatedSubscription {
