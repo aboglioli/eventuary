@@ -221,3 +221,21 @@ async fn pg_checkpoint_store_forward_commit_advances_cursor() {
     let loaded = store.load(&key).await.unwrap().unwrap();
     assert_eq!(loaded.0, 200);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_checkpoint_store_idempotent_recommit_is_safe() {
+    let (_c, pool) = start_postgres().await;
+    let store: PgCheckpointStore<SeqCursor> =
+        PgCheckpointStore::new(pool, PgCheckpointStoreConfig::default());
+    let key = checkpoint_key();
+
+    store.commit(&key, SeqCursor(100)).await.unwrap();
+    store.commit(&key, SeqCursor(100)).await.unwrap();
+
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.0, 100);
+
+    store.commit(&key, SeqCursor(150)).await.unwrap();
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.0, 150);
+}
