@@ -219,18 +219,15 @@ impl Reader for PgCoordinatedReader {
             let mut owned: HashMap<u16, (PartitionLease, tokio::task::JoinHandle<()>)> =
                 HashMap::new();
 
-            let mut rebalance_ticker = tokio::time::interval(rebalance_interval);
-            rebalance_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
             let tick_duration = renew_interval.min(heartbeat_interval);
-            let mut renew_ticker = tokio::time::interval(tick_duration);
-            renew_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            let mut next_rebalance =
+                tokio::time::Instant::now() + jittered_duration(rebalance_interval);
+            let mut next_renew = tokio::time::Instant::now() + jittered_duration(tick_duration);
 
             loop {
                 tokio::select! {
-                    _ = rebalance_ticker.tick() => {
-                        tokio::time::sleep(jittered_duration(rebalance_interval) - rebalance_interval).await;
-
+                    _ = tokio::time::sleep_until(next_rebalance) => {
                         let dead_partitions: Vec<u16> = owned
                             .iter()
                             .filter(|(_, (_, h))| h.is_finished())
@@ -313,11 +310,12 @@ impl Reader for PgCoordinatedReader {
                                 }
                             }
                         }
+
+                        next_rebalance =
+                            tokio::time::Instant::now() + jittered_duration(rebalance_interval);
                     }
 
-                    _ = renew_ticker.tick() => {
-                        tokio::time::sleep(jittered_duration(tick_duration) - tick_duration).await;
-
+                    _ = tokio::time::sleep_until(next_renew) => {
                         let partition_ids: Vec<u16> = owned.keys().copied().collect();
                         let mut lost: Vec<u16> = Vec::new();
                         for partition_id in partition_ids {
@@ -349,16 +347,19 @@ impl Reader for PgCoordinatedReader {
                         let _ = coordinator
                             .heartbeat(&group, &stream_id_val, &owner_id, consumer_lease_duration)
                             .await;
+
+                        next_renew =
+                            tokio::time::Instant::now() + jittered_duration(tick_duration);
                     }
 
                     _ = shutdown_notify.notified() => {
-                        for (_, (lease, handle)) in owned.drain() {
+                        for (partition_id, (lease, handle)) in owned.drain() {
                             handle.abort();
                             let _ = coordinator
                                 .release(
                                     &group,
                                     &stream_id_val,
-                                    lease.partition_id,
+                                    partition_id,
                                     &owner_id,
                                     lease.generation,
                                 )

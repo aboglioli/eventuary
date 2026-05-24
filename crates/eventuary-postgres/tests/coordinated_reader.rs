@@ -392,7 +392,7 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         );
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(2000)).await;
 
     let rows = sqlx::query(
         "SELECT partition_id, owner_id FROM event_stream_partitions \
