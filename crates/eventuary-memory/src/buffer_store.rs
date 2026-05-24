@@ -11,29 +11,37 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use eventuary_core::io::reader::{BufferEntry, BufferStore};
-use eventuary_core::{Event, Result};
+use eventuary_core::{Event, Payload, Result};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct MemoryBufferStoreId(u64);
 
-struct MemoryEntry<C> {
-    event: Event,
+struct MemoryEntry<C, P> {
+    event: Event<P>,
     cursor: C,
 }
 
-struct MemoryState<C> {
-    entries: HashMap<MemoryBufferStoreId, MemoryEntry<C>>,
+struct MemoryState<C, P> {
+    entries: HashMap<MemoryBufferStoreId, MemoryEntry<C, P>>,
     next_id: MemoryBufferStoreId,
 }
 
-#[derive(Clone)]
-pub struct MemoryBufferStore<C> {
-    state: Arc<Mutex<MemoryState<C>>>,
+pub struct MemoryBufferStore<C, P = Payload> {
+    state: Arc<Mutex<MemoryState<C, P>>>,
 }
 
-impl<C> MemoryBufferStore<C>
+impl<C, P> Clone for MemoryBufferStore<C, P> {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl<C, P> MemoryBufferStore<C, P>
 where
     C: Clone + Send + Sync + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -49,22 +57,24 @@ where
     }
 }
 
-impl<C> Default for MemoryBufferStore<C>
+impl<C, P> Default for MemoryBufferStore<C, P>
 where
     C: Clone + Send + Sync + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C> BufferStore<C> for MemoryBufferStore<C>
+impl<C, P> BufferStore<C, P> for MemoryBufferStore<C, P>
 where
     C: Clone + Send + Sync + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     type Id = MemoryBufferStoreId;
 
-    async fn push(&self, event: &Event, cursor: &C) -> Result<Self::Id> {
+    async fn push(&self, event: &Event<P>, cursor: &C) -> Result<Self::Id> {
         let mut state = self.state.lock().unwrap();
         let id = state.next_id;
         state.next_id = MemoryBufferStoreId(
@@ -81,9 +91,9 @@ where
         Ok(id)
     }
 
-    async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id>>> {
+    async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id, P>>> {
         let state = self.state.lock().unwrap();
-        let mut entries: Vec<BufferEntry<C, Self::Id>> = state
+        let mut entries: Vec<BufferEntry<C, Self::Id, P>> = state
             .entries
             .iter()
             .map(|(id, e)| BufferEntry {
@@ -170,5 +180,32 @@ mod tests {
         assert_eq!(store.pending_count(), 1);
         store.ack(&id).await.unwrap();
         assert_eq!(store.pending_count(), 0);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct OrderPlaced {
+        order_id: String,
+    }
+
+    #[tokio::test]
+    async fn memory_buffer_store_carries_typed_payload_round_trip() {
+        let store: MemoryBufferStore<(), OrderPlaced> = MemoryBufferStore::new();
+        let event = Event::create(
+            "acme",
+            "/orders",
+            "order.placed",
+            OrderPlaced {
+                order_id: "o-1".into(),
+            },
+        )
+        .unwrap();
+
+        let id = store.push(&event, &()).await.unwrap();
+        let entries = store.pending().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event.payload().order_id, "o-1");
+
+        store.ack(&id).await.unwrap();
+        assert!(store.pending().await.unwrap().is_empty());
     }
 }
