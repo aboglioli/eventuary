@@ -217,6 +217,7 @@ pub mod buffer;
 pub mod checkpoint;
 pub mod claim_buffer;
 pub mod concurrency_limit;
+pub mod coordinated;
 pub mod dedupe;
 pub mod encoded_cursor;
 pub mod filtered;
@@ -242,6 +243,10 @@ pub use checkpoint::{
 };
 pub use claim_buffer::{ClaimedBufferEntry, ClaimedBufferStore};
 pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
+pub use coordinated::{
+    CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
+    CoordinatedStream, CoordinatedSubscription,
+};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
 pub use encoded_cursor::{EncodedCursorReader, EncodedCursorSubscription};
 pub use filtered::{FilteredReader, FilteredStream};
