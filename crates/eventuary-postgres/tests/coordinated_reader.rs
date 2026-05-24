@@ -10,6 +10,7 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
+use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, Payload, StartFrom};
@@ -55,6 +56,18 @@ fn event_with_key(key: &str) -> Event {
     .unwrap()
 }
 
+fn make_sub(scope: CheckpointScope, partition_count: NonZeroU16) -> PgCoordinatedSubscription {
+    PgCoordinatedSubscription {
+        scope,
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: PgSubscription {
+            start: StartFrom::Earliest,
+            ..PgSubscription::default()
+        },
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
     let (_c, pool) = start_postgres().await;
@@ -90,8 +103,10 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         partition_slack: 0,
     };
 
-    let group = ConsumerGroupId::new("test-group").unwrap();
-    let stream_id = StreamId::new("orders").unwrap();
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("test-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
 
     let reader_a = PgCoordinatedReader::new(
         PgReader::new(pool.clone(), PgReaderConfig::default()),
@@ -107,29 +122,10 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         reader_config,
     );
 
-    let sub_a = PgCoordinatedSubscription {
-        consumer_group_id: group.clone(),
-        stream_id: stream_id.clone(),
-        partition_count,
-        start: StartFrom::Earliest,
-        inner: PgSubscription {
-            start: StartFrom::Earliest,
-            ..PgSubscription::default()
-        },
-    };
-
-    let sub_b = PgCoordinatedSubscription {
-        consumer_group_id: group.clone(),
-        stream_id: stream_id.clone(),
-        partition_count,
-        start: StartFrom::Earliest,
-        inner: PgSubscription {
-            start: StartFrom::Earliest,
-            ..PgSubscription::default()
-        },
-    };
-
-    let (stream_a, stream_b) = tokio::join!(reader_a.read(sub_a), reader_b.read(sub_b));
+    let (stream_a, stream_b) = tokio::join!(
+        reader_a.read(make_sub(scope.clone(), partition_count)),
+        reader_b.read(make_sub(scope.clone(), partition_count)),
+    );
 
     let stream_a = stream_a.unwrap();
     let stream_b = stream_b.unwrap();
@@ -205,19 +201,10 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         partition_slack: 0,
     };
 
-    let group = ConsumerGroupId::new("rebalance-group").unwrap();
-    let stream_id = StreamId::new("orders").unwrap();
-
-    let make_sub = |g: ConsumerGroupId, s: StreamId| PgCoordinatedSubscription {
-        consumer_group_id: g,
-        stream_id: s,
-        partition_count,
-        start: StartFrom::Earliest,
-        inner: PgSubscription {
-            start: StartFrom::Earliest,
-            ..PgSubscription::default()
-        },
-    };
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("rebalance-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
 
     let reader_a = PgCoordinatedReader::new(
         PgReader::new(pool.clone(), PgReaderConfig::default()),
@@ -226,7 +213,7 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         reader_config,
     );
     let stream_a = reader_a
-        .read(make_sub(group.clone(), stream_id.clone()))
+        .read(make_sub(scope.clone(), partition_count))
         .await
         .unwrap();
 
@@ -239,13 +226,13 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         reader_config,
     );
     let stream_b = reader_b
-        .read(make_sub(group.clone(), stream_id.clone()))
+        .read(make_sub(scope.clone(), partition_count))
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    let owned_after_b = query_owned_partitions(&pool, &group, &stream_id).await;
+    let owned_after_b = query_owned_partitions(&pool, &scope).await;
     let owners_after_b: HashSet<String> = owned_after_b.values().cloned().collect();
     assert!(
         owners_after_b.contains("owner-a") || owners_after_b.contains("owner-b"),
@@ -268,13 +255,13 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         reader_config,
     );
     let stream_c = reader_c
-        .read(make_sub(group.clone(), stream_id.clone()))
+        .read(make_sub(scope.clone(), partition_count))
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    let owned_after_c = query_owned_partitions(&pool, &group, &stream_id).await;
+    let owned_after_c = query_owned_partitions(&pool, &scope).await;
 
     assert_eq!(
         owned_after_c.len(),
@@ -341,8 +328,10 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         PgPartitionCoordinatorConfig::default(),
     ));
 
-    let group = ConsumerGroupId::new("drop-release-group").unwrap();
-    let stream_id = StreamId::new("orders").unwrap();
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("drop-release-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
 
     let reader_config = PgCoordinatedReaderConfig {
         partition_lease_duration: Duration::from_secs(30),
@@ -360,19 +349,11 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         reader_config,
     );
 
-    let sub_a = PgCoordinatedSubscription {
-        consumer_group_id: group.clone(),
-        stream_id: stream_id.clone(),
-        partition_count,
-        start: StartFrom::Earliest,
-        inner: PgSubscription {
-            start: StartFrom::Earliest,
-            ..PgSubscription::default()
-        },
-    };
-
     {
-        let mut stream_a = reader_a.read(sub_a).await.unwrap();
+        let mut stream_a = reader_a
+            .read(make_sub(scope.clone(), partition_count))
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(600)).await;
 
@@ -385,7 +366,7 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
             }
         }
 
-        let owned_before = query_owned_partitions(&pool, &group, &stream_id).await;
+        let owned_before = query_owned_partitions(&pool, &scope).await;
         assert!(
             !owned_before.is_empty(),
             "owner-a should hold at least one partition before drop; got {owned_before:?}"
@@ -398,8 +379,8 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         "SELECT partition_id, owner_id FROM event_stream_partitions \
          WHERE consumer_group_id = $1 AND stream_id = $2",
     )
-    .bind(group.as_str())
-    .bind(stream_id.as_str())
+    .bind(scope.consumer_group_id.as_str())
+    .bind(scope.stream_id.as_str())
     .fetch_all(&pool)
     .await
     .unwrap();
@@ -421,22 +402,14 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         reader_config,
     );
 
-    let sub_b = PgCoordinatedSubscription {
-        consumer_group_id: group.clone(),
-        stream_id: stream_id.clone(),
-        partition_count,
-        start: StartFrom::Earliest,
-        inner: PgSubscription {
-            start: StartFrom::Earliest,
-            ..PgSubscription::default()
-        },
-    };
-
-    let _stream_b = reader_b.read(sub_b).await.unwrap();
+    let _stream_b = reader_b
+        .read(make_sub(scope.clone(), partition_count))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    let owned_b = query_owned_partitions(&pool, &group, &stream_id).await;
+    let owned_b = query_owned_partitions(&pool, &scope).await;
     assert!(
         !owned_b.is_empty(),
         "owner-b should be able to claim released partitions; got none"
@@ -449,18 +422,14 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
     }
 }
 
-async fn query_owned_partitions(
-    pool: &PgPool,
-    group: &ConsumerGroupId,
-    stream_id: &StreamId,
-) -> HashMap<i32, String> {
+async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashMap<i32, String> {
     let rows = sqlx::query(
         "SELECT partition_id, owner_id FROM event_stream_partitions \
          WHERE consumer_group_id = $1 AND stream_id = $2 AND owner_id IS NOT NULL \
            AND lease_until > NOW()",
     )
-    .bind(group.as_str())
-    .bind(stream_id.as_str())
+    .bind(scope.consumer_group_id.as_str())
+    .bind(scope.stream_id.as_str())
     .fetch_all(pool)
     .await
     .unwrap();

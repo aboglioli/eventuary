@@ -8,12 +8,13 @@ use std::time::Duration;
 use futures::Stream;
 use tokio::sync::{Notify, mpsc};
 
+use eventuary_core::Partition;
+use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{
-    ConsumerGroupId, Message, OwnerId, PartitionCoordinator, PartitionLease, Reader, StartFrom,
-    StreamId,
+    Message, OwnerId, PartitionCoordinator, PartitionLease, Reader, StartFrom,
 };
 use eventuary_core::partition::PartitionSelection;
-use eventuary_core::{Error, Partition, Result};
+use eventuary_core::{Error, Result};
 
 use crate::coordinated_acker::PgCoordinatedAcker;
 use crate::partition_coordinator::PgPartitionCoordinator;
@@ -45,8 +46,7 @@ impl Default for PgCoordinatedReaderConfig {
 
 #[derive(Clone)]
 pub struct PgCoordinatedSubscription {
-    pub consumer_group_id: ConsumerGroupId,
-    pub stream_id: StreamId,
+    pub scope: CheckpointScope,
     pub partition_count: NonZeroU16,
     pub start: StartFrom<PgCursor>,
     pub inner: PgSubscription,
@@ -112,32 +112,30 @@ fn target_partition_count(total: NonZeroU16, live: usize, slack: u16) -> u16 {
     base.saturating_add(slack).min(total)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn partition_worker(
     inner_reader: PgReader,
     coordinator: Arc<PgPartitionCoordinator>,
-    group: ConsumerGroupId,
-    stream: StreamId,
-    owner_id: OwnerId,
     partition_count: NonZeroU16,
-    lease: PartitionLease,
+    lease: PartitionLease<PgCursor>,
     inner_subscription_template: PgSubscription,
     start: StartFrom<PgCursor>,
     tx: mpsc::Sender<Result<Message<PgCoordinatedAcker, PgPartitionCursor>>>,
 ) {
     use futures::StreamExt;
 
-    let inner_start = if lease.checkpoint_sequence == 0 {
+    let checkpoint_seq = lease
+        .checkpoint_cursor
+        .as_ref()
+        .map(|c| c.sequence)
+        .unwrap_or(0);
+    let inner_start = if checkpoint_seq == 0 {
         start
     } else {
-        StartFrom::After(PgCursor::new(lease.checkpoint_sequence))
+        StartFrom::After(PgCursor::new(checkpoint_seq))
     };
     let inner_sub = PgSubscription {
         start: inner_start,
-        partitions: PartitionSelection::One(
-            Partition::new(lease.partition_id, partition_count)
-                .expect("claim invariant: id < count"),
-        ),
+        partitions: PartitionSelection::One(lease.partition),
         ..inner_subscription_template
     };
 
@@ -156,16 +154,12 @@ async fn partition_worker(
                 let coordinated_acker = PgCoordinatedAcker::new(
                     inner_acker,
                     Arc::clone(&coordinator),
-                    group.clone(),
-                    stream.clone(),
-                    lease.partition_id,
-                    owner_id.clone(),
-                    lease.generation,
+                    lease.clone(),
                     inner_cursor.sequence,
                 );
                 let coordinated_cursor = PgPartitionCursor::new(
                     partition_count,
-                    lease.partition_id,
+                    lease.partition.id(),
                     inner_cursor.sequence,
                 );
                 let out = Message::new(event, coordinated_acker, coordinated_cursor);
@@ -190,8 +184,7 @@ impl Reader for PgCoordinatedReader {
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         self.coordinator
             .heartbeat(
-                &subscription.consumer_group_id,
-                &subscription.stream_id,
+                &subscription.scope,
                 &self.owner_id,
                 self.config.consumer_lease_duration,
             )
@@ -204,8 +197,7 @@ impl Reader for PgCoordinatedReader {
         let coordinator = Arc::clone(&self.coordinator);
         let owner_id = self.owner_id.clone();
         let partition_count = subscription.partition_count;
-        let group = subscription.consumer_group_id.clone();
-        let stream_id_val = subscription.stream_id.clone();
+        let scope = subscription.scope.clone();
         let base_sub = subscription.inner.clone();
         let start = subscription.start.clone();
         let partition_lease_duration = self.config.partition_lease_duration;
@@ -217,7 +209,7 @@ impl Reader for PgCoordinatedReader {
         let shutdown_notify = Arc::clone(&shutdown);
 
         tokio::spawn(async move {
-            let mut owned: HashMap<u16, (PartitionLease, tokio::task::JoinHandle<()>)> =
+            let mut owned: HashMap<u16, (PartitionLease<PgCursor>, tokio::task::JoinHandle<()>)> =
                 HashMap::new();
 
             let tick_duration = renew_interval.min(heartbeat_interval);
@@ -237,19 +229,11 @@ impl Reader for PgCoordinatedReader {
                         for partition_id in dead_partitions {
                             if let Some((lease, handle)) = owned.remove(&partition_id) {
                                 handle.abort();
-                                let _ = coordinator
-                                    .release(
-                                        &group,
-                                        &stream_id_val,
-                                        partition_id,
-                                        &owner_id,
-                                        lease.generation,
-                                    )
-                                    .await;
+                                let _ = coordinator.release(&lease).await;
                             }
                         }
 
-                        let live = match coordinator.live_consumers(&group, &stream_id_val).await {
+                        let live = match coordinator.live_consumers(&scope).await {
                             Ok(n) => n,
                             Err(_) => owned.len().max(1),
                         };
@@ -263,23 +247,18 @@ impl Reader for PgCoordinatedReader {
                                 if owned.contains_key(&partition_id) {
                                     continue;
                                 }
+                                let partition = match Partition::new(partition_id, partition_count) {
+                                    Ok(p) => p,
+                                    Err(_) => continue,
+                                };
                                 match coordinator
-                                    .claim(
-                                        &group,
-                                        &stream_id_val,
-                                        partition_id,
-                                        &owner_id,
-                                        partition_lease_duration,
-                                    )
+                                    .claim(&scope, &owner_id, partition, partition_lease_duration)
                                     .await
                                 {
                                     Ok(Some(lease)) => {
                                         let worker_handle = tokio::spawn(partition_worker(
                                             inner_reader.clone(),
                                             Arc::clone(&coordinator),
-                                            group.clone(),
-                                            stream_id_val.clone(),
-                                            owner_id.clone(),
                                             partition_count,
                                             lease.clone(),
                                             base_sub.clone(),
@@ -299,15 +278,7 @@ impl Reader for PgCoordinatedReader {
                             for partition_id in to_release.into_iter().take(surplus) {
                                 if let Some((lease, handle)) = owned.remove(&partition_id) {
                                     handle.abort();
-                                    let _ = coordinator
-                                        .release(
-                                            &group,
-                                            &stream_id_val,
-                                            partition_id,
-                                            &owner_id,
-                                            lease.generation,
-                                        )
-                                        .await;
+                                    let _ = coordinator.release(&lease).await;
                                 }
                             }
                         }
@@ -321,17 +292,7 @@ impl Reader for PgCoordinatedReader {
                         let mut lost: Vec<u16> = Vec::new();
                         for partition_id in partition_ids {
                             if let Some((lease, _)) = owned.get(&partition_id) {
-                                match coordinator
-                                    .renew(
-                                        &group,
-                                        &stream_id_val,
-                                        partition_id,
-                                        &owner_id,
-                                        lease.generation,
-                                        partition_lease_duration,
-                                    )
-                                    .await
-                                {
+                                match coordinator.renew(lease, partition_lease_duration).await {
                                     Ok(()) => {}
                                     Err(Error::OwnershipLost(_)) => {
                                         lost.push(partition_id);
@@ -346,7 +307,7 @@ impl Reader for PgCoordinatedReader {
                             }
                         }
                         let _ = coordinator
-                            .heartbeat(&group, &stream_id_val, &owner_id, consumer_lease_duration)
+                            .heartbeat(&scope, &owner_id, consumer_lease_duration)
                             .await;
 
                         next_renew =
@@ -354,17 +315,9 @@ impl Reader for PgCoordinatedReader {
                     }
 
                     _ = shutdown_notify.notified() => {
-                        for (partition_id, (lease, handle)) in owned.drain() {
+                        for (_, (lease, handle)) in owned.drain() {
                             handle.abort();
-                            let _ = coordinator
-                                .release(
-                                    &group,
-                                    &stream_id_val,
-                                    partition_id,
-                                    &owner_id,
-                                    lease.generation,
-                                )
-                                .await;
+                            let _ = coordinator.release(&lease).await;
                         }
                         return;
                     }
@@ -373,15 +326,7 @@ impl Reader for PgCoordinatedReader {
                 if tx.is_closed() {
                     for (_, (lease, handle)) in owned.drain() {
                         handle.abort();
-                        let _ = coordinator
-                            .release(
-                                &group,
-                                &stream_id_val,
-                                lease.partition_id,
-                                &owner_id,
-                                lease.generation,
-                            )
-                            .await;
+                        let _ = coordinator.release(&lease).await;
                     }
                     return;
                 }

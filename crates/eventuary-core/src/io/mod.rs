@@ -30,7 +30,7 @@ pub use handler::{
 };
 pub use message::Message;
 pub use owner_id::OwnerId;
-pub use partition_coordinator::{PartitionCoordinator, PartitionLease};
+pub use partition_coordinator::{Generation, PartitionCoordinator, PartitionLease};
 pub use position::{StartFrom, StartableSubscription, StopAt};
 pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
 pub use stream_id::StreamId;

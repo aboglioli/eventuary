@@ -1,3 +1,4 @@
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use sqlx::{PgPool, Row};
@@ -5,6 +6,8 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
+use eventuary_core::Partition;
+use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{Acker, ConsumerGroupId, OwnerId, PartitionCoordinator, StreamId};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::PgCursorAcker;
@@ -35,37 +38,36 @@ fn coordinator(pool: PgPool) -> PgPartitionCoordinator {
     PgPartitionCoordinator::new(pool, PgPartitionCoordinatorConfig::default())
 }
 
+fn scope() -> CheckpointScope {
+    CheckpointScope::new(
+        ConsumerGroupId::new("group-1").unwrap(),
+        StreamId::new("orders").unwrap(),
+    )
+}
+
+fn partition(id: u16) -> Partition {
+    Partition::new(id, NonZeroU16::new(64).unwrap()).unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acker_ack_advances_checkpoint() {
     let (_c, pool) = start_postgres().await;
     let coord = coordinator(pool.clone());
     let coord_arc = Arc::new(coord);
 
-    let group = ConsumerGroupId::new("group-1").unwrap();
-    let stream = StreamId::new("orders").unwrap();
+    let s = scope();
     let owner_a = OwnerId::new("worker-a").unwrap();
     let lease_dur = std::time::Duration::from_secs(60);
 
-    coord_arc
-        .heartbeat(&group, &stream, &owner_a, lease_dur)
-        .await
-        .unwrap();
+    coord_arc.heartbeat(&s, &owner_a, lease_dur).await.unwrap();
     let lease = coord_arc
-        .claim(&group, &stream, 7, &owner_a, lease_dur)
+        .claim(&s, &owner_a, partition(7), lease_dur)
         .await
         .unwrap()
         .expect("claim succeeded");
 
-    let acker = PgCoordinatedAcker::new(
-        PgCursorAcker::dummy(50),
-        Arc::clone(&coord_arc),
-        group.clone(),
-        stream.clone(),
-        7,
-        owner_a.clone(),
-        lease.generation,
-        50,
-    );
+    let acker =
+        PgCoordinatedAcker::new(PgCursorAcker::dummy(50), Arc::clone(&coord_arc), lease, 50);
 
     acker.ack().await.unwrap();
 
@@ -73,8 +75,8 @@ async fn acker_ack_advances_checkpoint() {
         "SELECT checkpoint_sequence FROM event_stream_partitions \
          WHERE consumer_group_id = $1 AND stream_id = $2 AND partition_id = $3",
     )
-    .bind(group.as_str())
-    .bind(stream.as_str())
+    .bind(s.consumer_group_id.as_str())
+    .bind(s.stream_id.as_str())
     .bind(7_i32)
     .fetch_one(&pool)
     .await
@@ -90,32 +92,25 @@ async fn acker_ack_fails_after_partition_taken_over() {
     let coord = coordinator(pool.clone());
     let coord_arc = Arc::new(coord);
 
-    let group = ConsumerGroupId::new("group-1").unwrap();
-    let stream = StreamId::new("orders").unwrap();
+    let s = scope();
     let owner_a = OwnerId::new("worker-a").unwrap();
     let owner_b = OwnerId::new("worker-b").unwrap();
     let short_lease = std::time::Duration::from_millis(50);
     let long_lease = std::time::Duration::from_secs(60);
 
-    coord_arc
-        .heartbeat(&group, &stream, &owner_a, long_lease)
-        .await
-        .unwrap();
+    coord_arc.heartbeat(&s, &owner_a, long_lease).await.unwrap();
     let lease_a = coord_arc
-        .claim(&group, &stream, 7, &owner_a, short_lease)
+        .claim(&s, &owner_a, partition(7), short_lease)
         .await
         .unwrap()
         .expect("owner a claims");
-    assert_eq!(lease_a.generation, 1);
+    assert_eq!(lease_a.generation.get(), 1);
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+    coord_arc.heartbeat(&s, &owner_b, long_lease).await.unwrap();
     coord_arc
-        .heartbeat(&group, &stream, &owner_b, long_lease)
-        .await
-        .unwrap();
-    coord_arc
-        .claim(&group, &stream, 7, &owner_b, long_lease)
+        .claim(&s, &owner_b, partition(7), long_lease)
         .await
         .unwrap()
         .expect("owner b takes over");
@@ -123,11 +118,7 @@ async fn acker_ack_fails_after_partition_taken_over() {
     let stale_acker = PgCoordinatedAcker::new(
         PgCursorAcker::dummy(50),
         Arc::clone(&coord_arc),
-        group.clone(),
-        stream.clone(),
-        7,
-        owner_a.clone(),
-        lease_a.generation,
+        lease_a,
         50,
     );
 
@@ -141,17 +132,13 @@ async fn acker_nack_does_not_touch_checkpoint() {
     let coord = coordinator(pool.clone());
     let coord_arc = Arc::new(coord);
 
-    let group = ConsumerGroupId::new("group-1").unwrap();
-    let stream = StreamId::new("orders").unwrap();
+    let s = scope();
     let owner_a = OwnerId::new("worker-a").unwrap();
     let lease_dur = std::time::Duration::from_secs(60);
 
-    coord_arc
-        .heartbeat(&group, &stream, &owner_a, lease_dur)
-        .await
-        .unwrap();
+    coord_arc.heartbeat(&s, &owner_a, lease_dur).await.unwrap();
     let lease = coord_arc
-        .claim(&group, &stream, 7, &owner_a, lease_dur)
+        .claim(&s, &owner_a, partition(7), lease_dur)
         .await
         .unwrap()
         .expect("claim succeeded");
@@ -159,11 +146,7 @@ async fn acker_nack_does_not_touch_checkpoint() {
     let acker = PgCoordinatedAcker::new(
         PgCursorAcker::dummy(100),
         Arc::clone(&coord_arc),
-        group.clone(),
-        stream.clone(),
-        7,
-        owner_a.clone(),
-        lease.generation,
+        lease,
         100,
     );
 
@@ -173,8 +156,8 @@ async fn acker_nack_does_not_touch_checkpoint() {
         "SELECT checkpoint_sequence FROM event_stream_partitions \
          WHERE consumer_group_id = $1 AND stream_id = $2 AND partition_id = $3",
     )
-    .bind(group.as_str())
-    .bind(stream.as_str())
+    .bind(s.consumer_group_id.as_str())
+    .bind(s.stream_id.as_str())
     .bind(7_i32)
     .fetch_one(&pool)
     .await

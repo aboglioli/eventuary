@@ -3,11 +3,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use eventuary_core::io::{
-    ConsumerGroupId, OwnerId, PartitionCoordinator, PartitionLease, StreamId,
-};
+use eventuary_core::Partition;
+use eventuary_core::io::reader::CheckpointScope;
+use eventuary_core::io::{Generation, OwnerId, PartitionCoordinator, PartitionLease};
 use eventuary_core::{Error, Result};
 
+use crate::reader::PgCursor;
 use crate::relation::PgRelationName;
 
 #[derive(Debug, Clone)]
@@ -72,11 +73,10 @@ fn parse_lease_until(s: &str) -> Result<DateTime<Utc>> {
         .map_err(|e| Error::Serialization(format!("lease_until decode: {e}")))
 }
 
-impl PartitionCoordinator for PgPartitionCoordinator {
+impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
     async fn heartbeat<'a>(
         &'a self,
-        consumer_group_id: &'a ConsumerGroupId,
-        stream_id: &'a StreamId,
+        scope: &'a CheckpointScope,
         owner_id: &'a OwnerId,
         lease_duration: std::time::Duration,
     ) -> Result<()> {
@@ -89,8 +89,8 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             consumers = self.consumers_relation
         );
         sqlx::query(&sql)
-            .bind(consumer_group_id.as_str())
-            .bind(stream_id.as_str())
+            .bind(scope.consumer_group_id.as_str())
+            .bind(scope.stream_id.as_str())
             .bind(owner_id.as_str())
             .bind(lease_until)
             .execute(&self.pool)
@@ -99,11 +99,7 @@ impl PartitionCoordinator for PgPartitionCoordinator {
         Ok(())
     }
 
-    async fn live_consumers<'a>(
-        &'a self,
-        consumer_group_id: &'a ConsumerGroupId,
-        stream_id: &'a StreamId,
-    ) -> Result<usize> {
+    async fn live_consumers<'a>(&'a self, scope: &'a CheckpointScope) -> Result<usize> {
         let sql = format!(
             "SELECT COUNT(*) FROM {consumers} \
              WHERE consumer_group_id = $1 \
@@ -112,8 +108,8 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             consumers = self.consumers_relation
         );
         let row = sqlx::query(&sql)
-            .bind(consumer_group_id.as_str())
-            .bind(stream_id.as_str())
+            .bind(scope.consumer_group_id.as_str())
+            .bind(scope.stream_id.as_str())
             .fetch_one(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -123,14 +119,13 @@ impl PartitionCoordinator for PgPartitionCoordinator {
 
     async fn claim<'a>(
         &'a self,
-        consumer_group_id: &'a ConsumerGroupId,
-        stream_id: &'a StreamId,
-        partition_id: u16,
+        scope: &'a CheckpointScope,
         owner_id: &'a OwnerId,
+        partition: Partition,
         lease_duration: std::time::Duration,
-    ) -> Result<Option<PartitionLease>> {
+    ) -> Result<Option<PartitionLease<PgCursor>>> {
         let lease_until = lease_until_to_sql(compute_lease_until(lease_duration)?);
-        let partition_id_i32 = partition_id as i32;
+        let partition_id_i32 = partition.id() as i32;
         let sql = format!(
             "INSERT INTO {partitions} \
                 (consumer_group_id, stream_id, partition_id, owner_id, lease_until, generation, checkpoint_sequence) \
@@ -150,8 +145,8 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             partitions = self.partitions_relation
         );
         let row = sqlx::query(&sql)
-            .bind(consumer_group_id.as_str())
-            .bind(stream_id.as_str())
+            .bind(scope.consumer_group_id.as_str())
+            .bind(scope.stream_id.as_str())
             .bind(partition_id_i32)
             .bind(owner_id.as_str())
             .bind(lease_until)
@@ -166,12 +161,11 @@ impl PartitionCoordinator for PgPartitionCoordinator {
                 let generation: i64 = r.get("generation");
                 let checkpoint_sequence: i64 = r.get("checkpoint_sequence");
                 Ok(Some(PartitionLease {
-                    consumer_group_id: consumer_group_id.clone(),
-                    stream_id: stream_id.clone(),
-                    partition_id,
+                    scope: scope.clone(),
                     owner_id: owner_id.clone(),
-                    generation,
-                    checkpoint_sequence,
+                    partition,
+                    generation: Generation::from_i64(generation),
+                    checkpoint_cursor: Some(PgCursor::new(checkpoint_sequence)),
                     lease_until: returned_lease_until,
                 }))
             }
@@ -180,15 +174,12 @@ impl PartitionCoordinator for PgPartitionCoordinator {
 
     async fn renew<'a>(
         &'a self,
-        consumer_group_id: &'a ConsumerGroupId,
-        stream_id: &'a StreamId,
-        partition_id: u16,
-        owner_id: &'a OwnerId,
-        generation: i64,
+        lease: &'a PartitionLease<PgCursor>,
         lease_duration: std::time::Duration,
     ) -> Result<()> {
         let lease_until = lease_until_to_sql(compute_lease_until(lease_duration)?);
-        let partition_id_i32 = partition_id as i32;
+        let partition_id_i32 = lease.partition.id() as i32;
+        let generation = lease.generation.get();
         let sql = format!(
             "UPDATE {partitions} \
              SET lease_until = $5::timestamptz \
@@ -200,10 +191,10 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             partitions = self.partitions_relation
         );
         let result = sqlx::query(&sql)
-            .bind(consumer_group_id.as_str())
-            .bind(stream_id.as_str())
+            .bind(lease.scope.consumer_group_id.as_str())
+            .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i32)
-            .bind(owner_id.as_str())
+            .bind(lease.owner_id.as_str())
             .bind(lease_until)
             .bind(generation)
             .execute(&self.pool)
@@ -211,21 +202,17 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             .map_err(|e| Error::Store(e.to_string()))?;
         if result.rows_affected() == 0 {
             return Err(Error::OwnershipLost(format!(
-                "partition {partition_id} generation {generation}"
+                "partition {} generation {}",
+                lease.partition.id(),
+                lease.generation,
             )));
         }
         Ok(())
     }
 
-    async fn release<'a>(
-        &'a self,
-        consumer_group_id: &'a ConsumerGroupId,
-        stream_id: &'a StreamId,
-        partition_id: u16,
-        owner_id: &'a OwnerId,
-        generation: i64,
-    ) -> Result<()> {
-        let partition_id_i32 = partition_id as i32;
+    async fn release<'a>(&'a self, lease: &'a PartitionLease<PgCursor>) -> Result<()> {
+        let partition_id_i32 = lease.partition.id() as i32;
+        let generation = lease.generation.get();
         let sql = format!(
             "UPDATE {partitions} \
              SET owner_id = NULL, \
@@ -239,17 +226,19 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             partitions = self.partitions_relation
         );
         let result = sqlx::query(&sql)
-            .bind(consumer_group_id.as_str())
-            .bind(stream_id.as_str())
+            .bind(lease.scope.consumer_group_id.as_str())
+            .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i32)
-            .bind(owner_id.as_str())
+            .bind(lease.owner_id.as_str())
             .bind(generation)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
         if result.rows_affected() == 0 {
             return Err(Error::OwnershipLost(format!(
-                "partition {partition_id} generation {generation}"
+                "partition {} generation {}",
+                lease.partition.id(),
+                lease.generation,
             )));
         }
         Ok(())
@@ -257,14 +246,12 @@ impl PartitionCoordinator for PgPartitionCoordinator {
 
     async fn checkpoint<'a>(
         &'a self,
-        consumer_group_id: &'a ConsumerGroupId,
-        stream_id: &'a StreamId,
-        partition_id: u16,
-        owner_id: &'a OwnerId,
-        generation: i64,
-        sequence: i64,
+        lease: &'a PartitionLease<PgCursor>,
+        cursor: PgCursor,
     ) -> Result<()> {
-        let partition_id_i32 = partition_id as i32;
+        let partition_id_i32 = lease.partition.id() as i32;
+        let generation = lease.generation.get();
+        let sequence = cursor.sequence;
         let sql = format!(
             "UPDATE {partitions} \
              SET checkpoint_sequence = $6 \
@@ -277,10 +264,10 @@ impl PartitionCoordinator for PgPartitionCoordinator {
             partitions = self.partitions_relation
         );
         let result = sqlx::query(&sql)
-            .bind(consumer_group_id.as_str())
-            .bind(stream_id.as_str())
+            .bind(lease.scope.consumer_group_id.as_str())
+            .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i32)
-            .bind(owner_id.as_str())
+            .bind(lease.owner_id.as_str())
             .bind(generation)
             .bind(sequence)
             .execute(&self.pool)
@@ -293,8 +280,8 @@ impl PartitionCoordinator for PgPartitionCoordinator {
                 partitions = self.partitions_relation
             );
             let check_row = sqlx::query(&check_sql)
-                .bind(consumer_group_id.as_str())
-                .bind(stream_id.as_str())
+                .bind(lease.scope.consumer_group_id.as_str())
+                .bind(lease.scope.stream_id.as_str())
                 .bind(partition_id_i32)
                 .fetch_optional(&self.pool)
                 .await
@@ -304,16 +291,19 @@ impl PartitionCoordinator for PgPartitionCoordinator {
                     let current_generation: i64 = r.get("generation");
                     let current_owner: Option<String> = r.get("owner_id");
                     if current_generation == generation
-                        && current_owner.as_deref() == Some(owner_id.as_str())
+                        && current_owner.as_deref() == Some(lease.owner_id.as_str())
                     {
                         return Ok(());
                     }
                     Err(Error::OwnershipLost(format!(
-                        "checkpoint rejected for partition {partition_id}: stale owner/generation"
+                        "checkpoint rejected for partition {}: stale owner/generation",
+                        lease.partition.id(),
                     )))
                 }
                 None => Err(Error::OwnershipLost(format!(
-                    "partition {partition_id} generation {generation}"
+                    "partition {} generation {}",
+                    lease.partition.id(),
+                    lease.generation,
                 ))),
             }
         } else {
