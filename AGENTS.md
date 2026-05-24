@@ -54,8 +54,8 @@ crates/
 │
 ├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
 │   └── src/
-│       ├── event.rs        # Event aggregate, EventId, Event::partition(count)
-│       ├── event_key.rs    # EventKey + Partition + fnv1a_u64 + EventKey::partition_for
+│       ├── event.rs        # Event<P = Payload> aggregate, EventId
+│       ├── event_key.rs    # EventKey + Partition + fnv1a_u64 (crate-internal)
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
@@ -318,12 +318,17 @@ audit, and side-channel flows are not hardcoded into handlers.
   `Serialize + DeserializeOwned + SnapshotEventId`. Use to persist
   aggregate state alongside the event log and resume rebuild from the
   snapshot's `EventId`.
-- `EventKey::partition_for(count: NonZeroU16) -> Partition` and
-  `Event::partition(count: NonZeroU16) -> Partition` (FNV-1a u64) for
-  deterministic partition routing (used by Kafka writer for record key →
-  partition selection, and by `PartitionedReader`). `Partition`,
-  `fnv1a_u64`, and `Event::partition` all live in `event_key.rs` / `event.rs`;
-  there is no separate `partition.rs` module.
+- Deterministic partition routing goes through the resolver/hasher
+  pipeline: `PartitionKeyResolver<P>::partition_key(&Event<P>) -> PartitionKey`
+  then `PartitionHasher::partition_for(&PartitionKey, count) -> Partition`
+  (FNV-1a u64 by default via `Fnv1a64PartitionHasher`). Built-in
+  resolvers (`EventKeyPartitionKeyResolver`, `Organization`, `Topic`,
+  `Namespace`, `Metadata`, `Composite<P>`) impl `PartitionKeyResolver<P>`
+  for any `P`. `Partition` and `fnv1a_u64` live in `event_key.rs`; the
+  full resolver/hasher API lives in the `partition` module. The Kafka
+  writer reuses the same FNV-1a hash for record-key partition selection,
+  and `PartitionedReader` routes lanes either via the resolver/hasher
+  pipeline or the equivalent inline default (`EventCompatibility`).
 
 ### Reader Composition (Wrappers)
 
@@ -335,10 +340,12 @@ single source. Cross-cutting concerns live in generic core wrappers in
 
 **Core composition wrappers:**
 
-- `PartitionedReader<R>` is an in-process lane scheduler. It routes
-  inner messages into `Partition`s derived from `event.partition(count)`,
-  buffers each lane up to `lane_capacity`, and exposes one merged
-  stream. Two constructors pick the inner-ack semantics:
+- `PartitionedReader<R, P>` is an in-process lane scheduler. It routes
+  inner messages into `Partition`s derived from `PartitionRouteStrategy<P>`
+  (default `EventCompatibility`: FNV-1a over `event.key()` when present,
+  else over `event.id()` bytes), buffers each lane up to `lane_capacity`,
+  and exposes one merged stream. Two constructors pick the inner-ack
+  semantics:
   - `PartitionedReader::source(inner, config)` — acks inner on lane
     accept. For source-cursor readers (Postgres, SQLite) where the
     cursor advances independently of consumer progress.
@@ -955,12 +962,16 @@ Worth knowing when changing the codebase:
 - **`PartitionKeyResolver<P = Payload>` is generic.** Built-in resolvers
   (`EventKeyPartitionKeyResolver`, `OrganizationPartitionKeyResolver`,
   `TopicPartitionKeyResolver`, `NamespacePartitionKeyResolver`,
-  `MetadataPartitionKeyResolver`, `CompositePartitionKeyResolver`) work
+  `MetadataPartitionKeyResolver`, `CompositePartitionKeyResolver<P>`) work
   for any `P` because they only read identity / topic / namespace /
   metadata, never the payload. `PartitionedReaderConfig<P>` and
   `PartitionRouteStrategy<P>` thread `P` through; the default
-  `EventCompatibility` route uses `Event::partition(count)` and is
-  available for every `P`.
+  `EventCompatibility` route inlines the same FNV-1a routing
+  (`event.key()` bytes else `event.id()` bytes) and is available for
+  every `P`. `Event::partition` / `EventKey::partition_for` were
+  intentionally removed during the typed-payload follow-ups; callers go
+  through the resolver/hasher pipeline directly or rely on
+  `EventCompatibility`.
 - **`MultiplexerStore` is intentionally NOT generic over `P`.** The
   store keys on `(event_id, subscriber_id)` only — the value stored is
   completion state, never the payload. Keeping the trait monomorphic

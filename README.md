@@ -457,8 +457,10 @@ leaves the checkpoint untouched.
 ## Partitioned Readers
 
 `PartitionedReader` is an in-process lane scheduler over any reader. It routes
-events into logical lanes using `Event::partition(count)`, which uses the event
-key when present and the event id otherwise.
+events into logical lanes using `PartitionRouteStrategy<P>`: the default
+`EventCompatibility` strategy hashes the event key (or event id when no key
+is set) with FNV-1a; the `ResolverHasher` strategy plugs in a custom
+`PartitionKeyResolver<P>` + `PartitionHasher`.
 
 Use source mode for source-cursor readers such as PostgreSQL and SQLite:
 
