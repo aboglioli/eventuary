@@ -8,14 +8,16 @@ use futures::{Stream, StreamExt};
 use crate::error::Result;
 use crate::io::message::Message;
 use crate::io::{Acker, BoxAcker};
+use crate::payload::Payload;
 
-pub type BoxStream<C, A = BoxAcker> = Pin<Box<dyn Stream<Item = Result<Message<A, C>>> + Send>>;
+pub type BoxStream<C, A = BoxAcker, P = Payload> =
+    Pin<Box<dyn Stream<Item = Result<Message<A, C, P>>> + Send>>;
 
-pub trait Reader: Send + Sync {
+pub trait Reader<P = Payload>: Send + Sync {
     type Subscription: Send;
     type Acker: Acker;
     type Cursor: Send;
-    type Stream: Stream<Item = Result<Message<Self::Acker, Self::Cursor>>> + Send;
+    type Stream: Stream<Item = Result<Message<Self::Acker, Self::Cursor, P>>> + Send;
 
     fn read(
         &self,
@@ -23,7 +25,7 @@ pub trait Reader: Send + Sync {
     ) -> impl Future<Output = Result<Self::Stream>> + Send;
 }
 
-impl<T: Reader + ?Sized> Reader for Arc<T> {
+impl<T: Reader<P> + ?Sized, P> Reader<P> for Arc<T> {
     type Subscription = T::Subscription;
     type Acker = T::Acker;
     type Cursor = T::Cursor;
@@ -37,7 +39,7 @@ impl<T: Reader + ?Sized> Reader for Arc<T> {
     }
 }
 
-impl<T: Reader + ?Sized> Reader for Box<T> {
+impl<T: Reader<P> + ?Sized, P> Reader<P> for Box<T> {
     type Subscription = T::Subscription;
     type Acker = T::Acker;
     type Cursor = T::Cursor;
@@ -51,31 +53,33 @@ impl<T: Reader + ?Sized> Reader for Box<T> {
     }
 }
 
-pub trait DynReader<S, C, A: Acker = BoxAcker>: Send + Sync
+pub trait DynReader<S, C, A: Acker = BoxAcker, P = Payload>: Send + Sync
 where
     S: Send + 'static,
     C: Send + 'static,
+    P: Send + 'static,
 {
-    fn read_dyn<'a>(&'a self, subscription: S) -> BoxFuture<'a, Result<BoxStream<C, A>>>;
+    fn read_dyn<'a>(&'a self, subscription: S) -> BoxFuture<'a, Result<BoxStream<C, A, P>>>;
 }
 
 struct DynReaderAdapter<R>(R);
 
-impl<R> DynReader<R::Subscription, R::Cursor, BoxAcker> for DynReaderAdapter<R>
+impl<R, P> DynReader<R::Subscription, R::Cursor, BoxAcker, P> for DynReaderAdapter<R>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
-    R::Acker: 'static,
+    R::Acker: Acker + 'static,
     R::Cursor: Send + 'static,
     R::Stream: 'static,
+    P: Send + 'static,
 {
     fn read_dyn<'a>(
         &'a self,
         subscription: R::Subscription,
-    ) -> BoxFuture<'a, Result<BoxStream<R::Cursor, BoxAcker>>> {
+    ) -> BoxFuture<'a, Result<BoxStream<R::Cursor, BoxAcker, P>>> {
         Box::pin(async move {
-            let stream = Reader::read(&self.0, subscription).await?;
-            let erased: BoxStream<R::Cursor, BoxAcker> = Box::pin(
+            let stream = Reader::<P>::read(&self.0, subscription).await?;
+            let erased: BoxStream<R::Cursor, BoxAcker, P> = Box::pin(
                 stream.map(|res| res.map(|msg| msg.map_acker(|a| Box::new(a) as BoxAcker))),
             );
             Ok(erased)
@@ -83,19 +87,20 @@ where
     }
 }
 
-pub type BoxReader<S, C, A = BoxAcker> = Box<dyn DynReader<S, C, A>>;
-pub type ArcReader<S, C, A = BoxAcker> = Arc<dyn DynReader<S, C, A>>;
+pub type BoxReader<S, C, A = BoxAcker, P = Payload> = Box<dyn DynReader<S, C, A, P>>;
+pub type ArcReader<S, C, A = BoxAcker, P = Payload> = Arc<dyn DynReader<S, C, A, P>>;
 
-impl<S, C, A> Reader for dyn DynReader<S, C, A> + '_
+impl<S, C, A, P> Reader<P> for dyn DynReader<S, C, A, P> + '_
 where
     S: Send + 'static,
     C: Send + 'static,
     A: Acker + 'static,
+    P: Send + 'static,
 {
     type Subscription = S;
     type Acker = A;
     type Cursor = C;
-    type Stream = BoxStream<C, A>;
+    type Stream = BoxStream<C, A, P>;
 
     fn read(
         &self,
@@ -105,29 +110,31 @@ where
     }
 }
 
-pub trait ReaderExt: Reader + Send + Sync + Sized + 'static
+pub trait ReaderExt<P = Payload>: Reader<P> + Send + Sync + Sized + 'static
 where
     Self::Subscription: Send + 'static,
     Self::Acker: 'static,
     Self::Cursor: Send + 'static,
     Self::Stream: 'static,
+    P: Send + 'static,
 {
-    fn into_boxed(self) -> BoxReader<Self::Subscription, Self::Cursor> {
+    fn into_boxed(self) -> BoxReader<Self::Subscription, Self::Cursor, BoxAcker, P> {
         Box::new(DynReaderAdapter(self))
     }
 
-    fn into_arced(self) -> ArcReader<Self::Subscription, Self::Cursor> {
+    fn into_arced(self) -> ArcReader<Self::Subscription, Self::Cursor, BoxAcker, P> {
         Arc::new(DynReaderAdapter(self))
     }
 }
 
-impl<R> ReaderExt for R
+impl<R, P> ReaderExt<P> for R
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: 'static,
     R::Cursor: Send + 'static,
     R::Stream: 'static,
+    P: Send + 'static,
 {
 }
 
@@ -141,7 +148,6 @@ mod tests {
     use crate::io::Message;
     use crate::io::NoCursor;
     use crate::io::acker::NoopAcker;
-    use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(i64);
@@ -158,8 +164,13 @@ mod tests {
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
-            let event =
-                Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+            let event = Event::create(
+                "org",
+                "/x",
+                "thing.happened",
+                crate::payload::Payload::from_string("p"),
+            )
+            .unwrap();
             let msg = Message::new(event, NoopAcker, TestCursor(1));
             Ok(Box::pin(stream::once(async move { Ok(msg) })))
         }
@@ -210,6 +221,44 @@ mod tests {
     fn _assert_reader_dyn_safe() {
         fn _take(_: BoxReader<TestSub, NoCursor>) {}
     }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    struct TypedUnitReader;
+
+    impl Reader<UserUpdated> for TypedUnitReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor, UserUpdated>>> + Send>>;
+
+        async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
+            let event = Event::create(
+                "org",
+                "/users",
+                "user.updated",
+                UserUpdated {
+                    user_id: "u-1".to_owned(),
+                },
+            )
+            .unwrap();
+            let msg = Message::new(event, NoopAcker, TestCursor(1));
+            Ok(Box::pin(stream::once(async move { Ok(msg) })))
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_reader_into_boxed_yields_dyn_safe_reader() {
+        let reader: BoxReader<TestSub, TestCursor, BoxAcker, UserUpdated> =
+            TypedUnitReader.into_boxed();
+        let mut stream = reader.read(TestSub).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg.event().payload().user_id, "u-1");
+    }
 }
 
 pub mod batch;
@@ -218,6 +267,7 @@ pub mod checkpoint;
 pub mod claim_buffer;
 pub mod concurrency_limit;
 pub mod coordinated;
+pub mod decode;
 pub mod dedupe;
 pub mod encoded_cursor;
 pub mod filtered;
@@ -247,6 +297,7 @@ pub use coordinated::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
     CoordinatedStream, CoordinatedSubscription,
 };
+pub use decode::{DecodeErrorDisposition, DecodeReader, ReaderTypedExt};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
 pub use encoded_cursor::{EncodedCursorReader, EncodedCursorSubscription};
 pub use filtered::{FilteredReader, FilteredStream};

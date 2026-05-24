@@ -1,40 +1,55 @@
+use std::marker::PhantomData;
+
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::Writer;
+use crate::payload::Payload;
 
-pub struct FlatMapWriter<W, F> {
+pub struct FlatMapWriter<W, F, P = Payload, Q = Payload> {
     inner: W,
     mapper: F,
+    _payload: PhantomData<fn(P) -> Q>,
 }
 
-pub struct TryFlatMapWriter<W, F> {
+pub struct TryFlatMapWriter<W, F, P = Payload, Q = Payload> {
     inner: W,
     mapper: F,
+    _payload: PhantomData<fn(P) -> Q>,
 }
 
-impl<W, F> FlatMapWriter<W, F> {
+impl<W, F, P, Q> FlatMapWriter<W, F, P, Q> {
     pub fn new(inner: W, mapper: F) -> Self {
-        Self { inner, mapper }
+        Self {
+            inner,
+            mapper,
+            _payload: PhantomData,
+        }
     }
 }
 
-impl<W, F> TryFlatMapWriter<W, F> {
+impl<W, F, P, Q> TryFlatMapWriter<W, F, P, Q> {
     pub fn new(inner: W, mapper: F) -> Self {
-        Self { inner, mapper }
+        Self {
+            inner,
+            mapper,
+            _payload: PhantomData,
+        }
     }
 }
 
-impl<W, F> Writer for FlatMapWriter<W, F>
+impl<W, F, P, Q> Writer<P> for FlatMapWriter<W, F, P, Q>
 where
-    W: Writer,
-    F: Fn(&Event) -> Vec<Event> + Send + Sync,
+    W: Writer<Q>,
+    F: Fn(&Event<P>) -> Vec<Event<Q>> + Send + Sync,
+    P: Send + Sync,
+    Q: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         let events = (self.mapper)(event);
         self.inner.write_all(&events).await
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let mapped = events
             .iter()
             .flat_map(|event| (self.mapper)(event))
@@ -43,17 +58,19 @@ where
     }
 }
 
-impl<W, F> Writer for TryFlatMapWriter<W, F>
+impl<W, F, P, Q> Writer<P> for TryFlatMapWriter<W, F, P, Q>
 where
-    W: Writer,
-    F: Fn(&Event) -> Result<Vec<Event>> + Send + Sync,
+    W: Writer<Q>,
+    F: Fn(&Event<P>) -> Result<Vec<Event<Q>>> + Send + Sync,
+    P: Send + Sync,
+    Q: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         let events = (self.mapper)(event)?;
         self.inner.write_all(&events).await
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let mut mapped = Vec::new();
         for event in events {
             mapped.extend((self.mapper)(event)?);

@@ -6,15 +6,16 @@ use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::io::{Acker, Message};
+use crate::payload::Payload;
 
-pub struct SpawnedStream<A: Acker, C> {
-    rx: mpsc::Receiver<Result<Message<A, C>>>,
+pub struct SpawnedStream<A: Acker, C, P = Payload> {
+    rx: mpsc::Receiver<Result<Message<A, C, P>>>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl<A: Acker, C> SpawnedStream<A, C> {
+impl<A: Acker, C, P> SpawnedStream<A, C, P> {
     pub fn new(
-        rx: mpsc::Receiver<Result<Message<A, C>>>,
+        rx: mpsc::Receiver<Result<Message<A, C, P>>>,
         handle: tokio::task::JoinHandle<()>,
     ) -> Self {
         Self {
@@ -23,20 +24,20 @@ impl<A: Acker, C> SpawnedStream<A, C> {
         }
     }
 
-    pub fn from_receiver(rx: mpsc::Receiver<Result<Message<A, C>>>) -> Self {
+    pub fn from_receiver(rx: mpsc::Receiver<Result<Message<A, C, P>>>) -> Self {
         Self { rx, handle: None }
     }
 }
 
-impl<A: Acker, C> Stream for SpawnedStream<A, C> {
-    type Item = Result<Message<A, C>>;
+impl<A: Acker, C, P> Stream for SpawnedStream<A, C, P> {
+    type Item = Result<Message<A, C, P>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
-impl<A: Acker, C> Drop for SpawnedStream<A, C> {
+impl<A: Acker, C, P> Drop for SpawnedStream<A, C, P> {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();

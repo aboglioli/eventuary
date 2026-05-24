@@ -15,15 +15,16 @@ impl<H> TimeoutHandler<H> {
     }
 }
 
-impl<H> Handler for TimeoutHandler<H>
+impl<H, P> Handler<P> for TimeoutHandler<H>
 where
-    H: Handler,
+    H: Handler<P>,
+    P: Send + Sync,
 {
     fn id(&self) -> &str {
         self.inner.id()
     }
 
-    async fn handle(&self, event: &Event) -> Result<()> {
+    async fn handle(&self, event: &Event<P>) -> Result<()> {
         tokio::time::timeout(self.timeout, self.inner.handle(event))
             .await
             .map_err(|_| {

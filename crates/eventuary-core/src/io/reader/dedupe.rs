@@ -9,17 +9,21 @@ use crate::event::Event;
 use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
+use crate::payload::Payload;
 
-pub trait DedupeStore: Clone + Send + Sync + 'static {
-    fn exists(&self, event: &Event) -> impl Future<Output = Result<bool>> + Send;
-    fn mark_processed(&self, event: &Event) -> impl Future<Output = Result<()>> + Send;
+pub trait DedupeStore<P = Payload>: Clone + Send + Sync + 'static
+where
+    P: Send + Sync,
+{
+    fn exists(&self, event: &Event<P>) -> impl Future<Output = Result<bool>> + Send;
+    fn mark_processed(&self, event: &Event<P>) -> impl Future<Output = Result<()>> + Send;
 
     /// Atomically marks the event as seen, returning whether it was newly
     /// recorded (`true`) or was already present (`false`). The default
     /// implementation calls `exists` then `mark_processed`, which is racy
     /// across concurrent callers. Backends with native atomicity (e.g.,
     /// Postgres `INSERT ON CONFLICT DO NOTHING`) should override.
-    fn mark_if_new(&self, event: &Event) -> impl Future<Output = Result<bool>> + Send {
+    fn mark_if_new(&self, event: &Event<P>) -> impl Future<Output = Result<bool>> + Send {
         async move {
             if self.exists(event).await? {
                 return Ok(false);
@@ -41,19 +45,20 @@ impl<R, S> DedupeReader<R, S> {
     }
 }
 
-impl<R, S> Reader for DedupeReader<R, S>
+impl<R, S, P> Reader<P> for DedupeReader<R, S>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
-    S: DedupeStore + 'static,
+    S: DedupeStore<P> + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
-    type Acker = DedupeAcker<R::Acker, S>;
+    type Acker = DedupeAcker<R::Acker, S, P>;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<DedupeAcker<R::Acker, S>, R::Cursor>;
+    type Stream = SpawnedStream<DedupeAcker<R::Acker, S, P>, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
@@ -105,13 +110,18 @@ where
     }
 }
 
-pub struct DedupeAcker<A: Acker, S: DedupeStore> {
+pub struct DedupeAcker<A: Acker, S, P = Payload> {
     inner: A,
     store: S,
-    event: Arc<Event>,
+    event: Arc<Event<P>>,
 }
 
-impl<A: Acker, S: DedupeStore> Acker for DedupeAcker<A, S> {
+impl<A, S, P> Acker for DedupeAcker<A, S, P>
+where
+    A: Acker,
+    S: DedupeStore<P>,
+    P: Send + Sync,
+{
     async fn ack(&self) -> Result<()> {
         self.store.mark_processed(&self.event).await?;
         self.inner.ack().await

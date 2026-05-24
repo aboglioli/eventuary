@@ -928,6 +928,44 @@ Worth knowing when changing the codebase:
   first implementation matches `CheckpointReader`'s commit-on-ack
   semantics; high-throughput deployments should add the buffer before
   optimizing.
+- **Typed payloads are core-generic, durable boundary stays `Payload`.**
+  `Event<P = Payload>`, `Reader<P = Payload>`, `Writer<P = Payload>`,
+  `Handler<P = Payload>`, `Filter<P = Payload>`, and `Message<A, C, P =
+  Payload>` all default to `Payload` so existing call sites compile
+  unchanged. Every cross-cutting reader/writer/handler wrapper
+  (`MapReader`, `BatchWriter`, `FanoutWriter`, `OutcomeRouterReader`,
+  `PartitionedReader`, `CoordinatedReader` via composition, `Multiplexer`,
+  `FilteredHandler`, …) is generic over `P`. Filter combinators
+  (`AllFilter`, `AndFilter`, `OrFilter`, `NotFilter`, `EventFilter`,
+  `TopicPattern`, `NamespacePattern`) impl `Filter<P>` for any `P`. The
+  in-memory backend (`MemoryReader<P>`, `MemoryWriter<P>`) carries `P`
+  end-to-end without serialization. Durable surfaces — `SerializedEvent`,
+  `PgWriter`, `SqliteWriter`, `SqsWriter`, `KafkaWriter`, SQL buffer /
+  dedupe / multiplexer stores, `SubscriberWorkRouter` — stay bound to
+  `Payload` because they own the wire boundary.
+- **Codec bridge sits at the boundary, not inside wrappers.**
+  `DecodeReader<R, C, P>` and `EncodeWriter<W, C, P>` adapt
+  `Reader<Payload>` ↔ `Reader<P>` and `Writer<P>` → `Writer<Payload>` via
+  a `PayloadCodec<P>` / `EventCodec<P>`. Built-in codecs:
+  `JsonPayloadCodec` (serde-based), `PayloadPassthroughCodec` (identity),
+  and `PayloadEventCodec<C>` (lifts a payload codec to a full event
+  codec). `DecodeErrorDisposition::{AckInner, Nack, DeadLetter, Fail}`
+  governs poison-event behaviour; the default is `AckInner` so a single
+  bad row does not stall the source cursor.
+- **`PartitionKeyResolver<P = Payload>` is generic.** Built-in resolvers
+  (`EventKeyPartitionKeyResolver`, `OrganizationPartitionKeyResolver`,
+  `TopicPartitionKeyResolver`, `NamespacePartitionKeyResolver`,
+  `MetadataPartitionKeyResolver`, `CompositePartitionKeyResolver`) work
+  for any `P` because they only read identity / topic / namespace /
+  metadata, never the payload. `PartitionedReaderConfig<P>` and
+  `PartitionRouteStrategy<P>` thread `P` through; the default
+  `EventCompatibility` route uses `Event::partition(count)` and is
+  available for every `P`.
+- **`MultiplexerStore` is intentionally NOT generic over `P`.** The
+  store keys on `(event_id, subscriber_id)` only — the value stored is
+  completion state, never the payload. Keeping the trait monomorphic
+  lets a single store back multiplexers over multiple payload types
+  with isolated subscriber-id namespaces.
 
 ## Releasing
 

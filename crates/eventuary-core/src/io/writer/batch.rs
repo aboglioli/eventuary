@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::Writer;
+use crate::payload::Payload;
 
 #[derive(Debug, Clone)]
 pub struct BatchWriterConfig {
@@ -55,21 +56,32 @@ impl Default for BatchWriterConfig {
     }
 }
 
-#[derive(Clone)]
-pub struct BatchWriter {
-    tx: mpsc::Sender<BatchWriteRequest>,
+pub struct BatchWriter<P = Payload> {
+    tx: mpsc::Sender<BatchWriteRequest<P>>,
     config: BatchWriterConfig,
 }
 
-struct BatchWriteRequest {
-    events: Vec<Event>,
+impl<P> Clone for BatchWriter<P> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            config: self.config.clone(),
+        }
+    }
+}
+
+struct BatchWriteRequest<P> {
+    events: Vec<Event<P>>,
     result: oneshot::Sender<Result<()>>,
 }
 
-impl BatchWriter {
+impl<P> BatchWriter<P>
+where
+    P: Send + Sync + 'static,
+{
     pub fn spawn<W>(inner: W, config: BatchWriterConfig) -> Self
     where
-        W: Writer + Send + 'static,
+        W: Writer<P> + Send + 'static,
     {
         let (tx, rx) = mpsc::channel(config.channel_capacity.get());
         tokio::spawn(run_flusher(inner, rx, config.clone()));
@@ -80,7 +92,7 @@ impl BatchWriter {
         &self.config
     }
 
-    async fn submit(&self, events: Vec<Event>) -> Result<()> {
+    async fn submit(&self, events: Vec<Event<P>>) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(BatchWriteRequest { events, result: tx })
@@ -91,12 +103,15 @@ impl BatchWriter {
     }
 }
 
-impl Writer for BatchWriter {
-    async fn write(&self, event: &Event) -> Result<()> {
+impl<P> Writer<P> for BatchWriter<P>
+where
+    P: Clone + Send + Sync + 'static,
+{
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         self.submit(vec![event.clone()]).await
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         if events.is_empty() {
             return Ok(());
         }
@@ -107,12 +122,13 @@ impl Writer for BatchWriter {
     }
 }
 
-async fn run_flusher<W>(
+async fn run_flusher<W, P>(
     inner: W,
-    mut rx: mpsc::Receiver<BatchWriteRequest>,
+    mut rx: mpsc::Receiver<BatchWriteRequest<P>>,
     config: BatchWriterConfig,
 ) where
-    W: Writer,
+    W: Writer<P>,
+    P: Send + Sync,
 {
     while let Some(first) = rx.recv().await {
         let mut requests = vec![first];
@@ -143,9 +159,10 @@ async fn run_flusher<W>(
     }
 }
 
-async fn flush_requests<W>(inner: &W, mut requests: Vec<BatchWriteRequest>)
+async fn flush_requests<W, P>(inner: &W, mut requests: Vec<BatchWriteRequest<P>>)
 where
-    W: Writer,
+    W: Writer<P>,
+    P: Send + Sync,
 {
     let events = requests
         .iter_mut()

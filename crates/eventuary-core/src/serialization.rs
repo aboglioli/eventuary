@@ -114,7 +114,7 @@ mod base64_bytes {
 }
 
 impl SerializedEvent {
-    pub fn from_event(event: &Event) -> Result<Self> {
+    pub fn from_event(event: &Event<Payload>) -> Result<Self> {
         Ok(Self {
             id: *event.id().as_uuid(),
             organization: event.organization().to_string(),
@@ -136,7 +136,7 @@ impl SerializedEvent {
         })
     }
 
-    pub fn to_event(&self) -> Result<Event> {
+    pub fn to_event(&self) -> Result<Event<Payload>> {
         let payload = self.payload.clone().into_payload()?;
         let key = self.key.as_deref().map(EventKey::new).transpose()?;
         let parent_id = self.parent_id.map(EventId::from_uuid);

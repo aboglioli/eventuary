@@ -12,6 +12,7 @@ use crate::event::Event;
 use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
+use crate::payload::Payload;
 
 pub trait WatermarkStore: Clone + Send + Sync + 'static {
     fn load_watermark(
@@ -25,13 +26,15 @@ pub trait WatermarkStore: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
-enum WatermarkKey {
+type WatermarkKeyFn<P> = Arc<dyn Fn(&Event<P>) -> String + Send + Sync>;
+
+enum WatermarkKey<P = Payload> {
     Static(Arc<str>),
-    Dynamic(Arc<dyn Fn(&Event) -> String + Send + Sync>),
+    Dynamic(WatermarkKeyFn<P>),
 }
 
-impl WatermarkKey {
-    fn resolve(&self, event: &Event) -> (String, Arc<str>) {
+impl<P> WatermarkKey<P> {
+    fn resolve(&self, event: &Event<P>) -> (String, Arc<str>) {
         match self {
             WatermarkKey::Static(key) => (key.to_string(), Arc::clone(key)),
             WatermarkKey::Dynamic(f) => {
@@ -43,13 +46,13 @@ impl WatermarkKey {
     }
 }
 
-pub struct WatermarkReader<R, S> {
+pub struct WatermarkReader<R, S, P = Payload> {
     inner: R,
     store: S,
-    key_fn: WatermarkKey,
+    key_fn: WatermarkKey<P>,
 }
 
-impl<R, S> WatermarkReader<R, S> {
+impl<R, S, P> WatermarkReader<R, S, P> {
     pub fn with_static_key(inner: R, store: S, key: impl Into<String>) -> Self {
         Self {
             inner,
@@ -60,7 +63,7 @@ impl<R, S> WatermarkReader<R, S> {
 
     pub fn with_key_fn<F>(inner: R, store: S, key_fn: F) -> Self
     where
-        F: Fn(&Event) -> String + Send + Sync + 'static,
+        F: Fn(&Event<P>) -> String + Send + Sync + 'static,
     {
         Self {
             inner,
@@ -76,19 +79,20 @@ impl<R, S> WatermarkReader<R, S> {
 
 type WatermarkCache = Arc<Mutex<HashMap<String, Option<DateTime<Utc>>>>>;
 
-impl<R, S> Reader for WatermarkReader<R, S>
+impl<R, S, P> Reader<P> for WatermarkReader<R, S, P>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
     S: WatermarkStore + 'static,
+    P: Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = WatermarkAcker<R::Acker, S>;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<WatermarkAcker<R::Acker, S>, R::Cursor>;
+    type Stream = SpawnedStream<WatermarkAcker<R::Acker, S>, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
@@ -192,7 +196,7 @@ impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
     }
 }
 
-impl Clone for WatermarkKey {
+impl<P> Clone for WatermarkKey<P> {
     fn clone(&self) -> Self {
         match self {
             WatermarkKey::Static(key) => WatermarkKey::Static(Arc::clone(key)),

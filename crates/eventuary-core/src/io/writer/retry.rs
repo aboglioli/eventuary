@@ -80,11 +80,12 @@ impl<W> RetryWriter<W> {
     }
 }
 
-impl<W> Writer for RetryWriter<W>
+impl<W, P> Writer<P> for RetryWriter<W>
 where
-    W: Writer,
+    W: Writer<P>,
+    P: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         let mut attempt = 1;
         loop {
             match self.inner.write(event).await {
@@ -98,7 +99,7 @@ where
         }
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let mut attempt = 1;
         loop {
             match self.inner.write_all(events).await {
@@ -230,6 +231,49 @@ mod tests {
         );
 
         writer.write_all(&[ev(), ev()]).await.unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    struct TypedFlakyWriter {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl Writer<UserUpdated> for TypedFlakyWriter {
+        async fn write(&self, _: &Event<UserUpdated>) -> Result<()> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(Error::Store("temporary".to_owned()));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_writer_supports_typed_payloads() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let writer = RetryWriter::new(
+            TypedFlakyWriter {
+                attempts: Arc::clone(&attempts),
+            },
+            fast_config(2),
+        );
+        let event = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        writer.write(&event).await.unwrap();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }

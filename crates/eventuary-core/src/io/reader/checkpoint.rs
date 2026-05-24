@@ -228,7 +228,8 @@ where
     }
 }
 
-pub type CheckpointStream<A, C, S> = SpawnedStream<CheckpointAcker<A, C, S>, C>;
+pub type CheckpointStream<A, C, S, P = crate::payload::Payload> =
+    SpawnedStream<CheckpointAcker<A, C, S>, C, P>;
 
 /// Wraps a `Reader` with durable consumer progress backed by a
 /// `CheckpointStore`.
@@ -271,19 +272,20 @@ impl<R, S> CheckpointReader<R, S> {
     }
 }
 
-impl<R, S> Reader for CheckpointReader<R, S>
+impl<R, S, P> Reader<P> for CheckpointReader<R, S>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Cursor: Cursor + Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Send + Sync + 'static,
     R::Stream: Send + 'static,
     S: CheckpointStore<R::Cursor>,
+    P: Send + Sync + 'static,
 {
     type Subscription = CheckpointSubscription<R::Subscription>;
     type Acker = CheckpointAcker<R::Acker, R::Cursor, S>;
     type Cursor = R::Cursor;
-    type Stream = CheckpointStream<R::Acker, R::Cursor, S>;
+    type Stream = CheckpointStream<R::Acker, R::Cursor, S, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let scope = subscription.scope.clone();
@@ -328,7 +330,7 @@ where
         let state: PendingMap<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
         let max_pending = self.config.max_pending_per_key;
         let (tx, rx) = mpsc::channel::<
-            Result<Message<CheckpointAcker<R::Acker, R::Cursor, S>, R::Cursor>>,
+            Result<Message<CheckpointAcker<R::Acker, R::Cursor, S>, R::Cursor, P>>,
         >(64);
         let known = Arc::new(known);
 

@@ -1,18 +1,21 @@
 use eventuary_core::io::Writer;
-use eventuary_core::{Error, Event, Result};
+use eventuary_core::{Error, Event, Payload, Result};
 
-pub struct MemoryWriter {
-    tx: tokio::sync::mpsc::Sender<Event>,
+pub struct MemoryWriter<P = Payload> {
+    tx: tokio::sync::mpsc::Sender<Event<P>>,
 }
 
-impl MemoryWriter {
-    pub fn new(tx: tokio::sync::mpsc::Sender<Event>) -> Self {
+impl<P> MemoryWriter<P> {
+    pub fn new(tx: tokio::sync::mpsc::Sender<Event<P>>) -> Self {
         Self { tx }
     }
 }
 
-impl Writer for MemoryWriter {
-    async fn write(&self, event: &Event) -> Result<()> {
+impl<P> Writer<P> for MemoryWriter<P>
+where
+    P: Clone + Send + Sync + 'static,
+{
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         self.tx
             .send(event.clone())
             .await
@@ -24,7 +27,7 @@ impl Writer for MemoryWriter {
 mod tests {
     use super::*;
     use eventuary_core::Payload;
-    use eventuary_core::io::{BoxWriter, WriterExt};
+    use eventuary_core::io::{BoxWriter, Writer, WriterExt};
 
     fn ev() -> Event {
         Event::builder("org", "/x", "thing.happened", Payload::from_string("p"))

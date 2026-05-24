@@ -10,30 +10,32 @@ use tokio_util::sync::CancellationToken;
 use crate::error::Result;
 use crate::io::acker::{AckBuffer, AckBufferConfig, AckCmd, BatchFlusher, BatchedAcker};
 use crate::io::{Message, NoCursor};
+use crate::payload::Payload;
 
 pub struct BatchedStream<
     T: Clone + Send + Sync + 'static,
     F: BatchFlusher<Token = T> + 'static,
     C = NoCursor,
+    P = Payload,
 > {
-    rx: mpsc::Receiver<Result<Message<BatchedAcker<T>, C>>>,
+    rx: mpsc::Receiver<Result<Message<BatchedAcker<T>, C, P>>>,
     cancel: CancellationToken,
     handle: Option<tokio::task::JoinHandle<()>>,
     ack: Arc<AckBuffer<F>>,
 }
 
-impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C> Stream
-    for BatchedStream<T, F, C>
+impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C, P> Stream
+    for BatchedStream<T, F, C, P>
 {
-    type Item = Result<Message<BatchedAcker<T>, C>>;
+    type Item = Result<Message<BatchedAcker<T>, C, P>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
-impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C> Drop
-    for BatchedStream<T, F, C>
+impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C, P> Drop
+    for BatchedStream<T, F, C, P>
 {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -47,15 +49,19 @@ impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C> 
     }
 }
 
-impl<T: Clone + Send + Sync + 'static, F: BatchFlusher<Token = T> + 'static, C: Send + 'static>
-    BatchedStream<T, F, C>
+impl<
+    T: Clone + Send + Sync + 'static,
+    F: BatchFlusher<Token = T> + 'static,
+    C: Send + 'static,
+    P: Send + 'static,
+> BatchedStream<T, F, C, P>
 {
     pub fn spawn(
         flusher: F,
         ack_config: AckBufferConfig,
         channel_capacity: usize,
         source_loop: impl FnOnce(
-            mpsc::Sender<Result<Message<BatchedAcker<T>, C>>>,
+            mpsc::Sender<Result<Message<BatchedAcker<T>, C, P>>>,
             mpsc::Sender<AckCmd<T>>,
             CancellationToken,
         ) -> BoxFuture<'static, ()>

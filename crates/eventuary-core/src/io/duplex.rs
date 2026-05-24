@@ -28,27 +28,29 @@ impl<W, R> Duplex<W, R> {
     }
 }
 
-impl<W, R> Writer for Duplex<W, R>
+impl<W, R, P> Writer<P> for Duplex<W, R>
 where
-    W: Writer,
+    W: Writer<P>,
     R: Send + Sync,
+    P: Send + Sync,
 {
-    fn write<'a>(&'a self, event: &'a Event) -> impl Future<Output = Result<()>> + Send + 'a {
+    fn write<'a>(&'a self, event: &'a Event<P>) -> impl Future<Output = Result<()>> + Send + 'a {
         self.writer.write(event)
     }
 
     fn write_all<'a>(
         &'a self,
-        events: &'a [Event],
+        events: &'a [Event<P>],
     ) -> impl Future<Output = Result<()>> + Send + 'a {
         self.writer.write_all(events)
     }
 }
 
-impl<W, R> Reader for Duplex<W, R>
+impl<W, R, P> Reader<P> for Duplex<W, R>
 where
     W: Send + Sync,
-    R: Reader,
+    R: Reader<P>,
+    P: Send + Sync,
 {
     type Subscription = R::Subscription;
     type Acker = R::Acker;

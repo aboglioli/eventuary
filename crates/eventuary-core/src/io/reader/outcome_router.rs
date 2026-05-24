@@ -9,6 +9,7 @@ use crate::event::Event;
 use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, ArcWriter, Message, Reader, Writer, WriterExt};
+use crate::payload::Payload;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum NackDisposition {
@@ -24,28 +25,31 @@ pub enum DeliveryDisposition {
     BestEffort,
 }
 
-pub struct OutcomeRouterReader<R> {
+pub struct OutcomeRouterReader<R, P = Payload> {
     inner: R,
-    ack_writer: Option<ArcWriter>,
-    nack_writer: Option<ArcWriter>,
+    ack_writer: Option<ArcWriter<P>>,
+    nack_writer: Option<ArcWriter<P>>,
     nack_disposition: NackDisposition,
-    delivery_writer: Option<ArcWriter>,
+    delivery_writer: Option<ArcWriter<P>>,
     delivery_disposition: DeliveryDisposition,
 }
 
-pub struct OutcomeRouterAcker<A: Acker> {
+pub struct OutcomeRouterAcker<A: Acker, P = Payload> {
     inner: A,
-    event: Event,
-    ack_writer: Option<ArcWriter>,
-    nack_writer: Option<ArcWriter>,
+    event: Event<P>,
+    ack_writer: Option<ArcWriter<P>>,
+    nack_writer: Option<ArcWriter<P>>,
     nack_disposition: NackDisposition,
     completed: Arc<AtomicBool>,
 }
 
-impl<R> OutcomeRouterReader<R> {
+impl<R, P> OutcomeRouterReader<R, P>
+where
+    P: Send + Sync + 'static,
+{
     pub fn on_ack<W>(inner: R, ack_writer: W) -> Self
     where
-        W: Writer + 'static,
+        W: Writer<P> + 'static,
     {
         Self {
             inner,
@@ -59,7 +63,7 @@ impl<R> OutcomeRouterReader<R> {
 
     pub fn on_nack<W>(inner: R, nack_writer: W) -> Self
     where
-        W: Writer + 'static,
+        W: Writer<P> + 'static,
     {
         Self {
             inner,
@@ -73,8 +77,8 @@ impl<R> OutcomeRouterReader<R> {
 
     pub fn on_ack_and_nack<W1, W2>(inner: R, ack_writer: W1, nack_writer: W2) -> Self
     where
-        W1: Writer + 'static,
-        W2: Writer + 'static,
+        W1: Writer<P> + 'static,
+        W2: Writer<P> + 'static,
     {
         Self {
             inner,
@@ -88,7 +92,7 @@ impl<R> OutcomeRouterReader<R> {
 
     pub fn on_delivery<W>(inner: R, delivery_writer: W) -> Self
     where
-        W: Writer + 'static,
+        W: Writer<P> + 'static,
     {
         Self {
             inner,
@@ -102,7 +106,7 @@ impl<R> OutcomeRouterReader<R> {
 
     pub fn with_ack_writer<W>(mut self, writer: W) -> Self
     where
-        W: Writer + 'static,
+        W: Writer<P> + 'static,
     {
         self.ack_writer = Some(writer.into_arced());
         self
@@ -110,7 +114,7 @@ impl<R> OutcomeRouterReader<R> {
 
     pub fn with_nack_writer<W>(mut self, writer: W) -> Self
     where
-        W: Writer + 'static,
+        W: Writer<P> + 'static,
     {
         self.nack_writer = Some(writer.into_arced());
         self
@@ -118,7 +122,7 @@ impl<R> OutcomeRouterReader<R> {
 
     pub fn with_delivery_writer<W>(mut self, writer: W) -> Self
     where
-        W: Writer + 'static,
+        W: Writer<P> + 'static,
     {
         self.delivery_writer = Some(writer.into_arced());
         self
@@ -135,7 +139,7 @@ impl<R> OutcomeRouterReader<R> {
     }
 }
 
-impl<A: Acker> OutcomeRouterAcker<A> {
+impl<A: Acker, P> OutcomeRouterAcker<A, P> {
     fn mark_started(&self) -> bool {
         !self.completed.swap(true, Ordering::AcqRel)
     }
@@ -145,9 +149,10 @@ impl<A: Acker> OutcomeRouterAcker<A> {
     }
 }
 
-impl<A> Acker for OutcomeRouterAcker<A>
+impl<A, P> Acker for OutcomeRouterAcker<A, P>
 where
     A: Acker + Send + Sync + 'static,
+    P: Send + Sync + 'static,
 {
     async fn ack(&self) -> Result<()> {
         if !self.mark_started() {
@@ -205,18 +210,19 @@ where
     }
 }
 
-impl<R> Reader for OutcomeRouterReader<R>
+impl<R, P> Reader<P> for OutcomeRouterReader<R, P>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
-    type Acker = OutcomeRouterAcker<R::Acker>;
+    type Acker = OutcomeRouterAcker<R::Acker, P>;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<OutcomeRouterAcker<R::Acker>, R::Cursor>;
+    type Stream = SpawnedStream<OutcomeRouterAcker<R::Acker, P>, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;

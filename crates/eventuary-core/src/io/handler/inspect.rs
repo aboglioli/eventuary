@@ -1,24 +1,31 @@
+use std::marker::PhantomData;
 use std::time::Duration;
 use std::time::Instant;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::Handler;
+use crate::payload::Payload;
 
-pub trait InspectHandlerHooks: Send + Sync {
-    fn on_start(&self, _event: &Event) {}
-    fn on_success(&self, _event: &Event, _duration: Duration) {}
-    fn on_error(&self, _event: &Event, _error: &Error, _duration: Duration) {}
+pub trait InspectHandlerHooks<P = Payload>: Send + Sync {
+    fn on_start(&self, _event: &Event<P>) {}
+    fn on_success(&self, _event: &Event<P>, _duration: Duration) {}
+    fn on_error(&self, _event: &Event<P>, _error: &Error, _duration: Duration) {}
 }
 
-pub struct InspectHandler<H, Hooks> {
+pub struct InspectHandler<H, Hooks, P = Payload> {
     inner: H,
     hooks: Hooks,
+    _payload: PhantomData<fn(P)>,
 }
 
-impl<H, Hooks> InspectHandler<H, Hooks> {
+impl<H, Hooks, P> InspectHandler<H, Hooks, P> {
     pub fn new(inner: H, hooks: Hooks) -> Self {
-        Self { inner, hooks }
+        Self {
+            inner,
+            hooks,
+            _payload: PhantomData,
+        }
     }
 
     pub fn hooks(&self) -> &Hooks {
@@ -26,16 +33,17 @@ impl<H, Hooks> InspectHandler<H, Hooks> {
     }
 }
 
-impl<H, Hooks> Handler for InspectHandler<H, Hooks>
+impl<H, Hooks, P> Handler<P> for InspectHandler<H, Hooks, P>
 where
-    H: Handler,
-    Hooks: InspectHandlerHooks,
+    H: Handler<P>,
+    Hooks: InspectHandlerHooks<P>,
+    P: Send + Sync,
 {
     fn id(&self) -> &str {
         self.inner.id()
     }
 
-    async fn handle(&self, event: &Event) -> Result<()> {
+    async fn handle(&self, event: &Event<P>) -> Result<()> {
         self.hooks.on_start(event);
         let started = Instant::now();
         match self.inner.handle(event).await {

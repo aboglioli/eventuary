@@ -7,18 +7,23 @@ pub struct FilteredHandler<H, F> {
     filter: F,
 }
 
-impl<H: Handler, F: Filter> FilteredHandler<H, F> {
+impl<H, F> FilteredHandler<H, F> {
     pub fn new(handler: H, filter: F) -> Self {
         Self { handler, filter }
     }
 }
 
-impl<H: Handler, F: Filter> Handler for FilteredHandler<H, F> {
+impl<H, F, P> Handler<P> for FilteredHandler<H, F>
+where
+    H: Handler<P>,
+    F: Filter<P>,
+    P: Send + Sync,
+{
     fn id(&self) -> &str {
         self.handler.id()
     }
 
-    async fn handle(&self, event: &Event) -> Result<()> {
+    async fn handle(&self, event: &Event<P>) -> Result<()> {
         if !self.filter.matches(event) {
             return Ok(());
         }

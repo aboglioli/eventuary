@@ -34,6 +34,7 @@ use futures::stream::FuturesUnordered;
 use crate::error::{Error, Result};
 use crate::event::{Event, EventId};
 use crate::io::{ArcFilter, ArcHandler, Filter, Handler, HandlerExt};
+use crate::payload::Payload;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct SubscriberId(Arc<str>);
@@ -113,17 +114,20 @@ pub enum NoMatchPolicy {
     Error,
 }
 
-struct MultiplexerRoute {
+struct MultiplexerRoute<P = Payload> {
     subscriber_id: SubscriberId,
-    filter: ArcFilter,
-    handler: ArcHandler,
+    filter: ArcFilter<P>,
+    handler: ArcHandler<P>,
 }
 
-impl MultiplexerRoute {
+impl<P> MultiplexerRoute<P>
+where
+    P: Send + Sync + 'static,
+{
     fn new<F, H>(subscriber_id: impl AsRef<str>, filter: F, handler: H) -> Result<Self>
     where
-        F: Filter + 'static,
-        H: Handler + 'static,
+        F: Filter<P> + 'static,
+        H: Handler<P> + 'static,
     {
         Ok(Self {
             subscriber_id: SubscriberId::new(subscriber_id)?,
@@ -141,16 +145,16 @@ struct MultiplexerFailure {
 
 const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN;
 
-pub struct MultiplexerBuilder<S = NoMultiplexerStore> {
+pub struct MultiplexerBuilder<S = NoMultiplexerStore, P = Payload> {
     id: String,
-    routes: Vec<MultiplexerRoute>,
+    routes: Vec<MultiplexerRoute<P>>,
     subscriber_ids: HashSet<SubscriberId>,
     store: S,
     concurrency: NonZeroUsize,
     no_match: NoMatchPolicy,
 }
 
-impl Default for MultiplexerBuilder<NoMultiplexerStore> {
+impl<P> Default for MultiplexerBuilder<NoMultiplexerStore, P> {
     fn default() -> Self {
         Self {
             id: "multiplexer".to_owned(),
@@ -163,7 +167,10 @@ impl Default for MultiplexerBuilder<NoMultiplexerStore> {
     }
 }
 
-impl<S> MultiplexerBuilder<S> {
+impl<S, P> MultiplexerBuilder<S, P>
+where
+    P: Send + Sync + 'static,
+{
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = id.into();
         self
@@ -176,8 +183,8 @@ impl<S> MultiplexerBuilder<S> {
         handler: H,
     ) -> Result<Self>
     where
-        F: Filter + 'static,
-        H: Handler + 'static,
+        F: Filter<P> + 'static,
+        H: Handler<P> + 'static,
     {
         let route = MultiplexerRoute::new(subscriber_id, filter, handler)?;
         if !self.subscriber_ids.insert(route.subscriber_id.clone()) {
@@ -200,7 +207,7 @@ impl<S> MultiplexerBuilder<S> {
         self
     }
 
-    pub fn store<S2: MultiplexerStore>(self, store: S2) -> MultiplexerBuilder<S2> {
+    pub fn store<S2: MultiplexerStore>(self, store: S2) -> MultiplexerBuilder<S2, P> {
         MultiplexerBuilder {
             id: self.id,
             routes: self.routes,
@@ -212,8 +219,12 @@ impl<S> MultiplexerBuilder<S> {
     }
 }
 
-impl<S: MultiplexerStore> MultiplexerBuilder<S> {
-    pub fn build(self) -> Result<Multiplexer<S>> {
+impl<S, P> MultiplexerBuilder<S, P>
+where
+    S: MultiplexerStore,
+    P: Send + Sync + 'static,
+{
+    pub fn build(self) -> Result<Multiplexer<S, P>> {
         if self.id.trim().is_empty() {
             return Err(Error::Config("multiplexer id must not be empty".to_owned()));
         }
@@ -227,26 +238,30 @@ impl<S: MultiplexerStore> MultiplexerBuilder<S> {
     }
 }
 
-pub struct Multiplexer<S = NoMultiplexerStore> {
+pub struct Multiplexer<S = NoMultiplexerStore, P = Payload> {
     id: String,
-    routes: Vec<MultiplexerRoute>,
+    routes: Vec<MultiplexerRoute<P>>,
     store: S,
     concurrency: NonZeroUsize,
     no_match: NoMatchPolicy,
 }
 
-impl Multiplexer<NoMultiplexerStore> {
-    pub fn builder() -> MultiplexerBuilder<NoMultiplexerStore> {
+impl<P> Multiplexer<NoMultiplexerStore, P> {
+    pub fn builder() -> MultiplexerBuilder<NoMultiplexerStore, P> {
         MultiplexerBuilder::default()
     }
 }
 
-impl<S: MultiplexerStore> Multiplexer<S> {
+impl<S, P> Multiplexer<S, P>
+where
+    S: MultiplexerStore,
+    P: Send + Sync + 'static,
+{
     async fn run_subscriber(
         &self,
         subscriber_id: SubscriberId,
-        handler: ArcHandler,
-        event: &Event,
+        handler: ArcHandler<P>,
+        event: &Event<P>,
     ) -> std::result::Result<(), MultiplexerFailure> {
         let key = MultiplexerKey::new(event.id(), subscriber_id.clone());
         match self.store.is_completed(&key).await {
@@ -278,13 +293,17 @@ impl<S: MultiplexerStore> Multiplexer<S> {
     }
 }
 
-impl<S: MultiplexerStore> Handler for Multiplexer<S> {
+impl<S, P> Handler<P> for Multiplexer<S, P>
+where
+    S: MultiplexerStore,
+    P: Send + Sync + 'static,
+{
     fn id(&self) -> &str {
         &self.id
     }
 
-    async fn handle(&self, event: &Event) -> Result<()> {
-        let matching: Vec<(SubscriberId, ArcHandler)> = self
+    async fn handle(&self, event: &Event<P>) -> Result<()> {
+        let matching: Vec<(SubscriberId, ArcHandler<P>)> = self
             .routes
             .iter()
             .filter(|route| route.filter.matches(event))

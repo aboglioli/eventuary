@@ -1,4 +1,4 @@
-use std::marker::Unpin;
+use std::marker::{PhantomData, Unpin};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -7,52 +7,62 @@ use futures::Stream;
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::{Message, Reader};
+use crate::payload::Payload;
 
-pub struct TryMapReader<R, F> {
+pub struct TryMapReader<R, F, P = Payload, Q = Payload> {
     inner: R,
     f: F,
+    _payload: PhantomData<fn(P) -> Q>,
 }
 
-impl<R, F> TryMapReader<R, F> {
+impl<R, F, P, Q> TryMapReader<R, F, P, Q> {
     pub fn new(inner: R, f: F) -> Self {
-        Self { inner, f }
+        Self {
+            inner,
+            f,
+            _payload: PhantomData,
+        }
     }
 }
 
-impl<R, F> Reader for TryMapReader<R, F>
+impl<R, F, P, Q> Reader<Q> for TryMapReader<R, F, P, Q>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: 'static,
-    F: Fn(Event) -> Result<Event> + Clone + Unpin + Send + Sync + 'static,
+    F: Fn(Event<P>) -> Result<Event<Q>> + Clone + Unpin + Send + Sync + 'static,
+    P: Send + 'static,
+    Q: Send + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = R::Acker;
     type Cursor = R::Cursor;
-    type Stream = TryMapStream<R, F>;
+    type Stream = TryMapStream<R, F, P, Q>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
         Ok(TryMapStream {
             inner: Box::pin(inner),
             f: self.f.clone(),
+            _payload: PhantomData,
         })
     }
 }
 
-pub struct TryMapStream<R: Reader, F> {
+pub struct TryMapStream<R: Reader<P>, F, P = Payload, Q = Payload> {
     inner: Pin<Box<R::Stream>>,
     f: F,
+    _payload: PhantomData<fn(P) -> Q>,
 }
 
-impl<R, F> Stream for TryMapStream<R, F>
+impl<R, F, P, Q> Stream for TryMapStream<R, F, P, Q>
 where
-    R: Reader,
-    F: Fn(Event) -> Result<Event> + Unpin,
+    R: Reader<P>,
+    F: Fn(Event<P>) -> Result<Event<Q>> + Unpin,
 {
-    type Item = Result<Message<R::Acker, R::Cursor>>;
+    type Item = Result<Message<R::Acker, R::Cursor, Q>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {

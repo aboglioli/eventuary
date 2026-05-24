@@ -41,6 +41,7 @@ mod namespace_pattern;
 mod organization;
 pub mod partition;
 mod payload;
+mod payload_codec;
 mod serialization;
 mod snapshot;
 mod topic;
@@ -56,6 +57,9 @@ pub use metadata::Metadata;
 pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
+pub use payload_codec::{
+    EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
+};
 
 pub use io::partitionable_subscription::PartitionableSubscription;
 pub use io::position::{StartFrom, StartableSubscription, StopAt};

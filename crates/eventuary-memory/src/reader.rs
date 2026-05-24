@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use eventuary_core::io::acker::NoopAcker;
 use eventuary_core::io::{Message, NoCursor, Reader};
-use eventuary_core::{Event, Result, StartFrom, StartableSubscription};
+use eventuary_core::{Event, Payload, Result, StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemorySubscription {
@@ -20,26 +20,26 @@ impl StartableSubscription<NoCursor> for MemorySubscription {
     }
 }
 
-pub struct MemoryReader {
-    rx: Arc<Mutex<mpsc::Receiver<Event>>>,
+pub struct MemoryReader<P = Payload> {
+    rx: Arc<Mutex<mpsc::Receiver<Event<P>>>>,
 }
 
-impl MemoryReader {
-    pub fn new(rx: mpsc::Receiver<Event>) -> Self {
+impl<P> MemoryReader<P> {
+    pub fn new(rx: mpsc::Receiver<Event<P>>) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
         }
     }
 }
 
-pub struct InmemStream {
-    rx: Arc<Mutex<mpsc::Receiver<Event>>>,
+pub struct InmemStream<P = Payload> {
+    rx: Arc<Mutex<mpsc::Receiver<Event<P>>>>,
     subscription: MemorySubscription,
     delivered: usize,
 }
 
-impl Stream for InmemStream {
-    type Item = Result<Message<NoopAcker, NoCursor>>;
+impl<P: Send + 'static> Stream for InmemStream<P> {
+    type Item = Result<Message<NoopAcker, NoCursor, P>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -60,11 +60,11 @@ impl Stream for InmemStream {
     }
 }
 
-impl Reader for MemoryReader {
+impl<P: Send + 'static> Reader<P> for MemoryReader<P> {
     type Subscription = MemorySubscription;
     type Acker = NoopAcker;
     type Cursor = NoCursor;
-    type Stream = InmemStream;
+    type Stream = InmemStream<P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         Ok(InmemStream {
@@ -79,7 +79,7 @@ impl Reader for MemoryReader {
 mod tests {
     use super::*;
     use eventuary_core::Payload;
-    use eventuary_core::io::{BoxReader, ReaderExt};
+    use eventuary_core::io::{BoxReader, ReaderExt, Writer};
     use futures::StreamExt;
 
     fn subscription() -> MemorySubscription {
@@ -192,5 +192,43 @@ mod tests {
         msg2.ack().await.unwrap();
 
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn memory_backend_processes_typed_events_without_payload_serialization() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct UserUpdated {
+            user_id: String,
+        }
+
+        let (tx, rx) = mpsc::channel(1);
+        let writer = crate::writer::MemoryWriter::<UserUpdated>::new(tx);
+        let reader = MemoryReader::<UserUpdated>::new(rx);
+
+        writer
+            .write(
+                &Event::builder(
+                    "org",
+                    "/users",
+                    "user.updated",
+                    UserUpdated {
+                        user_id: "u-1".to_owned(),
+                    },
+                )
+                .unwrap()
+                .key("u-1")
+                .unwrap()
+                .build()
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let mut stream = reader
+            .read(MemorySubscription { limit: None })
+            .await
+            .unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg.event().payload().user_id, "u-1");
     }
 }

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::Handler;
-use crate::io::filter::EventFilter;
+use crate::io::filter::{EventFilter, Filter};
 use crate::io::handler::SubscriberId;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, NoCursor, Reader};

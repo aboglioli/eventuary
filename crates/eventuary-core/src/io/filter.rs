@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -7,91 +8,101 @@ use crate::event_key::EventKey;
 use crate::metadata::Metadata;
 use crate::namespace_pattern::NamespacePattern;
 use crate::organization::OrganizationId;
+use crate::payload::Payload;
 use crate::topic_pattern::TopicPattern;
 
-pub trait Filter: Send + Sync {
-    fn matches(&self, event: &Event) -> bool;
+pub trait Filter<P = Payload>: Send + Sync {
+    fn matches(&self, event: &Event<P>) -> bool;
 }
 
-impl<T: Filter + ?Sized> Filter for Arc<T> {
-    fn matches(&self, event: &Event) -> bool {
+impl<T: Filter<P> + ?Sized, P: Send + Sync> Filter<P> for Arc<T> {
+    fn matches(&self, event: &Event<P>) -> bool {
         (**self).matches(event)
     }
 }
 
-impl<T: Filter + ?Sized> Filter for Box<T> {
-    fn matches(&self, event: &Event) -> bool {
+impl<T: Filter<P> + ?Sized, P: Send + Sync> Filter<P> for Box<T> {
+    fn matches(&self, event: &Event<P>) -> bool {
         (**self).matches(event)
     }
 }
 
-pub type BoxFilter = Box<dyn Filter>;
-pub type ArcFilter = Arc<dyn Filter>;
+pub type BoxFilter<P = Payload> = Box<dyn Filter<P>>;
+pub type ArcFilter<P = Payload> = Arc<dyn Filter<P>>;
 
-pub trait FilterExt: Filter + Sized + 'static {
-    fn into_boxed(self) -> BoxFilter {
+pub trait FilterExt<P = Payload>: Filter<P> + Sized + 'static
+where
+    P: Send + Sync,
+{
+    fn into_boxed(self) -> BoxFilter<P> {
         Box::new(self)
     }
 
-    fn into_arced(self) -> ArcFilter {
+    fn into_arced(self) -> ArcFilter<P> {
         Arc::new(self)
     }
 
-    fn and<F: Filter + 'static>(self, other: F) -> AndFilter<Self, F> {
-        AndFilter(self, other)
+    fn and<F: Filter<P> + 'static>(self, other: F) -> AndFilter<Self, F, P>
+    where
+        P: 'static,
+    {
+        AndFilter(self, other, PhantomData)
     }
 
-    fn or<F: Filter + 'static>(self, other: F) -> OrFilter<Self, F> {
-        OrFilter(self, other)
+    fn or<F: Filter<P> + 'static>(self, other: F) -> OrFilter<Self, F, P>
+    where
+        P: 'static,
+    {
+        OrFilter(self, other, PhantomData)
     }
 
-    fn not(self) -> NotFilter<Self> {
-        NotFilter(self)
+    fn not(self) -> NotFilter<Self, P>
+    where
+        P: 'static,
+    {
+        NotFilter(self, PhantomData)
     }
 }
 
-impl<T: Filter + 'static> FilterExt for T {}
+impl<T: Filter<P> + Sized + 'static, P: Send + Sync + 'static> FilterExt<P> for T {}
 
-/// Logical AND of two filters; matches when both inner filters match.
 #[derive(Clone)]
-pub struct AndFilter<A: Filter, B: Filter>(pub A, pub B);
+pub struct AndFilter<A: Filter<P>, B: Filter<P>, P>(pub A, pub B, PhantomData<P>);
 
-impl<A: Filter, B: Filter> Filter for AndFilter<A, B> {
-    fn matches(&self, event: &Event) -> bool {
+impl<A: Filter<P>, B: Filter<P>, P: Send + Sync> Filter<P> for AndFilter<A, B, P> {
+    fn matches(&self, event: &Event<P>) -> bool {
         self.0.matches(event) && self.1.matches(event)
     }
 }
 
-/// Logical OR of two filters; matches when either inner filter matches.
 #[derive(Clone)]
-pub struct OrFilter<A: Filter, B: Filter>(pub A, pub B);
+pub struct OrFilter<A: Filter<P>, B: Filter<P>, P>(pub A, pub B, PhantomData<P>);
 
-impl<A: Filter, B: Filter> Filter for OrFilter<A, B> {
-    fn matches(&self, event: &Event) -> bool {
+impl<A: Filter<P>, B: Filter<P>, P: Send + Sync> Filter<P> for OrFilter<A, B, P> {
+    fn matches(&self, event: &Event<P>) -> bool {
         self.0.matches(event) || self.1.matches(event)
     }
 }
 
-/// Logical NOT of a filter; matches when the inner filter does not match.
 #[derive(Clone)]
-pub struct NotFilter<F: Filter>(pub F);
+pub struct NotFilter<F: Filter<P>, P>(pub F, PhantomData<P>);
 
-impl<F: Filter> Filter for NotFilter<F> {
-    fn matches(&self, event: &Event) -> bool {
+impl<F: Filter<P>, P: Send + Sync> Filter<P> for NotFilter<F, P> {
+    fn matches(&self, event: &Event<P>) -> bool {
         !self.0.matches(event)
     }
 }
 
-impl<F: Filter> Filter for Vec<F> {
-    fn matches(&self, event: &Event) -> bool {
+impl<F: Filter<P>, P: Send + Sync> Filter<P> for Vec<F> {
+    fn matches(&self, event: &Event<P>) -> bool {
         self.iter().any(|f| f.matches(event))
     }
 }
 
 pub struct AllFilter;
 
-impl Filter for AllFilter {
-    fn matches(&self, _: &Event) -> bool {
+impl<P: Send + Sync> Filter<P> for AllFilter {
+    fn matches(&self, _: &Event<P>) -> bool {
         true
     }
 }
@@ -117,8 +128,10 @@ impl EventFilter {
             ..Self::default()
         }
     }
+}
 
-    pub fn matches(&self, event: &Event) -> bool {
+impl<P: Send + Sync> Filter<P> for EventFilter {
+    fn matches(&self, event: &Event<P>) -> bool {
         if let Some(organization) = self.organization.as_ref()
             && event.organization() != organization
         {
@@ -158,20 +171,14 @@ impl EventFilter {
     }
 }
 
-impl Filter for EventFilter {
-    fn matches(&self, event: &Event) -> bool {
-        EventFilter::matches(self, event)
-    }
-}
-
-impl Filter for crate::TopicPattern {
-    fn matches(&self, event: &crate::Event) -> bool {
+impl<P: Send + Sync> Filter<P> for crate::TopicPattern {
+    fn matches(&self, event: &Event<P>) -> bool {
         self.matches_topic(event.topic())
     }
 }
 
-impl Filter for crate::NamespacePattern {
-    fn matches(&self, event: &crate::Event) -> bool {
+impl<P: Send + Sync> Filter<P> for crate::NamespacePattern {
+    fn matches(&self, event: &Event<P>) -> bool {
         self.matches_namespace(event.namespace())
     }
 }
@@ -182,10 +189,15 @@ mod tests {
 
     use crate::Namespace;
     use crate::Topic;
-    use crate::payload::Payload;
 
     fn ev(topic: &str, namespace: &str) -> Event {
-        Event::create("org", namespace, topic, Payload::from_string("p")).unwrap()
+        Event::create(
+            "org",
+            namespace,
+            topic,
+            crate::payload::Payload::from_string("p"),
+        )
+        .unwrap()
     }
 
     struct AllowAll;
@@ -298,13 +310,15 @@ mod tests {
     #[test]
     fn vec_filter_is_or() {
         struct MatchTopic(&'static str);
+
         impl Filter for MatchTopic {
             fn matches(&self, e: &Event) -> bool {
                 e.topic().as_str() == self.0
             }
         }
 
-        let filters: Vec<MatchTopic> = vec![MatchTopic("a"), MatchTopic("b")];
+        let filters = vec![MatchTopic("a"), MatchTopic("b")];
+
         assert!(filters.matches(&ev("a", "/x")));
         assert!(filters.matches(&ev("b", "/x")));
         assert!(!filters.matches(&ev("c", "/x")));
@@ -340,8 +354,13 @@ mod tests {
     #[test]
     fn topic_pattern_is_a_filter_through_io() {
         let pattern = TopicPattern::exact(Topic::new("invoice.created").unwrap());
-        let event =
-            Event::create("org", "/x", "invoice.created", Payload::from_string("p")).unwrap();
+        let event = Event::create(
+            "org",
+            "/x",
+            "invoice.created",
+            crate::payload::Payload::from_string("p"),
+        )
+        .unwrap();
         assert!(Filter::matches(&pattern, &event));
     }
 
@@ -352,7 +371,7 @@ mod tests {
             "org",
             "/billing/invoices",
             "invoice.created",
-            Payload::from_string("p"),
+            crate::payload::Payload::from_string("p"),
         )
         .unwrap();
         assert!(Filter::matches(&pattern, &event));

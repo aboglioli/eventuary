@@ -41,15 +41,16 @@ impl<H> RateLimitHandler<H> {
     }
 }
 
-impl<H> Handler for RateLimitHandler<H>
+impl<H, P> Handler<P> for RateLimitHandler<H>
 where
-    H: Handler,
+    H: Handler<P>,
+    P: Send + Sync,
 {
     fn id(&self) -> &str {
         self.inner.id()
     }
 
-    async fn handle(&self, event: &Event) -> Result<()> {
+    async fn handle(&self, event: &Event<P>) -> Result<()> {
         let mut guard = self.next_allowed.lock().await;
         if let Some(deadline) = *guard {
             tokio::time::sleep_until(deadline).await;

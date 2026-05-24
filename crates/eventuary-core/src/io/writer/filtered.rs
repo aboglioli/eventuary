@@ -13,25 +13,20 @@ impl<W, F> FilteredWriter<W, F> {
     }
 }
 
-impl<W, F> Writer for FilteredWriter<W, F>
+impl<W, F, P> Writer<P> for FilteredWriter<W, F>
 where
-    W: Writer,
-    F: Filter,
+    W: Writer<P>,
+    F: Filter<P>,
+    P: Clone + Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         if !self.filter.matches(event) {
             return Ok(());
         }
         self.inner.write(event).await
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
-        if events.iter().all(|event| self.filter.matches(event)) {
-            if events.is_empty() {
-                return Ok(());
-            }
-            return self.inner.write_all(events).await;
-        }
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let filtered = events
             .iter()
             .filter(|event| self.filter.matches(event))
@@ -52,7 +47,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::payload::Payload;
+    use crate::payload::Payload as WirePayload;
 
     #[derive(Clone, Default)]
     struct CapturingWriter {
@@ -92,7 +87,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, WirePayload::from_string("p")).unwrap()
     }
 
     #[tokio::test]

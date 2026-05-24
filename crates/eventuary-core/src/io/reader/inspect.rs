@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -8,61 +9,71 @@ use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::acker::NackContext;
 use crate::io::{Acker, Message, Reader};
+use crate::payload::Payload;
 
-pub trait InspectHooks: Send + Sync {
-    fn on_deliver(&self, _event: &Event) {}
-    fn on_ack(&self, _event: &Event) {}
-    fn on_nack(&self, _event: &Event) {}
-    fn on_nack_with(&self, event: &Event, _context: &NackContext) {
+pub trait InspectHooks<P = Payload>: Send + Sync {
+    fn on_deliver(&self, _event: &Event<P>) {}
+    fn on_ack(&self, _event: &Event<P>) {}
+    fn on_nack(&self, _event: &Event<P>) {}
+    fn on_nack_with(&self, event: &Event<P>, _context: &NackContext) {
         self.on_nack(event);
     }
     fn on_error(&self, _error: &Error) {}
 }
 
-pub struct InspectReader<R, H> {
+pub struct InspectReader<R, H, P = Payload> {
     inner: R,
     hooks: Arc<H>,
+    _payload: PhantomData<fn(P)>,
 }
 
-impl<R, H> InspectReader<R, H> {
+impl<R, H, P> InspectReader<R, H, P> {
     pub fn new(inner: R, hooks: H) -> Self {
         Self {
             inner,
             hooks: Arc::new(hooks),
+            _payload: PhantomData,
         }
     }
 }
 
-impl<R, H> Reader for InspectReader<R, H>
+impl<R, H, P> Reader<P> for InspectReader<R, H, P>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: 'static,
-    H: InspectHooks + 'static,
+    H: InspectHooks<P> + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
-    type Acker = InspectAcker<R::Acker, H>;
+    type Acker = InspectAcker<R::Acker, H, P>;
     type Cursor = R::Cursor;
-    type Stream = InspectStream<R, H>;
+    type Stream = InspectStream<R, H, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
         Ok(InspectStream {
             inner: Box::pin(inner),
             hooks: Arc::clone(&self.hooks),
+            _payload: PhantomData,
         })
     }
 }
 
-pub struct InspectAcker<A: Acker, H: InspectHooks> {
+pub struct InspectAcker<A: Acker, H, P = Payload> {
     inner: A,
     hooks: Arc<H>,
-    event: Arc<Event>,
+    event: Arc<Event<P>>,
 }
 
-impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
+impl<A, H, P> Acker for InspectAcker<A, H, P>
+where
+    A: Acker,
+    H: InspectHooks<P>,
+    P: Send + Sync,
+{
     async fn ack(&self) -> Result<()> {
         self.hooks.on_ack(&self.event);
         self.inner.ack().await
@@ -79,18 +90,20 @@ impl<A: Acker, H: InspectHooks> Acker for InspectAcker<A, H> {
     }
 }
 
-pub struct InspectStream<R: Reader, H> {
+pub struct InspectStream<R: Reader<P>, H, P = Payload> {
     inner: Pin<Box<R::Stream>>,
     hooks: Arc<H>,
+    _payload: PhantomData<fn(P)>,
 }
 
-impl<R, H> Stream for InspectStream<R, H>
+impl<R, H, P> Stream for InspectStream<R, H, P>
 where
-    R: Reader,
+    R: Reader<P>,
     R::Acker: Send + Sync,
-    H: InspectHooks,
+    H: InspectHooks<P>,
+    P: Clone + Send + Sync,
 {
-    type Item = Result<Message<InspectAcker<R::Acker, H>, R::Cursor>>;
+    type Item = Result<Message<InspectAcker<R::Acker, H, P>, R::Cursor, P>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {

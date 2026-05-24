@@ -84,10 +84,10 @@ impl WeightedState {
     }
 }
 
-impl<R1, R2> Reader for MergeReader<R1, R2>
+impl<R1, R2, P> Reader<P> for MergeReader<R1, R2>
 where
-    R1: Reader + Send + Sync + 'static,
-    R2: Reader + Send + Sync + 'static,
+    R1: Reader<P> + Send + Sync + 'static,
+    R2: Reader<P> + Send + Sync + 'static,
     R1::Subscription: Send + 'static,
     R2::Subscription: Send + 'static,
     R1::Acker: Send + Sync + 'static,
@@ -96,11 +96,12 @@ where
     R2::Cursor: Cursor + Send + Sync + 'static,
     R1::Stream: Send + 'static,
     R2::Stream: Send + 'static,
+    P: Send + 'static,
 {
     type Subscription = (R1::Subscription, R2::Subscription);
     type Acker = MergeAcker<R1::Acker, R2::Acker>;
     type Cursor = MergeCursor<R1::Cursor, R2::Cursor>;
-    type Stream = Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, Self::Cursor>>> + Send>>;
+    type Stream = Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, Self::Cursor, P>>> + Send>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let (sub1, sub2) = subscription;
