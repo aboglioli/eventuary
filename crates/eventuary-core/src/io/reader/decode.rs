@@ -21,8 +21,8 @@ pub struct DecodeReader<R, C, P> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecodeErrorDisposition {
     Surface,
-    AckInner,
     #[default]
+    AckInner,
     NackInner,
 }
 
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_reader_nacks_inner_on_decode_failure_by_default() {
+    async fn decode_reader_acks_inner_on_decode_failure_by_default() {
         let acker = CountingAcker::default();
         let raw = {
             struct TypedVecReader {
@@ -391,6 +391,63 @@ mod tests {
             err,
             Error::InvalidPayload(_) | Error::Serialization(_)
         ));
+        assert_eq!(acker.ack_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            acker.nack_count.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn decode_reader_can_nack_inner_on_decode_failure() {
+        let acker = CountingAcker::default();
+        let raw = {
+            struct TypedVecReader {
+                events: Vec<Message<CountingAcker, NoCursor, WirePayload>>,
+            }
+            impl Reader<WirePayload> for TypedVecReader {
+                type Subscription = TestSub;
+                type Acker = CountingAcker;
+                type Cursor = NoCursor;
+                type Stream = Pin<
+                    Box<
+                        dyn Stream<Item = Result<Message<CountingAcker, NoCursor, WirePayload>>>
+                            + Send,
+                    >,
+                >;
+
+                async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
+                    let items: Vec<Result<Message<CountingAcker, NoCursor, WirePayload>>> =
+                        self.events.clone().into_iter().map(Ok).collect();
+                    Ok(Box::pin(stream::iter(items)))
+                }
+            }
+            TypedVecReader {
+                events: vec![Message::new(
+                    Event::create(
+                        "acme",
+                        "/users",
+                        "user.updated",
+                        WirePayload::from_string("bad"),
+                    )
+                    .unwrap(),
+                    acker.clone(),
+                    NoCursor,
+                )],
+            }
+        };
+
+        let reader =
+            DecodeReader::<_, _, UserUpdated>::from_payload_codec(raw, crate::JsonPayloadCodec)
+                .with_disposition(DecodeErrorDisposition::NackInner);
+        let mut stream = reader.read(TestSub).await.unwrap();
+        let err = stream.next().await.unwrap().unwrap_err();
+
+        assert!(matches!(
+            err,
+            Error::InvalidPayload(_) | Error::Serialization(_)
+        ));
+        assert_eq!(acker.ack_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
             acker.nack_count.load(std::sync::atomic::Ordering::SeqCst),
             1
