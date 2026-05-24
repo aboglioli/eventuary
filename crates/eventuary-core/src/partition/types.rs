@@ -227,6 +227,12 @@ mod tests {
     }
 
     #[test]
+    fn partition_strategy_display_matches_as_str() {
+        let strategy = PartitionStrategy::new("event_key_or_id:fnv1a64:v1").unwrap();
+        assert_eq!(strategy.to_string(), strategy.as_str());
+    }
+
+    #[test]
     fn partition_selection_default_is_all() {
         assert_eq!(PartitionSelection::default(), PartitionSelection::All);
     }
