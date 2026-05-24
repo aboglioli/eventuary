@@ -3,7 +3,9 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use eventuary_core::io::Writer;
-use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver};
+use eventuary_core::partition::{
+    PartitionHash, PartitionHasher, PartitionKey, PartitionKeyResolver, PartitionStrategy,
+};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::database::SqliteConn;
@@ -101,14 +103,13 @@ impl SqliteWriter {
             } => {
                 let partition_key = key_resolver.partition_key(event)?;
                 let partition_hash = hasher.hash(&partition_key);
-                let count = partition_count.get();
-                let partition_id = (partition_hash.get() % count as u64) as i64;
-                let partition_strategy = hasher.strategy().to_owned();
+                let partition = hasher.partition_for(&partition_key, *partition_count);
+                let partition_strategy = PartitionStrategy::new(hasher.strategy())?;
                 Ok(PartitionData {
-                    partition_key: Some(partition_key.as_str().to_owned()),
-                    partition_hash: Some(partition_hash.to_sql_i64()),
-                    partition_id: Some(partition_id),
-                    partition_count: Some(count as i64),
+                    partition_key: Some(partition_key),
+                    partition_hash: Some(partition_hash),
+                    partition_id: Some(partition.id() as i64),
+                    partition_count: Some(partition.count() as i64),
                     partition_strategy: Some(partition_strategy),
                 })
             }
@@ -158,11 +159,11 @@ impl Writer for SqliteWriter {
 
 #[derive(Default)]
 struct PartitionData {
-    partition_key: Option<String>,
-    partition_hash: Option<i64>,
+    partition_key: Option<PartitionKey>,
+    partition_hash: Option<PartitionHash>,
     partition_id: Option<i64>,
     partition_count: Option<i64>,
-    partition_strategy: Option<String>,
+    partition_strategy: Option<PartitionStrategy>,
 }
 
 fn insert_event(
@@ -193,11 +194,11 @@ fn insert_event(
             serialized.parent_id.map(|id| id.to_string()),
             serialized.correlation_id,
             serialized.causation_id,
-            pd.partition_key,
-            pd.partition_hash,
+            pd.partition_key.as_ref().map(|k| k.as_str()),
+            pd.partition_hash.map(|h| h.to_sql_i64()),
             pd.partition_id,
             pd.partition_count,
-            pd.partition_strategy,
+            pd.partition_strategy.as_ref().map(|s| s.as_str()),
         ],
     )
     .map_err(|e| Error::Store(e.to_string()))?;
