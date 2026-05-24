@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +11,7 @@ use tokio::sync::mpsc;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
+use eventuary_core::partition::PartitionSelection;
 use eventuary_core::{
     Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
     StartableSubscription, StopAt, TopicPattern,
@@ -19,16 +19,6 @@ use eventuary_core::{
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-pub enum SqlitePartitionSelection {
-    #[default]
-    All,
-    One {
-        count: NonZeroU16,
-        id: u16,
-    },
-}
 
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
@@ -65,9 +55,9 @@ pub struct SqliteSubscription {
     pub start: StartFrom<SqliteCursor>,
     pub stop_at: StopAt<SqliteCursor>,
     pub filter: EventFilter,
+    pub partitions: PartitionSelection,
     pub batch_size: Option<usize>,
     pub limit: Option<usize>,
-    pub partitions: SqlitePartitionSelection,
 }
 
 impl Default for SqliteSubscription {
@@ -78,7 +68,7 @@ impl Default for SqliteSubscription {
             filter: EventFilter::default(),
             batch_size: None,
             limit: None,
-            partitions: SqlitePartitionSelection::All,
+            partitions: PartitionSelection::default(),
         }
     }
 }
@@ -422,7 +412,7 @@ struct FetchBatchParams<'a> {
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
     filter: &'a EventFilter,
-    partitions: &'a SqlitePartitionSelection,
+    partitions: &'a PartitionSelection,
 }
 
 async fn fetch_batch(
@@ -491,14 +481,13 @@ async fn fetch_batch(
             params.push(Value::Text(ts.clone()));
             idx += 1;
         }
-        if let SqlitePartitionSelection::One { count, id } = partitions {
-            sql.push_str(&format!(
-                " AND partition_count = ?{idx} AND partition_id = ?{}",
-                idx + 1
-            ));
-            params.push(Value::Integer(count.get() as i64));
-            params.push(Value::Integer(id as i64));
-            idx += 2;
+        if let PartitionSelection::One(partition) = partitions {
+            sql.push_str(&format!(" AND partition_count = ?{idx}"));
+            params.push(Value::Integer(partition.count() as i64));
+            idx += 1;
+            sql.push_str(&format!(" AND partition_id = ?{idx}"));
+            params.push(Value::Integer(partition.id() as i64));
+            idx += 1;
         }
         sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ?{idx}"));
         params.push(Value::Integer(take as i64));
@@ -613,7 +602,8 @@ mod tests {
     use crate::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
     use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder, Reader, Writer};
     use eventuary_core::partition::{
-        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
+        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionHasher,
+        PartitionKey,
     };
     use eventuary_core::{Event, Payload, StartFrom, StopAt};
 
@@ -744,10 +734,10 @@ mod tests {
         let subscription = SqliteSubscription {
             start: StartFrom::Earliest,
             stop_at: StopAt::CurrentEnd,
-            partitions: SqlitePartitionSelection::One {
-                count: NonZeroU16::new(PARTITION_COUNT).unwrap(),
-                id: chosen_partition,
-            },
+            partitions: PartitionSelection::One(
+                Partition::new(chosen_partition, NonZeroU16::new(PARTITION_COUNT).unwrap())
+                    .unwrap(),
+            ),
             ..SqliteSubscription::default()
         };
         let mut stream = reader.read(subscription).await.unwrap();
