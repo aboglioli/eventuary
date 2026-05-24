@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::io::NoCursor;
+use crate::partition::Partition;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum StartFrom<C = NoCursor> {
@@ -19,9 +20,9 @@ pub enum StopAt<C = NoCursor> {
     Cursor(C),
 }
 
-/// Marker for subscriptions that can be told to resume from a cursor.
-/// `CheckpointReader` calls `with_start(StartFrom::After(cursor))` on the
-/// inner subscription when it has a stored checkpoint.
+/// Capability trait for subscriptions that can be told to resume from a
+/// cursor. `CheckpointReader` calls `with_start(StartFrom::After(cursor))`
+/// on the inner subscription when it has a stored checkpoint.
 pub trait StartableSubscription<C>: Clone + Send + 'static {
     fn with_start(self, start: StartFrom<C>) -> Self;
 
@@ -47,6 +48,16 @@ pub trait StartableSubscription<C>: Clone + Send + 'static {
             None => self,
         }
     }
+}
+
+/// Capability trait for subscriptions that can be restricted to a single
+/// partition. `CoordinatedReader` calls `with_partition(lease.partition)` on
+/// the inner subscription before spawning each per-lease worker.
+///
+/// Sibling of [`StartableSubscription`]: same `Self -> Self` builder shape,
+/// same role (capability marker the reader composes against).
+pub trait PartitionableSubscription<C>: StartableSubscription<C> + Clone + Send + 'static {
+    fn with_partition(self, partition: Partition) -> Self;
 }
 
 #[cfg(test)]
@@ -140,5 +151,33 @@ mod tests {
         let resumed = sub.with_starts(vec![StartFrom::Earliest, StartFrom::Latest]);
 
         assert_eq!(resumed.start, StartFrom::Latest);
+    }
+
+    use crate::io::NoCursor;
+
+    #[derive(Clone)]
+    struct PartitionableStub;
+
+    impl StartableSubscription<NoCursor> for PartitionableStub {
+        fn with_start(self, _start: StartFrom<NoCursor>) -> Self {
+            self
+        }
+    }
+
+    impl PartitionableSubscription<NoCursor> for PartitionableStub {
+        fn with_partition(self, _partition: Partition) -> Self {
+            self
+        }
+    }
+
+    fn _accepts_partitionable<T, C>(_sub: T)
+    where
+        T: PartitionableSubscription<C>,
+    {
+    }
+
+    #[test]
+    fn partitionable_subscription_is_super_trait_of_startable() {
+        _accepts_partitionable(PartitionableStub);
     }
 }

@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 
-use eventuary_core::Partition;
-use eventuary_core::io::reader::CheckpointScope;
-use eventuary_core::io::{Generation, OwnerId, PartitionCoordinator, PartitionLease};
-use eventuary_core::{Error, Result};
+use eventuary_core::io::OwnerId;
+use eventuary_core::io::reader::{
+    CheckpointScope, Generation, PartitionCoordinator, PartitionLease,
+};
+use eventuary_core::{Error, Partition, Result};
 
 use crate::database::SqliteConn;
 use crate::reader::SqliteCursor;
@@ -357,7 +358,8 @@ mod tests {
     use std::num::NonZeroU16;
 
     use super::*;
-    use eventuary_core::io::{ConsumerGroupId, OwnerId, PartitionCoordinator, StreamId};
+    use eventuary_core::io::reader::PartitionCoordinator;
+    use eventuary_core::io::{ConsumerGroupId, OwnerId, StreamId};
 
     use crate::database::SqliteDatabase;
 

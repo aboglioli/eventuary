@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, Filter, JsonCursorCodec, Message, Reader};
-use eventuary_core::partition::PartitionSelection;
+use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
     Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
     SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
@@ -82,6 +82,17 @@ impl StartableSubscription<PgCursor> for PgSubscription {
 impl PartitionableSubscription<PgCursor> for PgSubscription {
     fn with_partition(mut self, partition: Partition) -> Self {
         self.partitions = PartitionSelection::One(partition);
+        self
+    }
+}
+
+impl PgSubscription {
+    /// Restrict this subscription to a validated group of partitions sharing
+    /// the same `partition_count`. The reader emits a single SQL query per
+    /// poll using `partition_id = ANY($::int[])` instead of one query per
+    /// partition.
+    pub fn with_partitions(mut self, group: PartitionGroup) -> Self {
+        self.partitions = PartitionSelection::Many(group);
         self
     }
 }
@@ -180,7 +191,7 @@ impl Reader for PgReader {
             .clamp(1, 1000);
         let filter = subscription.filter.clone();
         let limit = subscription.limit;
-        let partitions = subscription.partitions;
+        let partitions = subscription.partitions.clone();
 
         let (mut after_seq, lower_bound_ts) =
             match resolve_initial_position(&pool, &events_relation, &subscription).await {
@@ -444,12 +455,22 @@ async fn fetch_batch(
         sql.push_str(&format!(" AND timestamp >= ${bind_index}::timestamptz"));
         bind_index += 1;
     }
-    if let PartitionSelection::One(_) = partitions {
-        sql.push_str(&format!(
-            " AND partition_count = ${bind_index} AND partition_id = ${}",
-            bind_index + 1
-        ));
-        bind_index += 2;
+    match partitions {
+        PartitionSelection::All => {}
+        PartitionSelection::One(_) => {
+            sql.push_str(&format!(
+                " AND partition_count = ${bind_index} AND partition_id = ${}",
+                bind_index + 1
+            ));
+            bind_index += 2;
+        }
+        PartitionSelection::Many(_) => {
+            sql.push_str(&format!(
+                " AND partition_count = ${bind_index} AND partition_id = ANY(${}::int[])",
+                bind_index + 1
+            ));
+            bind_index += 2;
+        }
     }
     sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ${bind_index}"));
 
@@ -471,9 +492,17 @@ async fn fetch_batch(
     if let Some(ts) = lower_bound_ts {
         q = q.bind(ts.to_rfc3339());
     }
-    if let PartitionSelection::One(partition) = partitions {
-        q = q.bind(partition.count() as i32);
-        q = q.bind(partition.id() as i32);
+    match partitions {
+        PartitionSelection::All => {}
+        PartitionSelection::One(partition) => {
+            q = q.bind(partition.count() as i32);
+            q = q.bind(partition.id() as i32);
+        }
+        PartitionSelection::Many(group) => {
+            q = q.bind(group.count() as i32);
+            let ids: Vec<i32> = group.partitions().iter().map(|p| p.id() as i32).collect();
+            q = q.bind(ids);
+        }
     }
     q = q.bind(take as i64);
 
@@ -549,6 +578,27 @@ mod tests {
                 assert_eq!(p.count(), 8);
             }
             _ => panic!("expected PartitionSelection::One"),
+        }
+    }
+
+    #[test]
+    fn pg_subscription_with_partitions_sets_partition_selection_many() {
+        let count = NonZeroU16::new(8).unwrap();
+        let group = PartitionGroup::new(vec![
+            Partition::new(1, count).unwrap(),
+            Partition::new(4, count).unwrap(),
+            Partition::new(7, count).unwrap(),
+        ])
+        .unwrap();
+        let sub = PgSubscription::default().with_partitions(group);
+        match sub.partitions {
+            PartitionSelection::Many(g) => {
+                assert_eq!(g.len(), 3);
+                assert_eq!(g.count(), 8);
+                let ids: Vec<u16> = g.partitions().iter().map(|p| p.id()).collect();
+                assert_eq!(ids, vec![1, 4, 7]);
+            }
+            _ => panic!("expected PartitionSelection::Many"),
         }
     }
 

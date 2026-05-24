@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, Filter, JsonCursorCodec, Message, Reader};
-use eventuary_core::partition::PartitionSelection;
+use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
     Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
     SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
@@ -83,6 +83,17 @@ impl StartableSubscription<SqliteCursor> for SqliteSubscription {
 impl PartitionableSubscription<SqliteCursor> for SqliteSubscription {
     fn with_partition(mut self, partition: Partition) -> Self {
         self.partitions = PartitionSelection::One(partition);
+        self
+    }
+}
+
+impl SqliteSubscription {
+    /// Restrict this subscription to a validated group of partitions sharing
+    /// the same `partition_count`. The reader emits a single SQL query per
+    /// poll using `partition_id IN (?, ?, ...)` instead of one query per
+    /// partition.
+    pub fn with_partitions(mut self, group: PartitionGroup) -> Self {
+        self.partitions = PartitionSelection::Many(group);
         self
     }
 }
@@ -171,7 +182,7 @@ impl Reader for SqliteReader {
             .clamp(1, 1000);
         let filter = subscription.filter.clone();
         let limit = subscription.limit;
-        let partitions = subscription.partitions;
+        let partitions = subscription.partitions.clone();
         let (tx, rx) = mpsc::channel(64);
 
         let (mut after_seq, lower_bound_ts) =
@@ -455,7 +466,7 @@ async fn fetch_batch(
         _ => None,
     });
     let ts_str = lower_bound_ts.map(|t| t.to_rfc3339());
-    let partitions = *partitions;
+    let partitions = partitions.clone();
 
     tokio::task::spawn_blocking(move || {
         let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
@@ -497,13 +508,32 @@ async fn fetch_batch(
             params.push(Value::Text(ts.clone()));
             idx += 1;
         }
-        if let PartitionSelection::One(partition) = partitions {
-            sql.push_str(&format!(" AND partition_count = ?{idx}"));
-            params.push(Value::Integer(partition.count() as i64));
-            idx += 1;
-            sql.push_str(&format!(" AND partition_id = ?{idx}"));
-            params.push(Value::Integer(partition.id() as i64));
-            idx += 1;
+        match &partitions {
+            PartitionSelection::All => {}
+            PartitionSelection::One(partition) => {
+                sql.push_str(&format!(" AND partition_count = ?{idx}"));
+                params.push(Value::Integer(partition.count() as i64));
+                idx += 1;
+                sql.push_str(&format!(" AND partition_id = ?{idx}"));
+                params.push(Value::Integer(partition.id() as i64));
+                idx += 1;
+            }
+            PartitionSelection::Many(group) => {
+                sql.push_str(&format!(" AND partition_count = ?{idx}"));
+                params.push(Value::Integer(group.count() as i64));
+                idx += 1;
+                let placeholders: Vec<String> = (0..group.partitions().len())
+                    .map(|i| format!("?{}", idx + i))
+                    .collect();
+                sql.push_str(&format!(
+                    " AND partition_id IN ({})",
+                    placeholders.join(",")
+                ));
+                for partition in group.partitions() {
+                    params.push(Value::Integer(partition.id() as i64));
+                }
+                idx += group.partitions().len();
+            }
         }
         sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ?{idx}"));
         params.push(Value::Integer(take as i64));
@@ -618,8 +648,8 @@ mod tests {
     use crate::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
     use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder, Reader, Writer};
     use eventuary_core::partition::{
-        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionHasher,
-        PartitionKey,
+        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionGroup,
+        PartitionHasher, PartitionKey,
     };
     use eventuary_core::{Event, PartitionableSubscription, Payload, StartFrom, StopAt};
 
@@ -634,6 +664,25 @@ mod tests {
                 assert_eq!(p.count(), 8);
             }
             _ => panic!("expected PartitionSelection::One"),
+        }
+    }
+
+    #[test]
+    fn sqlite_subscription_with_partitions_sets_partition_selection_many() {
+        let count = NonZeroU16::new(8).unwrap();
+        let group = PartitionGroup::new(vec![
+            Partition::new(2, count).unwrap(),
+            Partition::new(5, count).unwrap(),
+        ])
+        .unwrap();
+        let sub = SqliteSubscription::default().with_partitions(group);
+        match sub.partitions {
+            PartitionSelection::Many(g) => {
+                assert_eq!(g.len(), 2);
+                let ids: Vec<u16> = g.partitions().iter().map(|p| p.id()).collect();
+                assert_eq!(ids, vec![2, 5]);
+            }
+            _ => panic!("expected PartitionSelection::Many"),
         }
     }
 
@@ -789,6 +838,81 @@ mod tests {
                 partition_for_key(key),
                 chosen_partition,
                 "event key {key} maps to wrong partition"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_many_filters_to_selected_partitions() {
+        let db = SqliteDatabase::open_in_memory().unwrap();
+        let config = SqliteWriterConfig {
+            partitioning: SqlitePartitioningConfig::inline(
+                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..SqliteWriterConfig::default()
+        };
+        let writer = SqliteWriter::new_with_config(db.conn(), config);
+
+        let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
+        for key in &keys {
+            writer.write(&event_with_key(key)).await.unwrap();
+        }
+
+        let count = NonZeroU16::new(PARTITION_COUNT).unwrap();
+        let mut populated: Vec<u16> = keys
+            .iter()
+            .map(|k| partition_for_key(k))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        populated.truncate(2);
+        assert!(
+            populated.len() >= 2,
+            "fixture must populate at least 2 distinct partitions"
+        );
+
+        let selected: std::collections::HashSet<u16> = populated.iter().copied().collect();
+        let expected_len = keys
+            .iter()
+            .copied()
+            .filter(|k| selected.contains(&partition_for_key(k)))
+            .count();
+
+        let group = PartitionGroup::new(
+            populated
+                .iter()
+                .map(|id| Partition::new(*id, count).unwrap())
+                .collect(),
+        )
+        .unwrap();
+
+        let reader = SqliteReader::new(db.conn(), fast_config());
+        let subscription = SqliteSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            ..SqliteSubscription::default()
+        }
+        .with_partitions(group);
+        let mut stream = reader.read(subscription).await.unwrap();
+
+        let mut received: Vec<String> = Vec::new();
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
+            let key = msg
+                .event()
+                .key()
+                .map(|k| k.as_str().to_owned())
+                .unwrap_or_default();
+            msg.acker().ack().await.unwrap();
+            received.push(key);
+        }
+
+        assert_eq!(received.len(), expected_len);
+        for key in &received {
+            assert!(
+                selected.contains(&partition_for_key(key)),
+                "event key {key} maps to partition outside selected group"
             );
         }
     }

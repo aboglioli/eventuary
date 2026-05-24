@@ -1,7 +1,6 @@
+use super::{PartitionKey, PartitionKeyResolver};
 use crate::error::Result;
 use crate::event::Event;
-use crate::partition::PartitionKeyResolver;
-use crate::partition::types::PartitionKey;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrganizationPartitionKeyResolver;

@@ -246,13 +246,30 @@ key set, metadata subset, `end_at`); positional/cursor concerns live on
 the subscription itself.
 
 - `MemorySubscription { filter, limit }`
-- `SqliteSubscription { start: StartFrom<SqliteCursor>, stop_at: StopAt<SqliteCursor>, filter, batch_size, limit }`
-- `PgSubscription { start: StartFrom<PgCursor>, stop_at: StopAt<PgCursor>, filter, batch_size, limit }`
+- `SqliteSubscription { start: StartFrom<SqliteCursor>, stop_at: StopAt<SqliteCursor>, filter, partitions: PartitionSelection, batch_size, limit }`
+- `PgSubscription { start: StartFrom<PgCursor>, stop_at: StopAt<PgCursor>, filter, partitions: PartitionSelection, batch_size, limit }`
 - `KafkaSubscription { topics, consumer_group_id, start_from, event_filter, limit }`
 - `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, event_filter, limit }`
 
 SQL backends push the org / topic / namespace / start-from filters into the
 SQL query to prune at the DB; Kafka/SQS apply them in the consumer loop.
+
+`PartitionSelection` controls which partitions a SQL subscription fetches:
+
+- `All` (default) — no `partition_id` filter.
+- `One(Partition)` — single partition; set via `PartitionableSubscription::with_partition(p)`.
+- `Many(PartitionGroup)` — set of partitions sharing the same `partition_count`;
+  set via the backend-specific `with_partitions(group)` inherent method.
+  `PartitionGroup::new(Vec<Partition>)` validates non-empty + uniform count.
+  Postgres emits `partition_id = ANY($::int[])`; SQLite emits
+  `partition_id IN (?, ?, ...)`. Single round-trip per poll vs N for
+  single-partition fan-out.
+
+`CoordinatedReader` still uses one-worker-per-lease (each worker reads with
+`PartitionSelection::One(p)`) so fenced checkpointing stays simple. `Many`
+is for callers that compose a partition-aware reader without coordination,
+or for future backends where multi-partition fetch maps naturally to the
+protocol (e.g., Kafka consumer assignments).
 
 The `StartableSubscription<C>` trait abstracts `start: StartFrom<C>` so
 `CheckpointReader` can call `subscription.with_start(StartFrom::After(cursor))`
@@ -929,6 +946,59 @@ Worth knowing when changing the codebase:
   small, lets the reader decide rebalance policy (target count, slack,
   release ordering), and makes `MemoryPartitionCoordinator` trivial to
   implement for tests.
+- **`CoordinatedReader` spawns one worker per claimed partition.** Each
+  worker calls `inner_reader.read(...)` with `PartitionSelection::One(p)`
+  set by `PartitionableSubscription::with_partition`, so N owned
+  partitions on one instance issue N polling loops and N SQL queries per
+  cycle. Trade: each worker holds its own `PartitionLease<C>` cleanly so
+  `coordinator.checkpoint(&lease, cursor)` fencing stays per-partition
+  without demuxing a shared stream. `PartitionSelection::Many(group)`
+  exists at the subscription layer but is not used by `CoordinatedReader`
+  in this cut — switching to a shared inner reader would require routing
+  each delivered message back to its lease before checkpoint, which is
+  deferred until DB load is shown to be the bottleneck.
+- **`PartitionSelection::Many(PartitionGroup)` is a subscription-layer
+  capability, not a coordinator capability.** `PartitionGroup::new`
+  validates the set is non-empty and that every partition shares the
+  same `count`, so SQL can emit a single `partition_count = $ AND
+  partition_id = ANY(...)` predicate. Useful for callers that compose a
+  partition-aware reader without `CoordinatedReader` (e.g., a single
+  instance reading a fixed lane set), and a natural fit for backends
+  whose native protocol already speaks in multi-partition assignments
+  (planned: Kafka). Not threaded through `PartitionableSubscription`
+  because that trait is the contract `CoordinatedReader` relies on
+  (`with_partition` returns one partition per worker).
+- **`PartitionCoordinator` lives with `CoordinatedReader`, not in its own
+  module.** Same pattern as `CheckpointStore` in `io/reader/checkpoint.rs`,
+  `BufferStore` in `io/reader/buffer.rs`, `DedupeStore` in
+  `io/reader/dedupe.rs`, and `WatermarkStore` in `io/reader/watermark.rs`:
+  the persistence/protocol trait a wrapper consumes ships in the same file as
+  the wrapper. `Generation`, `PartitionLease<C>`, and `PartitionCoordinator<C>`
+  therefore live in `io/reader/coordinated.rs` and are imported by backends
+  via the canonical `io::reader::*` path (`use eventuary_core::io::reader::
+  {Generation, PartitionLease, PartitionCoordinator}`), matching how
+  backends import every other wrapper-companion trait. The `io::*`
+  top-level re-export is reserved for base abstractions (`Reader`,
+  `Writer`, `Acker`, `Cursor`, `Filter`, `Handler`, `Message`) and
+  cross-cutting value types (`OwnerId`, `ConsumerGroupId`, `StreamId`).
+- **`PartitionableSubscription` lives with `StartableSubscription` in
+  `io/position.rs`.** Sibling subscription-capability traits: both have the
+  same `Self -> Self` builder shape and exist so wrappers can compose
+  subscriptions generically (`CheckpointReader` calls `with_start`;
+  `CoordinatedReader` calls `with_partition`). Colocating them keeps the
+  capability surface in one file and lets readers learn the available
+  contracts at a glance.
+- **Backend `coordinated_reader.rs` is alias-only by design.**
+  `CoordinatedReader<R, Coord>` carries zero backend-specific code, so
+  each backend ships a tiny module with `pub type PgCoordinatedReader =
+  CoordinatedReader<PgReader, PgPartitionCoordinator>` (and siblings).
+  The file exists for two reasons: (1) shorter call-site names than
+  `CoordinatedReader<PgReader, PgPartitionCoordinator>`, and (2) a
+  canonical module path (`eventuary::postgres::coordinated_reader::*`)
+  matching every other role-named module (`reader`, `writer`,
+  `partition_coordinator`, `checkpoint_store`, …). It is the only
+  pure-alias module today; future generic-only types will follow the
+  same shape so the per-backend layout stays predictable.
 - **Checkpoint flush is per-ack in the first cut.** A batched
   contiguous-progress flush by `checkpoint_flush_count` /
   `checkpoint_flush_interval` is planned but deliberately deferred so the

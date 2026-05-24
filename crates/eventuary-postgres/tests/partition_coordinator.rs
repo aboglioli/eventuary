@@ -7,7 +7,8 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 use eventuary_core::Partition;
 use eventuary_core::io::reader::CheckpointScope;
-use eventuary_core::io::{ConsumerGroupId, OwnerId, PartitionCoordinator, StreamId};
+use eventuary_core::io::reader::PartitionCoordinator;
+use eventuary_core::io::{ConsumerGroupId, OwnerId, StreamId};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
 

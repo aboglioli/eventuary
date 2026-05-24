@@ -376,8 +376,8 @@ positioning and protocol concerns.
 Common subscription/config types:
 
 - `memory::reader::MemorySubscription { limit }`
-- `sqlite::reader::SqliteSubscription { start, stop_at, filter, batch_size, limit }`
-- `postgres::reader::PgSubscription { start, stop_at, filter, batch_size, limit }`
+- `sqlite::reader::SqliteSubscription { start, stop_at, filter, partitions, batch_size, limit }`
+- `postgres::reader::PgSubscription { start, stop_at, filter, partitions, batch_size, limit }`
 - `sqs::reader_config::SqsReaderConfig`
 - `kafka::reader_config::KafkaReaderConfig`
 
@@ -402,6 +402,37 @@ let subscription = SqliteSubscription {
 SQLite and PostgreSQL push supported filters into their SQL queries. Other
 backends can be composed with `FilteredReader` when filtering should happen after
 reading.
+
+SQL subscriptions also expose `partitions: PartitionSelection`:
+
+- `All` (default) — fetch every partition.
+- `One(Partition)` — fetch a single partition; set via
+  `subscription.with_partition(p)` (the `PartitionableSubscription` trait
+  method that `CoordinatedReader` relies on).
+- `Many(PartitionGroup)` — fetch a validated set of partitions sharing the
+  same `partition_count`; set via `subscription.with_partitions(group)`.
+  PostgreSQL emits `partition_id = ANY($::int[])`, SQLite emits
+  `partition_id IN (?, ?, ...)`, so the reader serves all selected lanes
+  in one SQL round-trip per poll instead of one round-trip per lane.
+
+```rust
+use std::num::NonZeroU16;
+use eventuary::partition::{Partition, PartitionGroup};
+use eventuary::sqlite::reader::SqliteSubscription;
+
+let count = NonZeroU16::new(8).unwrap();
+let group = PartitionGroup::new(vec![
+    Partition::new(1, count)?,
+    Partition::new(4, count)?,
+])?;
+
+let subscription = SqliteSubscription::default().with_partitions(group);
+```
+
+`CoordinatedReader` itself still uses one inner worker per claimed lease
+(each with `PartitionSelection::One`), so `Many` is intended for callers
+that compose a partition-aware reader outside the coordinator path or for
+future backends whose native protocol assigns partition sets directly.
 
 ## Checkpointing SQL Readers
 

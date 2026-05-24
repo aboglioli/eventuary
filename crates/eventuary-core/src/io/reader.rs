@@ -295,7 +295,7 @@ pub use claim_buffer::{ClaimedBufferEntry, ClaimedBufferStore};
 pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
 pub use coordinated::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
-    CoordinatedStream, CoordinatedSubscription,
+    CoordinatedStream, CoordinatedSubscription, Generation, PartitionCoordinator, PartitionLease,
 };
 pub use decode::{DecodeErrorDisposition, DecodeReader, ReaderTypedExt};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
