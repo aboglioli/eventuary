@@ -340,4 +340,54 @@ mod tests {
         assert_eq!(counter.acks.load(Ordering::SeqCst), 1);
         assert_eq!(counter.nacks.load(Ordering::SeqCst), 0);
     }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    type TypedItems = Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor, UserUpdated>>>>>;
+
+    struct TypedVecReader {
+        items: TypedItems,
+    }
+
+    impl Reader<UserUpdated> for TypedVecReader {
+        type Subscription = ();
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor, UserUpdated>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let items = self.items.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(stream::iter(items)))
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_reader_supports_typed_payloads() {
+        use futures::StreamExt;
+        let event = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+        let reader = TypedVecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                event,
+                NoopAcker,
+                TestCursor(1),
+            ))])),
+        };
+        let timed = TimeoutReader::new(reader, Duration::from_secs(60));
+        let mut stream = timed.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg.event().payload().user_id, "u-1");
+        msg.ack().await.unwrap();
+    }
 }

@@ -4,14 +4,15 @@ use crate::error::Result;
 use crate::event::Event;
 use crate::partition::PartitionKeyResolver;
 use crate::partition::types::PartitionKey;
+use crate::payload::Payload;
 
-pub struct CompositePartitionKeyResolver {
-    parts: Vec<Arc<dyn PartitionKeyResolver>>,
+pub struct CompositePartitionKeyResolver<P = Payload> {
+    parts: Vec<Arc<dyn PartitionKeyResolver<P>>>,
     separator: String,
 }
 
-impl CompositePartitionKeyResolver {
-    pub fn new(parts: Vec<Arc<dyn PartitionKeyResolver>>) -> Self {
+impl<P> CompositePartitionKeyResolver<P> {
+    pub fn new(parts: Vec<Arc<dyn PartitionKeyResolver<P>>>) -> Self {
         Self {
             parts,
             separator: ":".to_owned(),
@@ -24,8 +25,8 @@ impl CompositePartitionKeyResolver {
     }
 }
 
-impl PartitionKeyResolver for CompositePartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
+impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for CompositePartitionKeyResolver<P> {
+    fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         let segments = self
             .parts
             .iter()

@@ -27,8 +27,8 @@ impl Default for EventKeyPartitionKeyResolver {
     }
 }
 
-impl PartitionKeyResolver for EventKeyPartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
+impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for EventKeyPartitionKeyResolver {
+    fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         match event.key() {
             Some(k) => PartitionKey::new(k.as_str()),
             None => match self.unkeyed_mode {

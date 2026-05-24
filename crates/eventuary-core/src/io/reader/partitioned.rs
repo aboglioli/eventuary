@@ -1,6 +1,7 @@
 //! Partitioned reader: in-process lane scheduler over any inner reader.
 //!
-//! Routes inner messages into N lanes by `Event::partition(count)`.
+//! Routes inner messages into N lanes by partition strategy
+//! (`EventCompatibility` default, or resolver/hasher pipeline).
 //! Each lane buffers up to `lane_capacity` events. Downstream redelivery
 //! is in-memory only: a downstream `ack` clears the lane's in-flight slot
 //! so the merged emit task can serve the next event from that lane (or any
@@ -50,7 +51,7 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::event_key::Partition;
+use crate::event_key::{Partition, fnv1a_u64};
 use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
@@ -689,10 +690,13 @@ fn compute_partition<P: 'static>(
     strategy: &PartitionRouteStrategy<P>,
 ) -> Result<Partition> {
     match strategy {
-        PartitionRouteStrategy::EventCompatibility =>
-        {
-            #[allow(deprecated)]
-            Ok(event.partition(count))
+        PartitionRouteStrategy::EventCompatibility => {
+            let hash = match event.key() {
+                Some(key) => fnv1a_u64(key.as_str().as_bytes()),
+                None => fnv1a_u64(event.id().as_uuid().as_bytes()),
+            };
+            let id = (hash % count.get() as u64) as u16;
+            Ok(Partition::new(id, count).expect("id < count by modulo"))
         }
         PartitionRouteStrategy::ResolverHasher {
             key_resolver,
@@ -1267,11 +1271,19 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(deprecated)]
     async fn event_compatibility_routes_via_event_partition() {
         let count_nz = NonZeroU16::new(4).unwrap();
         let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
-        let expected_lanes: Vec<u16> = events.iter().map(|e| e.partition(count_nz).id()).collect();
+        let expected_lanes: Vec<u16> = events
+            .iter()
+            .map(|e| {
+                let hash = match e.key() {
+                    Some(k) => fnv1a_u64(k.as_str().as_bytes()),
+                    None => fnv1a_u64(e.id().as_uuid().as_bytes()),
+                };
+                (hash % count_nz.get() as u64) as u16
+            })
+            .collect();
 
         let reader = VecReader {
             events: std::sync::Mutex::new(Some(events)),

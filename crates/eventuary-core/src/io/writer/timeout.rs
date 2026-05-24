@@ -119,4 +119,32 @@ mod tests {
         let err = writer.write(&ev()).await.unwrap_err();
         assert!(err.to_string().contains("boom"));
     }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    struct TypedOk;
+
+    impl Writer<UserUpdated> for TypedOk {
+        async fn write(&self, _: &Event<UserUpdated>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_writer_supports_typed_payloads() {
+        let writer = TimeoutWriter::new(TypedOk, Duration::from_secs(1));
+        let event = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+        writer.write(&event).await.unwrap();
+    }
 }
