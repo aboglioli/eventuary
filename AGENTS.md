@@ -968,6 +968,22 @@ Worth knowing when changing the codebase:
   (planned: Kafka). Not threaded through `PartitionableSubscription`
   because that trait is the contract `CoordinatedReader` relies on
   (`with_partition` returns one partition per worker).
+- **`PartitionCoordinator` lives with `CoordinatedReader`, not in its own
+  module.** Same pattern as `CheckpointStore` in `io/reader/checkpoint.rs`,
+  `BufferStore` in `io/reader/buffer.rs`, `DedupeStore` in
+  `io/reader/dedupe.rs`, and `WatermarkStore` in `io/reader/watermark.rs`:
+  the persistence/protocol trait a wrapper consumes ships in the same file as
+  the wrapper. `Generation`, `PartitionLease<C>`, and `PartitionCoordinator<C>`
+  therefore live in `io/reader/coordinated.rs`; backends import them via the
+  `io::*` re-exports (`use eventuary_core::io::{Generation, PartitionLease,
+  PartitionCoordinator}`).
+- **`PartitionableSubscription` lives with `StartableSubscription` in
+  `io/position.rs`.** Sibling subscription-capability traits: both have the
+  same `Self -> Self` builder shape and exist so wrappers can compose
+  subscriptions generically (`CheckpointReader` calls `with_start`;
+  `CoordinatedReader` calls `with_partition`). Colocating them keeps the
+  capability surface in one file and lets readers learn the available
+  contracts at a glance.
 - **Backend `coordinated_reader.rs` is alias-only by design.**
   `CoordinatedReader<R, Coord>` carries zero backend-specific code, so
   each backend ships a tiny module with `pub type PgCoordinatedReader =
