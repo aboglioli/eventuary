@@ -33,6 +33,7 @@
 //! waits and emits a `tracing::warn!`.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,12 +55,66 @@ use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, NoCursor, Reader};
+use crate::partition::{PartitionHasher, PartitionKeyResolver};
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Default)]
+pub enum PartitionRouteStrategy {
+    #[default]
+    EventCompatibility,
+    ResolverHasher {
+        key_resolver: Arc<dyn PartitionKeyResolver>,
+        hasher: Arc<dyn PartitionHasher>,
+    },
+}
+
+impl PartitionRouteStrategy {
+    pub fn resolver_hasher(
+        key_resolver: impl PartitionKeyResolver + 'static,
+        hasher: impl PartitionHasher + 'static,
+    ) -> Self {
+        Self::ResolverHasher {
+            key_resolver: Arc::new(key_resolver),
+            hasher: Arc::new(hasher),
+        }
+    }
+}
+
+impl fmt::Debug for PartitionRouteStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EventCompatibility => f.write_str("EventCompatibility"),
+            Self::ResolverHasher { .. } => f.debug_struct("ResolverHasher").finish_non_exhaustive(),
+        }
+    }
+}
+
 pub struct PartitionedReaderConfig {
     pub partition_count: NonZeroU16,
     pub lane_capacity: NonZeroUsize,
     pub scheduling: LaneScheduling,
+    pub route_strategy: PartitionRouteStrategy,
+}
+
+impl Clone for PartitionedReaderConfig {
+    fn clone(&self) -> Self {
+        Self {
+            partition_count: self.partition_count,
+            lane_capacity: self.lane_capacity,
+            scheduling: self.scheduling,
+            route_strategy: self.route_strategy.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for PartitionedReaderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PartitionedReaderConfig")
+            .field("partition_count", &self.partition_count)
+            .field("lane_capacity", &self.lane_capacity)
+            .field("scheduling", &self.scheduling)
+            .field("route_strategy", &self.route_strategy)
+            .finish()
+    }
 }
 
 impl Default for PartitionedReaderConfig {
@@ -70,6 +125,7 @@ impl Default for PartitionedReaderConfig {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
+            route_strategy: PartitionRouteStrategy::EventCompatibility,
         }
     }
 }
@@ -365,6 +421,7 @@ where
         let lane_capacity = self.config.lane_capacity.get();
         let scheduling = self.config.scheduling;
         let ack_mode = self.ack_mode;
+        let route_strategy = self.config.route_strategy.clone();
 
         let lanes_inner: Vec<Lane<R::Acker, R::Cursor>> = (0..count)
             .map(|_| Lane {
@@ -414,7 +471,13 @@ where
                         continue;
                     }
                 };
-                let lane_id = msg.event().partition(count_nz).id() as usize;
+                let lane_id = match compute_partition(msg.event(), count_nz, &route_strategy) {
+                    Ok(p) => p.id() as usize,
+                    Err(e) => {
+                        let _ = intake_tx.send(Err(e)).await;
+                        return;
+                    }
+                };
                 let mut msg_holder = Some(msg);
                 loop {
                     let lanes = intake_state.lock().await;
@@ -597,6 +660,27 @@ where
     }
 }
 
+fn compute_partition(
+    event: &Event,
+    count: NonZeroU16,
+    strategy: &PartitionRouteStrategy,
+) -> Result<Partition> {
+    match strategy {
+        PartitionRouteStrategy::EventCompatibility =>
+        {
+            #[allow(deprecated)]
+            Ok(event.partition(count))
+        }
+        PartitionRouteStrategy::ResolverHasher {
+            key_resolver,
+            hasher,
+        } => {
+            let key = key_resolver.partition_key(event)?;
+            Ok(hasher.partition_for(&key, count))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +842,7 @@ mod tests {
             partition_count: NonZeroU16::new(n).unwrap(),
             lane_capacity: NonZeroUsize::new(cap).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
+            route_strategy: PartitionRouteStrategy::EventCompatibility,
         }
     }
 
@@ -961,6 +1046,7 @@ mod tests {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
+            route_strategy: PartitionRouteStrategy::EventCompatibility,
         };
         let p = PartitionedReader::source(reader, cfg);
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
@@ -1146,5 +1232,132 @@ mod tests {
         for m in held {
             m.ack().await.unwrap();
         }
+    }
+
+    #[test]
+    fn default_route_strategy_is_event_compatibility() {
+        let config = PartitionedReaderConfig::default();
+        assert!(matches!(
+            config.route_strategy,
+            PartitionRouteStrategy::EventCompatibility
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn event_compatibility_routes_via_event_partition() {
+        let count_nz = NonZeroU16::new(4).unwrap();
+        let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
+        let expected_lanes: Vec<u16> = events.iter().map(|e| e.partition(count_nz).id()).collect();
+
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let config = PartitionedReaderConfig {
+            partition_count: count_nz,
+            lane_capacity: NonZeroUsize::new(64).unwrap(),
+            scheduling: LaneScheduling::RoundRobin,
+            route_strategy: PartitionRouteStrategy::EventCompatibility,
+        };
+        let p = PartitionedReader::source(reader, config);
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+
+        let mut delivered = 0usize;
+        while delivered < 8 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let lane_id = msg.cursor().partition().id();
+            assert!(
+                expected_lanes.contains(&lane_id),
+                "lane {lane_id} not in expected set {expected_lanes:?}"
+            );
+            msg.ack().await.unwrap();
+            delivered += 1;
+        }
+        assert_eq!(delivered, 8);
+    }
+
+    #[tokio::test]
+    async fn resolver_hasher_routes_via_pipeline() {
+        use crate::partition::{
+            EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionKey,
+        };
+
+        let count_nz = NonZeroU16::new(4).unwrap();
+        let hasher = Fnv1a64PartitionHasher;
+        let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
+        let expected_lanes: Vec<u16> = events
+            .iter()
+            .map(|e| {
+                let key = PartitionKey::new(e.key().unwrap().as_str()).unwrap();
+                hasher.partition_for(&key, count_nz).id()
+            })
+            .collect();
+
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let config = PartitionedReaderConfig {
+            partition_count: count_nz,
+            lane_capacity: NonZeroUsize::new(64).unwrap(),
+            scheduling: LaneScheduling::RoundRobin,
+            route_strategy: PartitionRouteStrategy::resolver_hasher(
+                EventKeyPartitionKeyResolver::error_on_unkeyed(),
+                Fnv1a64PartitionHasher,
+            ),
+        };
+        let p = PartitionedReader::source(reader, config);
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+
+        let mut delivered = 0usize;
+        while delivered < 8 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let lane_id = msg.cursor().partition().id();
+            assert!(
+                expected_lanes.contains(&lane_id),
+                "lane {lane_id} not in expected set {expected_lanes:?}"
+            );
+            msg.ack().await.unwrap();
+            delivered += 1;
+        }
+        assert_eq!(delivered, 8);
+    }
+
+    #[test]
+    fn resolver_hasher_unkeyed_event_uses_uuid_string_not_bytes() {
+        use crate::partition::{
+            EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionKey,
+        };
+
+        let count_nz = NonZeroU16::new(64).unwrap();
+        let unkeyed = Event::create(
+            "acme",
+            "/x",
+            "thing.happened",
+            crate::payload::Payload::from_string("p"),
+        )
+        .unwrap();
+
+        let resolver = EventKeyPartitionKeyResolver::event_id_on_unkeyed();
+        let hasher = Fnv1a64PartitionHasher;
+        let resolver_key = resolver.partition_key(&unkeyed).unwrap();
+        let uuid_str = unkeyed.id().as_uuid().to_string();
+        let manual_key = PartitionKey::new(&uuid_str).unwrap();
+
+        assert_eq!(
+            resolver_key, manual_key,
+            "EventKeyPartitionKeyResolver::event_id_on_unkeyed must use the UUID string representation"
+        );
+        assert_eq!(
+            hasher.partition_for(&resolver_key, count_nz).id(),
+            hasher.partition_for(&manual_key, count_nz).id(),
+        );
     }
 }

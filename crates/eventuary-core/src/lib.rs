@@ -39,6 +39,7 @@ mod metadata;
 mod namespace;
 mod namespace_pattern;
 mod organization;
+pub mod partition;
 mod payload;
 mod payload_codec;
 mod serialization;
@@ -60,6 +61,7 @@ pub use payload_codec::{
     EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
 };
 
+pub use io::partitionable_subscription::PartitionableSubscription;
 pub use io::position::{StartFrom, StartableSubscription, StopAt};
 pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};

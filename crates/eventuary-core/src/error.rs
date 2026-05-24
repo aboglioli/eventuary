@@ -23,6 +23,12 @@ pub enum Error {
     #[error("invalid consumer group id: {0}")]
     InvalidConsumerGroupId(String),
 
+    #[error("invalid owner id: {0}")]
+    InvalidOwnerId(String),
+
+    #[error("ownership lost: {0}")]
+    OwnershipLost(String),
+
     #[error("invalid start position: {0}")]
     InvalidStartFrom(String),
 

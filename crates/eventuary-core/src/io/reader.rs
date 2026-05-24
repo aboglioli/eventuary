@@ -264,7 +264,9 @@ mod tests {
 pub mod batch;
 pub mod buffer;
 pub mod checkpoint;
+pub mod claim_buffer;
 pub mod concurrency_limit;
+pub mod coordinated;
 pub mod decode;
 pub mod dedupe;
 pub mod encoded_cursor;
@@ -289,7 +291,12 @@ pub use checkpoint::{
     CheckpointStore, CheckpointStream, CheckpointSubscription, InvalidCursorPolicy,
     MissingCheckpointPolicy,
 };
+pub use claim_buffer::{ClaimedBufferEntry, ClaimedBufferStore};
 pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
+pub use coordinated::{
+    CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
+    CoordinatedStream, CoordinatedSubscription,
+};
 pub use decode::{DecodeErrorDisposition, DecodeReader, ReaderTypedExt};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
 pub use encoded_cursor::{EncodedCursorReader, EncodedCursorSubscription};
@@ -301,8 +308,8 @@ pub use outcome_router::{
     DeliveryDisposition, NackDisposition, OutcomeRouterAcker, OutcomeRouterReader,
 };
 pub use partitioned::{
-    LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
-    PartitionedSubscription,
+    LaneScheduling, PartitionAcker, PartitionRouteStrategy, PartitionedCursor, PartitionedReader,
+    PartitionedReaderConfig, PartitionedSubscription,
 };
 pub use rate_limit::{RateLimit, RateLimitReader};
 pub use recover::{RecoverConfig, RecoverReader};

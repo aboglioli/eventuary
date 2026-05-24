@@ -3,8 +3,8 @@ use std::sync::Arc;
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::{PgPool, Row};
 
-use eventuary_core::io::CursorId;
 use eventuary_core::io::reader::{CheckpointKey, CheckpointScope, CheckpointStore};
+use eventuary_core::io::{Cursor, CursorId};
 use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
@@ -69,7 +69,7 @@ fn decode_cursor<C: DeserializeOwned>(value: serde_json::Value) -> Result<C> {
 
 impl<C> CheckpointStore<C> for PgCheckpointStore<C>
 where
-    C: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
+    C: Cursor + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn load(&self, key: &CheckpointKey) -> Result<Option<C>> {
         let cursor_id = encode_cursor_id(&key.cursor_id);
@@ -117,12 +117,15 @@ where
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
         let cursor_id = encode_cursor_id(&key.cursor_id);
         let cursor_json = encode_cursor(&cursor)?;
+        let cursor_order = cursor.order_key();
         let sql = format!(
             "INSERT INTO {relation} \
-               (consumer_group_id, stream_id, cursor_id, cursor) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (consumer_group_id, stream_id, cursor_id) \
-             DO UPDATE SET cursor = EXCLUDED.cursor",
+               (consumer_group_id, stream_id, cursor_id, cursor, cursor_order) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (consumer_group_id, stream_id, cursor_id) DO UPDATE \
+             SET cursor = EXCLUDED.cursor, \
+                 cursor_order = EXCLUDED.cursor_order \
+             WHERE {relation}.cursor_order < EXCLUDED.cursor_order",
             relation = self.relation
         );
         sqlx::query(&sql)
@@ -130,6 +133,7 @@ where
             .bind(key.scope.stream_id.as_str())
             .bind(cursor_id)
             .bind(cursor_json)
+            .bind(cursor_order.as_bytes())
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;

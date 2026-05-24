@@ -10,19 +10,27 @@
 //! - [`MemoryDedupeStore`]
 //! - [`MemoryWatermarkStore`]
 //! - [`MemoryCheckpointStore`]
+//! - [`MemoryPartitionCoordinator`]
+//! - [`MemorySubscriberWorkStore`]
 
 pub mod buffer_store;
 pub mod checkpoint_store;
+pub mod claim_buffer_store;
 pub mod dedupe_store;
 pub mod multiplexer_store;
+pub mod partition_coordinator;
 pub mod reader;
+pub mod subscriber_work_store;
 pub mod watermark_store;
 pub mod writer;
 
 pub use buffer_store::{MemoryBufferStore, MemoryBufferStoreId};
 pub use checkpoint_store::MemoryCheckpointStore;
+pub use claim_buffer_store::MemoryClaimedBufferStore;
 pub use dedupe_store::MemoryDedupeStore;
 pub use multiplexer_store::MemoryMultiplexerStore;
+pub use partition_coordinator::MemoryPartitionCoordinator;
 pub use reader::MemoryReader;
+pub use subscriber_work_store::MemorySubscriberWorkStore;
 pub use watermark_store::MemoryWatermarkStore;
 pub use writer::MemoryWriter;
