@@ -22,6 +22,7 @@ pub mod coordinated_reader;
 pub mod database;
 pub mod dedupe_store;
 pub mod multiplexer_store;
+pub mod partition_backfill;
 pub mod partition_coordinator;
 pub mod partition_cursor;
 pub mod reader;
@@ -37,6 +38,7 @@ pub use coordinated_reader::{
 };
 pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
 pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
+pub use partition_backfill::{BackfillReport, PgPartitionBackfill, PgPartitionBackfillConfig};
 pub use partition_coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
 pub use partition_cursor::PgPartitionCursor;
 pub use watermark_store::{PgWatermarkStore, PgWatermarkStoreConfig};
