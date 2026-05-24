@@ -1,16 +1,39 @@
+use std::fmt;
+
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::Acker;
 use crate::io::acker::NackContext;
+use crate::payload::Payload;
 
-pub struct Message<A: Acker, C> {
-    event: Event,
+pub struct Message<A: Acker, C, P = Payload> {
+    event: Event<P>,
     acker: A,
     cursor: C,
 }
 
-impl<A: Acker, C> Message<A, C> {
-    pub fn new(event: Event, acker: A, cursor: C) -> Self {
+impl<A: Acker + fmt::Debug, C: fmt::Debug, P: fmt::Debug> fmt::Debug for Message<A, C, P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("event", &self.event)
+            .field("acker", &self.acker)
+            .field("cursor", &self.cursor)
+            .finish()
+    }
+}
+
+impl<A: Acker + Clone, C: Clone, P: Clone> Clone for Message<A, C, P> {
+    fn clone(&self) -> Self {
+        Self {
+            event: self.event.clone(),
+            acker: self.acker.clone(),
+            cursor: self.cursor.clone(),
+        }
+    }
+}
+
+impl<A: Acker, C, P> Message<A, C, P> {
+    pub fn new(event: Event<P>, acker: A, cursor: C) -> Self {
         Self {
             event,
             acker,
@@ -18,7 +41,7 @@ impl<A: Acker, C> Message<A, C> {
         }
     }
 
-    pub fn event(&self) -> &Event {
+    pub fn event(&self) -> &Event<P> {
         &self.event
     }
 
@@ -26,7 +49,7 @@ impl<A: Acker, C> Message<A, C> {
         &self.cursor
     }
 
-    pub fn into_event(self) -> Event {
+    pub fn into_event(self) -> Event<P> {
         self.event
     }
 
@@ -46,11 +69,11 @@ impl<A: Acker, C> Message<A, C> {
         &self.acker
     }
 
-    pub fn into_parts(self) -> (Event, A, C) {
+    pub fn into_parts(self) -> (Event<P>, A, C) {
         (self.event, self.acker, self.cursor)
     }
 
-    pub fn map_acker<B, F>(self, f: F) -> Message<B, C>
+    pub fn map_acker<B, F>(self, f: F) -> Message<B, C, P>
     where
         B: Acker,
         F: FnOnce(A) -> B,
@@ -62,7 +85,7 @@ impl<A: Acker, C> Message<A, C> {
         }
     }
 
-    pub fn map_cursor<D, F>(self, f: F) -> Message<A, D>
+    pub fn map_cursor<D, F>(self, f: F) -> Message<A, D, P>
     where
         F: FnOnce(C) -> D,
     {
@@ -73,9 +96,9 @@ impl<A: Acker, C> Message<A, C> {
         }
     }
 
-    pub fn map_event<F>(self, f: F) -> Self
+    pub fn map_event<Q, F>(self, f: F) -> Message<A, C, Q>
     where
-        F: FnOnce(Event) -> Event,
+        F: FnOnce(Event<P>) -> Event<Q>,
     {
         Message {
             event: f(self.event),
@@ -93,7 +116,6 @@ mod tests {
 
     use crate::io::NoCursor;
     use crate::io::acker::{NackReason, NoopAcker};
-    use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(i64);
@@ -110,7 +132,13 @@ mod tests {
     }
 
     fn ev() -> Event {
-        Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap()
+        Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            super::Payload::from_string("p"),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -125,7 +153,13 @@ mod tests {
     fn map_event_swaps_event_keeps_acker() {
         let msg = Message::new(ev(), NoopAcker, NoCursor);
         let mapped = msg.map_event(|e| {
-            Event::create("org", "/y", e.topic().as_str(), Payload::from_string("p2")).unwrap()
+            Event::create(
+                "org",
+                "/y",
+                e.topic().as_str(),
+                super::Payload::from_string("p2"),
+            )
+            .unwrap()
         });
         assert_eq!(mapped.event().namespace().as_str(), "/y");
     }
@@ -159,6 +193,53 @@ mod tests {
         let msg = Message::new(ev(), NoopAcker, TestCursor(7));
         let (_event, _acker, cursor) = msg.into_parts();
         assert_eq!(cursor, TestCursor(7));
+    }
+
+    #[test]
+    fn message_holds_typed_event() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct UserUpdated {
+            user_id: String,
+        }
+
+        let event: Event<UserUpdated> = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        let msg: Message<NoopAcker, NoCursor, UserUpdated> =
+            Message::new(event, NoopAcker, NoCursor);
+        assert_eq!(msg.event().payload().user_id, "u-1");
+    }
+
+    #[test]
+    fn map_event_changes_message_payload_type() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct UserUpdated {
+            user_id: String,
+        }
+
+        let event: Event<UserUpdated> = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        let msg: Message<NoopAcker, NoCursor, UserUpdated> =
+            Message::new(event, NoopAcker, NoCursor);
+        let mapped: Message<NoopAcker, NoCursor, String> =
+            msg.map_event(|event| event.map_payload(|p| p.user_id));
+
+        assert_eq!(mapped.event().payload(), "u-1");
     }
 
     struct ContextAcker {

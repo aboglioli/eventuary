@@ -5,13 +5,17 @@ use futures::future::BoxFuture;
 
 use crate::error::Result;
 use crate::event::Event;
+use crate::payload::Payload;
 
-pub trait Writer: Send + Sync {
-    fn write<'a>(&'a self, event: &'a Event) -> impl Future<Output = Result<()>> + Send + 'a;
+pub trait Writer<P = Payload>: Send + Sync
+where
+    P: Send + Sync,
+{
+    fn write<'a>(&'a self, event: &'a Event<P>) -> impl Future<Output = Result<()>> + Send + 'a;
 
     fn write_all<'a>(
         &'a self,
-        events: &'a [Event],
+        events: &'a [Event<P>],
     ) -> impl Future<Output = Result<()>> + Send + 'a {
         async move {
             for event in events {
@@ -22,74 +26,78 @@ pub trait Writer: Send + Sync {
     }
 }
 
-impl<T: Writer + ?Sized> Writer for Arc<T> {
-    fn write<'a>(&'a self, event: &'a Event) -> impl Future<Output = Result<()>> + Send + 'a {
+impl<T: Writer<P> + ?Sized, P: Send + Sync> Writer<P> for Arc<T> {
+    fn write<'a>(&'a self, event: &'a Event<P>) -> impl Future<Output = Result<()>> + Send + 'a {
         (**self).write(event)
     }
 
     fn write_all<'a>(
         &'a self,
-        events: &'a [Event],
+        events: &'a [Event<P>],
     ) -> impl Future<Output = Result<()>> + Send + 'a {
         (**self).write_all(events)
     }
 }
 
-impl<T: Writer + ?Sized> Writer for Box<T> {
-    fn write<'a>(&'a self, event: &'a Event) -> impl Future<Output = Result<()>> + Send + 'a {
+impl<T: Writer<P> + ?Sized, P: Send + Sync> Writer<P> for Box<T> {
+    fn write<'a>(&'a self, event: &'a Event<P>) -> impl Future<Output = Result<()>> + Send + 'a {
         (**self).write(event)
     }
 
     fn write_all<'a>(
         &'a self,
-        events: &'a [Event],
+        events: &'a [Event<P>],
     ) -> impl Future<Output = Result<()>> + Send + 'a {
         (**self).write_all(events)
     }
 }
 
-pub trait DynWriter: Send + Sync {
-    fn write_dyn<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, Result<()>>;
-    fn write_all_dyn<'a>(&'a self, events: &'a [Event]) -> BoxFuture<'a, Result<()>>;
+pub trait DynWriter<P = Payload>: Send + Sync {
+    fn write_dyn<'a>(&'a self, event: &'a Event<P>) -> BoxFuture<'a, Result<()>>;
+    fn write_all_dyn<'a>(&'a self, events: &'a [Event<P>]) -> BoxFuture<'a, Result<()>>;
 }
 
-impl<T: Writer + ?Sized> DynWriter for T {
-    fn write_dyn<'a>(&'a self, event: &'a Event) -> BoxFuture<'a, Result<()>> {
-        Box::pin(<Self as Writer>::write(self, event))
+impl<T: Writer<P> + ?Sized, P: Send + Sync> DynWriter<P> for T {
+    fn write_dyn<'a>(&'a self, event: &'a Event<P>) -> BoxFuture<'a, Result<()>> {
+        Box::pin(<Self as Writer<P>>::write(self, event))
     }
-    fn write_all_dyn<'a>(&'a self, events: &'a [Event]) -> BoxFuture<'a, Result<()>> {
-        Box::pin(<Self as Writer>::write_all(self, events))
+    fn write_all_dyn<'a>(&'a self, events: &'a [Event<P>]) -> BoxFuture<'a, Result<()>> {
+        Box::pin(<Self as Writer<P>>::write_all(self, events))
     }
 }
 
-pub type BoxWriter = Box<dyn DynWriter>;
-pub type ArcWriter = Arc<dyn DynWriter>;
+pub type BoxWriter<P = Payload> = Box<dyn DynWriter<P>>;
+pub type ArcWriter<P = Payload> = Arc<dyn DynWriter<P>>;
 
-impl Writer for dyn DynWriter + '_ {
-    fn write<'a>(&'a self, event: &'a Event) -> impl Future<Output = Result<()>> + Send + 'a {
+impl<P: Send + Sync> Writer<P> for dyn DynWriter<P> + '_ {
+    fn write<'a>(&'a self, event: &'a Event<P>) -> impl Future<Output = Result<()>> + Send + 'a {
         DynWriter::write_dyn(self, event)
     }
     fn write_all<'a>(
         &'a self,
-        events: &'a [Event],
+        events: &'a [Event<P>],
     ) -> impl Future<Output = Result<()>> + Send + 'a {
         DynWriter::write_all_dyn(self, events)
     }
 }
 
-pub trait WriterExt: Writer + Sized + 'static {
-    fn into_boxed(self) -> BoxWriter {
+pub trait WriterExt<P = Payload>: Writer<P> + Sized + 'static
+where
+    P: Send + Sync,
+{
+    fn into_boxed(self) -> BoxWriter<P> {
         Box::new(self)
     }
 
-    fn into_arced(self) -> ArcWriter {
+    fn into_arced(self) -> ArcWriter<P> {
         Arc::new(self)
     }
 }
 
-impl<T: Writer + 'static> WriterExt for T {}
+impl<T: Writer<P> + Sized + 'static, P: Send + Sync> WriterExt<P> for T {}
 
 pub mod batch;
+pub mod encode;
 pub mod fanout;
 pub mod filtered;
 pub mod flat_map;
@@ -99,6 +107,7 @@ pub mod retry;
 pub mod timeout;
 
 pub use batch::{BatchWriter, BatchWriterConfig};
+pub use encode::{EncodeWriter, WriterTypedExt};
 pub use fanout::FanoutWriter;
 pub use filtered::FilteredWriter;
 pub use flat_map::{FlatMapWriter, TryFlatMapWriter};
@@ -113,8 +122,6 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::payload::Payload;
-
     struct CountingWriter {
         writes: Arc<AtomicUsize>,
     }
@@ -127,7 +134,13 @@ mod tests {
     }
 
     fn ev() -> Event {
-        Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap()
+        Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            crate::payload::Payload::from_string("p"),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -180,6 +193,46 @@ mod tests {
         }
         .into_arced();
         take(arced, &ev()).await;
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    fn typed_ev() -> Event<UserUpdated> {
+        Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap()
+    }
+
+    struct TypedCountingWriter {
+        writes: Arc<AtomicUsize>,
+    }
+
+    impl Writer<UserUpdated> for TypedCountingWriter {
+        async fn write(&self, _: &Event<UserUpdated>) -> Result<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_writer_into_boxed_yields_dyn_writer() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let writer: BoxWriter<UserUpdated> = TypedCountingWriter {
+            writes: Arc::clone(&writes),
+        }
+        .into_boxed();
+
+        writer.write(&typed_ev()).await.unwrap();
         assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
 }

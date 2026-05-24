@@ -1,11 +1,13 @@
+use std::marker::PhantomData;
 use std::pin::Pin;
 
 use futures::{StreamExt, stream};
 
 use crate::error::Result;
 use crate::io::{BoxStream, Filter, Message, Reader};
+use crate::payload::Payload;
 
-pub type FilteredStream<C, A> = BoxStream<C, A>;
+pub type FilteredStream<C, A, P = Payload> = BoxStream<C, A, P>;
 
 pub struct FilteredReader<R, F> {
     inner: R,
@@ -26,19 +28,20 @@ impl<R, F> FilteredReader<R, F> {
     }
 }
 
-impl<R, F> Reader for FilteredReader<R, F>
+impl<R, F, P> Reader<P> for FilteredReader<R, F>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: 'static,
-    F: Filter + Clone + 'static,
+    F: Filter<P> + Clone + 'static,
+    P: Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = R::Acker;
     type Cursor = R::Cursor;
-    type Stream = FilteredStream<R::Cursor, R::Acker>;
+    type Stream = FilteredStream<R::Cursor, R::Acker, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
@@ -46,26 +49,31 @@ where
             inner: Box::pin(inner),
             filter: self.filter.clone(),
             is_done: false,
+            _payload: PhantomData,
         };
-        Ok(Box::pin(stream::unfold(state, next_filtered::<R, F>)))
+        Ok(Box::pin(stream::unfold(state, next_filtered::<R, F, P>)))
     }
 }
 
-struct FilteredState<R, F>
+struct FilteredState<R, F, P>
 where
-    R: Reader,
+    R: Reader<P>,
 {
     inner: Pin<Box<R::Stream>>,
     filter: F,
     is_done: bool,
+    _payload: std::marker::PhantomData<P>,
 }
 
-async fn next_filtered<R, F>(
-    mut state: FilteredState<R, F>,
-) -> Option<(Result<Message<R::Acker, R::Cursor>>, FilteredState<R, F>)>
+async fn next_filtered<R, F, P>(
+    mut state: FilteredState<R, F, P>,
+) -> Option<(
+    Result<Message<R::Acker, R::Cursor, P>>,
+    FilteredState<R, F, P>,
+)>
 where
-    R: Reader,
-    F: Filter,
+    R: Reader<P>,
+    F: Filter<P>,
 {
     if state.is_done {
         return None;
@@ -98,8 +106,6 @@ mod tests {
     use crate::OrganizationId;
     use crate::error::Error;
     use crate::event::Event;
-    use crate::io::Acker;
-    use crate::payload::Payload;
 
     #[derive(Clone, Default)]
     struct CountingAcker {
@@ -108,7 +114,7 @@ mod tests {
         fail_ack: Arc<AtomicBool>,
     }
 
-    impl Acker for CountingAcker {
+    impl crate::io::Acker for CountingAcker {
         async fn ack(&self) -> Result<()> {
             self.ack_count.fetch_add(1, Ordering::SeqCst);
             if self.fail_ack.load(Ordering::SeqCst) {
@@ -125,6 +131,20 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct TestSubscription;
+
+    fn ev(org: &str, key: &str) -> Event {
+        Event::builder(
+            org,
+            "/x",
+            "thing.happened",
+            crate::payload::Payload::from_string("p"),
+        )
+        .unwrap()
+        .key(key)
+        .unwrap()
+        .build()
+        .unwrap()
+    }
 
     type TestItem = Result<Message<CountingAcker, TestCursor>>;
 
@@ -155,15 +175,6 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     struct TestCursor(u64);
-
-    fn ev(org: &str, key: &str) -> Event {
-        Event::builder(org, "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key(key)
-            .unwrap()
-            .build()
-            .unwrap()
-    }
 
     fn msg(event: Event, acker: CountingAcker, cursor: u64) -> Message<CountingAcker, TestCursor> {
         Message::new(event, acker, TestCursor(cursor))

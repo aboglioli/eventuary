@@ -1,36 +1,37 @@
 use std::mem;
 
 use crate::event::Event;
+use crate::payload::Payload;
 
 #[derive(Debug, Clone)]
-pub struct EventCollector {
-    events: Vec<Event>,
+pub struct EventCollector<P = Payload> {
+    events: Vec<Event<P>>,
 }
 
-impl EventCollector {
+impl<P> EventCollector<P> {
     pub fn new() -> Self {
         Self { events: Vec::new() }
     }
 
-    pub fn with(event: Event) -> Self {
+    pub fn with(event: Event<P>) -> Self {
         Self {
             events: vec![event],
         }
     }
 
-    pub fn collect(&mut self, event: Event) {
+    pub fn collect(&mut self, event: Event<P>) {
         self.events.push(event);
     }
 
-    pub fn drain(&mut self) -> Vec<Event> {
+    pub fn drain(&mut self) -> Vec<Event<P>> {
         mem::take(&mut self.events)
     }
 
-    pub fn list(&self) -> &[Event] {
+    pub fn list(&self) -> &[Event<P>] {
         &self.events
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, Event> {
+    pub fn iter(&self) -> std::slice::Iter<'_, Event<P>> {
         self.events.iter()
     }
 
@@ -43,7 +44,7 @@ impl EventCollector {
     }
 }
 
-impl Default for EventCollector {
+impl<P> Default for EventCollector<P> {
     fn default() -> Self {
         Self::new()
     }
@@ -52,15 +53,20 @@ impl Default for EventCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Payload;
 
     fn ev() -> Event {
-        Event::create("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap()
+        Event::create(
+            "acme",
+            "/x",
+            "thing.happened",
+            crate::Payload::from_string("p"),
+        )
+        .unwrap()
     }
 
     #[test]
     fn new_is_empty() {
-        let c = EventCollector::new();
+        let c: EventCollector = EventCollector::new();
         assert!(c.is_empty());
         assert_eq!(c.len(), 0);
         assert!(c.list().is_empty());
@@ -115,7 +121,36 @@ mod tests {
 
     #[test]
     fn default_is_empty() {
-        let c = EventCollector::default();
+        let c: EventCollector = EventCollector::default();
         assert!(c.is_empty());
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    #[test]
+    fn typed_collector_new_is_empty() {
+        let collector: EventCollector<UserUpdated> = EventCollector::new();
+        assert!(collector.is_empty());
+    }
+
+    #[test]
+    fn collector_drains_typed_events() {
+        let event: Event<UserUpdated> = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        let mut collector = EventCollector::with(event);
+        let drained: Vec<Event<UserUpdated>> = collector.drain();
+
+        assert_eq!(drained[0].payload().user_id, "u-1");
     }
 }

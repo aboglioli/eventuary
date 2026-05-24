@@ -28,12 +28,16 @@ pub use handler::{
 };
 pub use message::Message;
 pub use position::{StartFrom, StartableSubscription, StopAt};
-pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
+pub use reader::{
+    ArcReader, BoxReader, BoxStream, DecodeErrorDisposition, DecodeReader, DynReader, Reader,
+    ReaderExt, ReaderTypedExt,
+};
 pub use stream_id::StreamId;
 pub use writer::{
-    ArcWriter, BatchWriter, BatchWriterConfig, BoxWriter, DynWriter, FanoutWriter, FilteredWriter,
-    FlatMapWriter, InspectWriter, InspectWriterHooks, MapWriter, RetryWriter, RetryWriterConfig,
-    TimeoutWriter, TryFlatMapWriter, TryMapWriter, Writer, WriterExt,
+    ArcWriter, BatchWriter, BatchWriterConfig, BoxWriter, DynWriter, EncodeWriter, FanoutWriter,
+    FilteredWriter, FlatMapWriter, InspectWriter, InspectWriterHooks, MapWriter, RetryWriter,
+    RetryWriterConfig, TimeoutWriter, TryFlatMapWriter, TryMapWriter, Writer, WriterExt,
+    WriterTypedExt,
 };
 
 #[cfg(test)]
@@ -46,12 +50,33 @@ mod tests {
         assert_type::<
             crate::io::writer::TryMapWriter<(), fn(&crate::Event) -> crate::Result<crate::Event>>,
         >();
+        assert_type::<
+            crate::io::writer::EncodeWriter<
+                (),
+                crate::PayloadEventCodec<crate::JsonPayloadCodec>,
+                crate::Payload,
+            >,
+        >();
         assert_type::<crate::io::writer::FanoutWriter>();
         assert_type::<crate::io::reader::OutcomeRouterReader<()>>();
         assert_type::<crate::io::reader::NackDisposition>();
         assert_type::<crate::io::MapWriter<(), fn(&crate::Event) -> crate::Event>>();
         assert_type::<crate::io::TryMapWriter<(), fn(&crate::Event) -> crate::Result<crate::Event>>>(
         );
+        assert_type::<
+            crate::io::EncodeWriter<
+                (),
+                crate::PayloadEventCodec<crate::JsonPayloadCodec>,
+                crate::Payload,
+            >,
+        >();
+        assert_type::<
+            crate::io::DecodeReader<
+                (),
+                crate::PayloadEventCodec<crate::JsonPayloadCodec>,
+                crate::Payload,
+            >,
+        >();
         assert_type::<crate::io::FanoutWriter>();
     }
 

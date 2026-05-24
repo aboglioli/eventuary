@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
-use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
+use eventuary_core::io::{Acker, Cursor, CursorOrder, Filter, JsonCursorCodec, Message, Reader};
 use eventuary_core::{
     Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
     StartableSubscription, StopAt, TopicPattern,

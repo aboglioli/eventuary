@@ -53,12 +53,12 @@ impl FromStr for EventId {
 }
 
 #[derive(Debug, Clone)]
-pub struct Event {
+pub struct Event<P = Payload> {
     id: EventId,
     organization: OrganizationId,
     namespace: Namespace,
     topic: Topic,
-    payload: Payload,
+    payload: P,
     metadata: Metadata,
     timestamp: DateTime<Utc>,
     version: u64,
@@ -69,11 +69,11 @@ pub struct Event {
     causation_id: Option<EventKey>,
 }
 
-pub struct EventBuilder {
+pub struct EventBuilder<P = Payload> {
     organization: OrganizationId,
     namespace: Namespace,
     topic: Topic,
-    payload: Payload,
+    payload: P,
     metadata: Metadata,
     key: Option<EventKey>,
     parent_id: Option<EventId>,
@@ -81,13 +81,8 @@ pub struct EventBuilder {
     causation_id: Option<EventKey>,
 }
 
-impl EventBuilder {
-    fn new(
-        organization: OrganizationId,
-        namespace: Namespace,
-        topic: Topic,
-        payload: Payload,
-    ) -> Self {
+impl<P> EventBuilder<P> {
+    fn new(organization: OrganizationId, namespace: Namespace, topic: Topic, payload: P) -> Self {
         Self {
             organization,
             namespace,
@@ -126,7 +121,7 @@ impl EventBuilder {
         self
     }
 
-    pub fn build(self) -> Result<Event> {
+    pub fn build(self) -> Result<Event<P>> {
         Event::new(
             EventId::new(),
             self.organization,
@@ -144,14 +139,14 @@ impl EventBuilder {
     }
 }
 
-impl Event {
+impl<P> Event<P> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: EventId,
         organization: OrganizationId,
         namespace: Namespace,
         topic: Topic,
-        payload: Payload,
+        payload: P,
         metadata: Metadata,
         timestamp: DateTime<Utc>,
         version: u64,
@@ -180,8 +175,8 @@ impl Event {
         organization: impl Into<String>,
         namespace: impl Into<String>,
         topic: impl Into<String>,
-        payload: Payload,
-    ) -> Result<EventBuilder> {
+        payload: P,
+    ) -> Result<EventBuilder<P>> {
         Ok(EventBuilder::new(
             OrganizationId::new(organization)?,
             Namespace::new(namespace)?,
@@ -194,7 +189,7 @@ impl Event {
         organization: impl Into<String>,
         namespace: impl Into<String>,
         topic: impl Into<String>,
-        payload: Payload,
+        payload: P,
     ) -> Result<Self> {
         Self::builder(organization, namespace, topic, payload)?.build()
     }
@@ -216,8 +211,11 @@ impl Event {
     pub fn topic(&self) -> &Topic {
         &self.topic
     }
-    pub fn payload(&self) -> &Payload {
+    pub fn payload(&self) -> &P {
         &self.payload
+    }
+    pub fn into_payload(self) -> P {
+        self.payload
     }
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
@@ -251,6 +249,75 @@ impl Event {
     }
     pub fn causation_id(&self) -> Option<&EventKey> {
         self.causation_id.as_ref()
+    }
+
+    pub fn map_payload<Q, F>(self, f: F) -> Event<Q>
+    where
+        F: FnOnce(P) -> Q,
+    {
+        Event {
+            id: self.id,
+            organization: self.organization,
+            namespace: self.namespace,
+            topic: self.topic,
+            payload: f(self.payload),
+            metadata: self.metadata,
+            timestamp: self.timestamp,
+            version: self.version,
+            key: self.key,
+            parent_id: self.parent_id,
+            correlation_id: self.correlation_id,
+            causation_id: self.causation_id,
+        }
+    }
+
+    pub fn try_map_payload<Q, F>(self, f: F) -> Result<Event<Q>>
+    where
+        F: FnOnce(P) -> Result<Q>,
+    {
+        Ok(Event {
+            id: self.id,
+            organization: self.organization,
+            namespace: self.namespace,
+            topic: self.topic,
+            payload: f(self.payload)?,
+            metadata: self.metadata,
+            timestamp: self.timestamp,
+            version: self.version,
+            key: self.key,
+            parent_id: self.parent_id,
+            correlation_id: self.correlation_id,
+            causation_id: self.causation_id,
+        })
+    }
+
+    pub fn encode_payload<C>(&self, codec: &C) -> Result<Event<Payload>>
+    where
+        C: crate::PayloadCodec<P>,
+    {
+        Event::new(
+            self.id,
+            self.organization.clone(),
+            self.namespace.clone(),
+            self.topic.clone(),
+            codec.encode(&self.payload)?,
+            self.metadata.clone(),
+            self.timestamp,
+            self.version,
+            self.key.clone(),
+            self.parent_id,
+            self.correlation_id.clone(),
+            self.causation_id.clone(),
+        )
+    }
+}
+
+impl Event<Payload> {
+    pub fn decode_payload<P, C>(self, codec: &C) -> Result<Event<P>>
+    where
+        C: crate::PayloadCodec<P>,
+    {
+        self.try_map_payload(|payload| codec.decode(&payload))
     }
 }
 
@@ -344,5 +411,107 @@ mod tests {
         assert_eq!(event.correlation_id().map(EventKey::as_str), Some("corr-1"));
         assert_eq!(event.causation_id().map(EventKey::as_str), Some("cause-1"));
         assert!(event.metadata().is_empty());
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+        email: String,
+    }
+
+    #[test]
+    fn create_event_with_typed_payload() {
+        let payload = UserUpdated {
+            user_id: "u-1".to_owned(),
+            email: "a@example.com".to_owned(),
+        };
+
+        let event: Event<UserUpdated> =
+            Event::create("acme", "/users", "user.updated", payload).unwrap();
+
+        assert_eq!(event.payload().user_id, "u-1");
+        assert_eq!(event.organization().as_str(), "acme");
+        assert_eq!(event.namespace().as_str(), "/users");
+        assert_eq!(event.topic().as_str(), "user.updated");
+    }
+
+    #[test]
+    fn map_payload_changes_only_payload_type() {
+        let event: Event<UserUpdated> = Event::create(
+            "acme",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+                email: "a@example.com".to_owned(),
+            },
+        )
+        .unwrap()
+        .with_metadata(Metadata::new().with("source", "test").unwrap());
+
+        let id = event.id();
+        let mapped: Event<String> = event.map_payload(|payload| payload.email);
+
+        assert_eq!(mapped.id(), id);
+        assert_eq!(mapped.payload(), "a@example.com");
+        assert_eq!(mapped.metadata().get("source"), Some("test"));
+    }
+
+    #[test]
+    fn event_partition_works_for_typed_payloads() {
+        use std::num::NonZeroU16;
+
+        let count = NonZeroU16::new(16).unwrap();
+        let event: Event<UserUpdated> = Event::builder(
+            "acme",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+                email: "a@example.com".to_owned(),
+            },
+        )
+        .unwrap()
+        .key("user-u-1")
+        .unwrap()
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            event.partition(count),
+            EventKey::new("user-u-1").unwrap().partition_for(count)
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct SerializableUserUpdated {
+        user_id: String,
+        email: String,
+    }
+
+    #[test]
+    fn event_encodes_and_decodes_payload_with_codec() {
+        use crate::JsonPayloadCodec;
+
+        let typed: Event<SerializableUserUpdated> = Event::create(
+            "acme",
+            "/users",
+            "user.updated",
+            SerializableUserUpdated {
+                user_id: "u-1".to_owned(),
+                email: "a@example.com".to_owned(),
+            },
+        )
+        .unwrap();
+
+        let id = typed.id();
+        let encoded = typed.encode_payload(&JsonPayloadCodec).unwrap();
+        assert_eq!(encoded.id(), id);
+        assert_eq!(encoded.payload().content_type(), crate::ContentType::Json);
+
+        let decoded: Event<SerializableUserUpdated> =
+            encoded.decode_payload(&JsonPayloadCodec).unwrap();
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.payload().user_id, "u-1");
     }
 }

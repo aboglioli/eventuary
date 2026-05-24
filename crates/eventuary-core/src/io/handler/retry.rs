@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -7,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::{Handler, Writer};
 use crate::payload::Payload;
+use crate::payload_codec::{EventCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec};
 use crate::serialization::SerializedEvent;
 use crate::topic::Topic;
 
@@ -60,59 +62,107 @@ pub fn backoff_delay(config: &RetryConfig, attempt: u32) -> Duration {
     Duration::from_secs_f64(capped)
 }
 
-pub struct DeadLetterWriter<W: Writer> {
+pub struct DeadLetterWriter<W, C = PayloadEventCodec<PayloadPassthroughCodec>, P = Payload> {
     writer: W,
+    codec: C,
+    _payload: PhantomData<P>,
 }
 
-impl<W: Writer> DeadLetterWriter<W> {
+impl<W> DeadLetterWriter<W, PayloadEventCodec<PayloadPassthroughCodec>, Payload>
+where
+    W: Writer<Payload>,
+{
     pub fn new(writer: W) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            codec: PayloadEventCodec::new(PayloadPassthroughCodec),
+            _payload: PhantomData,
+        }
+    }
+}
+
+impl<W, C, P> DeadLetterWriter<W, C, P>
+where
+    W: Writer<Payload>,
+    C: EventCodec<P>,
+    P: Send + Sync,
+{
+    pub fn with_event_codec(writer: W, codec: C) -> Self {
+        Self {
+            writer,
+            codec,
+            _payload: PhantomData,
+        }
     }
 
     pub async fn send(
         &self,
-        event: &Event,
+        event: &Event<P>,
         handler_id: &str,
         attempts: u32,
         reason: &str,
     ) -> Result<()> {
-        let original = SerializedEvent::from_event(event)?.to_json_value();
+        let encoded = self.codec.encode(event)?;
+        let original = SerializedEvent::from_event(&encoded)?.to_json_value();
         let dead_letter_payload = json!({
             "original_event": original,
-            "original_event_id": event.id().to_string(),
+            "original_event_id": encoded.id().to_string(),
             "handler_id": handler_id,
             "attempts": attempts,
             "error": reason,
             "failed_at": Utc::now(),
         });
 
-        let dead_letter_topic = Topic::new(format!("{}.dead_letter", event.topic().as_str()))?;
+        let dead_letter_topic = Topic::new(format!("{}.dead_letter", encoded.topic().as_str()))?;
         let mut builder = Event::builder(
-            event.organization().as_str(),
-            event.namespace().as_str(),
+            encoded.organization().as_str(),
+            encoded.namespace().as_str(),
             dead_letter_topic.as_str(),
             Payload::from_json(&dead_letter_payload)?,
         )?;
-        if let Some(key) = event.key() {
+        if let Some(key) = encoded.key() {
             builder = builder.key(key.as_str())?;
         }
-        if let Some(correlation_id) = event.correlation_id() {
+        if let Some(correlation_id) = encoded.correlation_id() {
             builder = builder.correlation_id(correlation_id.as_str())?;
         }
-        let dead_letter_event = builder.parent_id(event.id()).build()?;
+        let dead_letter_event = builder.parent_id(encoded.id()).build()?;
         self.writer.write(&dead_letter_event).await
     }
 }
 
-pub struct RetryHandler<H: Handler, P: RetryPolicy, W: Writer> {
+impl<W, C, P> DeadLetterWriter<W, PayloadEventCodec<C>, P>
+where
+    W: Writer<Payload>,
+    C: PayloadCodec<P>,
+    P: Send + Sync,
+{
+    pub fn with_payload_codec(writer: W, codec: C) -> Self {
+        Self {
+            writer,
+            codec: PayloadEventCodec::new(codec),
+            _payload: PhantomData,
+        }
+    }
+}
+
+pub struct RetryHandler<H, P, W, C = PayloadEventCodec<PayloadPassthroughCodec>, Q = Payload> {
     inner: H,
     policy: P,
     config: RetryConfig,
-    dead_letter: DeadLetterWriter<W>,
+    dead_letter: DeadLetterWriter<W, C, Q>,
 }
 
-impl<H: Handler, P: RetryPolicy, W: Writer> RetryHandler<H, P, W> {
-    pub fn new(inner: H, policy: P, config: RetryConfig, dead_letter: DeadLetterWriter<W>) -> Self {
+impl<H, P, W, C, Q> RetryHandler<H, P, W, C, Q>
+where
+    P: RetryPolicy,
+{
+    pub fn new(
+        inner: H,
+        policy: P,
+        config: RetryConfig,
+        dead_letter: DeadLetterWriter<W, C, Q>,
+    ) -> Self {
         Self {
             inner,
             policy,
@@ -122,12 +172,19 @@ impl<H: Handler, P: RetryPolicy, W: Writer> RetryHandler<H, P, W> {
     }
 }
 
-impl<H: Handler, P: RetryPolicy, W: Writer> Handler for RetryHandler<H, P, W> {
+impl<H, P, W, C, Q> Handler<Q> for RetryHandler<H, P, W, C, Q>
+where
+    H: Handler<Q>,
+    P: RetryPolicy,
+    W: Writer<Payload>,
+    C: EventCodec<Q>,
+    Q: Send + Sync + 'static,
+{
     fn id(&self) -> &str {
         self.inner.id()
     }
 
-    async fn handle(&self, event: &Event) -> Result<()> {
+    async fn handle(&self, event: &Event<Q>) -> Result<()> {
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -172,15 +229,18 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::payload::Payload;
-
     fn make_event() -> Event {
-        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .build()
-            .expect("valid event")
+        Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            super::Payload::from_string("p"),
+        )
+        .unwrap()
+        .key("k")
+        .unwrap()
+        .build()
+        .expect("valid event")
     }
 
     struct CapturingWriter {

@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,22 +9,30 @@ use tokio_util::task::TaskTracker;
 use crate::error::{Error, Result};
 use crate::io::acker::NackContext;
 use crate::io::{Handler, Reader};
+use crate::payload::Payload;
 
-pub struct BackgroundConsumer<R: Reader, H: Handler> {
+pub struct BackgroundConsumer<R, H, P = Payload>
+where
+    R: Reader<P>,
+    H: Handler<P>,
+    P: Send + Sync,
+{
     reader: R,
     subscription: R::Subscription,
     handler: Arc<H>,
     concurrency: usize,
     batch_size: usize,
     handler_timeout: Option<Duration>,
+    _payload: PhantomData<P>,
 }
 
-impl<R, H> BackgroundConsumer<R, H>
+impl<R, H, P> BackgroundConsumer<R, H, P>
 where
-    R: Reader + Send + 'static,
+    R: Reader<P> + Send + 'static,
     R::Stream: 'static,
     R::Cursor: Send + Sync + 'static,
-    H: Handler + 'static,
+    H: Handler<P> + 'static,
+    P: Send + Sync + 'static,
 {
     pub fn new(reader: R, subscription: R::Subscription, handler: H, concurrency: usize) -> Self {
         let concurrency = concurrency.max(1);
@@ -34,6 +43,7 @@ where
             concurrency,
             batch_size: concurrency,
             handler_timeout: None,
+            _payload: PhantomData,
         }
     }
 
@@ -267,6 +277,46 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    struct TypedVecReader {
+        events: Mutex<Option<Vec<Event<UserUpdated>>>>,
+    }
+
+    impl TypedVecReader {
+        fn new(events: Vec<Event<UserUpdated>>) -> Self {
+            Self {
+                events: Mutex::new(Some(events)),
+            }
+        }
+    }
+
+    impl Reader<UserUpdated> for TypedVecReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = NoCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor, UserUpdated>>> + Send>>;
+
+        async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
+            let events = self
+                .events
+                .lock()
+                .unwrap()
+                .take()
+                .expect("read called twice");
+            let stream = futures::stream::iter(
+                events
+                    .into_iter()
+                    .map(|e| Ok(Message::new(e, NoopAcker, NoCursor))),
+            );
+            Ok(Box::pin(stream))
+        }
+    }
+
     struct CountingHandler {
         id: String,
         count: Arc<AtomicUsize>,
@@ -278,6 +328,25 @@ mod tests {
         }
         async fn handle(&self, _: &Event) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct TypedCountingHandler {
+        id: String,
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Handler<UserUpdated> for TypedCountingHandler {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        async fn handle(&self, event: &Event<UserUpdated>) -> Result<()> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(event.payload().user_id.clone());
             Ok(())
         }
     }
@@ -327,6 +396,46 @@ mod tests {
         let handle = consumer.spawn();
         handle.shutdown().await.unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn handles_typed_events() {
+        let events = vec![
+            Event::create(
+                "org",
+                "/users",
+                "user.updated",
+                UserUpdated {
+                    user_id: "u-1".to_owned(),
+                },
+            )
+            .unwrap(),
+            Event::create(
+                "org",
+                "/users",
+                "user.updated",
+                UserUpdated {
+                    user_id: "u-2".to_owned(),
+                },
+            )
+            .unwrap(),
+        ];
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let consumer = BackgroundConsumer::new(
+            TypedVecReader::new(events),
+            subscription(),
+            TypedCountingHandler {
+                id: "typed".into(),
+                seen: Arc::clone(&seen),
+            },
+            2,
+        );
+        let handle = consumer.spawn();
+        handle.shutdown().await.unwrap();
+
+        let mut seen = seen.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(seen, vec!["u-1".to_owned(), "u-2".to_owned()]);
     }
 
     #[tokio::test]
