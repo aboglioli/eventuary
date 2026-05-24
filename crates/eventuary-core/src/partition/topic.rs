@@ -6,8 +6,8 @@ use crate::partition::types::PartitionKey;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TopicPartitionKeyResolver;
 
-impl PartitionKeyResolver for TopicPartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
+impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for TopicPartitionKeyResolver {
+    fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         PartitionKey::new(event.topic().as_str())
     }
 }

@@ -5,10 +5,8 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use std::num::NonZeroU16;
-
 use crate::error::Result;
-use crate::event_key::{EventKey, Partition, fnv1a_u64};
+use crate::event_key::EventKey;
 use crate::metadata::Metadata;
 use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
@@ -230,23 +228,6 @@ impl<P> Event<P> {
         self.key.as_ref()
     }
 
-    /// Determine the partition for this event within a given count.
-    /// Uses the event key if present, falls back to event id bytes.
-    #[deprecated(
-        since = "0.1.0-alpha.2",
-        note = "Use the resolver/hasher pipeline via `PartitionHasher::partition_for(&PartitionKey, count)`. \
-                See `PartitionRouteStrategy::ResolverHasher` for `PartitionedReader` integration."
-    )]
-    #[allow(deprecated)]
-    pub fn partition(&self, count: NonZeroU16) -> Partition {
-        match self.key() {
-            Some(key) => key.partition_for(count),
-            None => {
-                let id = (fnv1a_u64(self.id().as_uuid().as_bytes()) % count.get() as u64) as u16;
-                Partition::new(id, count).expect("id < count by modulo")
-            }
-        }
-    }
     pub fn parent_id(&self) -> Option<EventId> {
         self.parent_id
     }
@@ -464,11 +445,9 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn event_partition_works_for_typed_payloads() {
-        use std::num::NonZeroU16;
+    fn typed_payload_event_resolves_to_partition_key() {
+        use crate::partition::{EventKeyPartitionKeyResolver, PartitionKeyResolver};
 
-        let count = NonZeroU16::new(16).unwrap();
         let event: Event<UserUpdated> = Event::builder(
             "acme",
             "/users",
@@ -484,10 +463,9 @@ mod tests {
         .build()
         .unwrap();
 
-        assert_eq!(
-            event.partition(count),
-            EventKey::new("user-u-1").unwrap().partition_for(count)
-        );
+        let resolver = EventKeyPartitionKeyResolver::event_id_on_unkeyed();
+        let key = resolver.partition_key(&event).unwrap();
+        assert_eq!(key.as_str(), "user-u-1");
     }
 
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

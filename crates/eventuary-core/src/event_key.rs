@@ -69,17 +69,6 @@ impl EventKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Determine the partition for this key within a given count.
-    #[deprecated(
-        since = "0.1.0-alpha.2",
-        note = "Use the resolver/hasher pipeline via `PartitionHasher::partition_for(&PartitionKey, count)`. \
-                See `EventKeyPartitionKeyResolver` + `Fnv1a64PartitionHasher`."
-    )]
-    pub fn partition_for(&self, count: NonZeroU16) -> Partition {
-        let id = (fnv1a_u64(self.0.as_bytes()) % count.get() as u64) as u16;
-        Partition::new(id, count).expect("id < count by modulo")
-    }
 }
 
 impl fmt::Display for EventKey {
@@ -102,7 +91,6 @@ impl From<EventKey> for String {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -122,39 +110,6 @@ mod tests {
     fn too_long_key_fails() {
         let s = "a".repeat(1025);
         assert!(EventKey::new(s).is_err());
-    }
-
-    #[test]
-    fn partition_is_deterministic() {
-        let key = EventKey::new("user-42").unwrap();
-        let partitions = NonZeroU16::new(16).unwrap();
-        let first = key.partition_for(partitions);
-        let second = key.partition_for(partitions);
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn partition_stays_in_range() {
-        let partitions = NonZeroU16::new(8).unwrap();
-        for i in 0..1024 {
-            let key = EventKey::new(format!("key-{i}")).unwrap();
-            assert!(key.partition_for(partitions).id() < 8);
-        }
-    }
-
-    #[test]
-    fn same_key_same_partition() {
-        let partitions = NonZeroU16::new(32).unwrap();
-        let a = EventKey::new("order-7").unwrap();
-        let b = EventKey::new("order-7").unwrap();
-        assert_eq!(a.partition_for(partitions), b.partition_for(partitions));
-    }
-
-    #[test]
-    fn fnv_known_vector_remains_stable() {
-        let key = EventKey::new("user-42").unwrap();
-        let partitions = NonZeroU16::new(16).unwrap();
-        assert_eq!(key.partition_for(partitions).id(), 11);
     }
 
     #[test]
@@ -180,5 +135,14 @@ mod tests {
         assert_eq!(value["count"], 8);
         let decoded: Partition = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, p);
+    }
+
+    #[test]
+    fn fnv1a_known_vector_remains_stable() {
+        // Anchors the stable hash used by Fnv1a64PartitionHasher and the
+        // PartitionedReader EventCompatibility route strategy.
+        let count = NonZeroU16::new(16).unwrap();
+        let id = (fnv1a_u64("user-42".as_bytes()) % count.get() as u64) as u16;
+        assert_eq!(id, 11);
     }
 }
