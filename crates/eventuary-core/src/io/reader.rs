@@ -215,6 +215,7 @@ mod tests {
 pub mod batch;
 pub mod buffer;
 pub mod checkpoint;
+pub mod claim_buffer;
 pub mod concurrency_limit;
 pub mod dedupe;
 pub mod encoded_cursor;
@@ -239,6 +240,7 @@ pub use checkpoint::{
     CheckpointStore, CheckpointStream, CheckpointSubscription, InvalidCursorPolicy,
     MissingCheckpointPolicy,
 };
+pub use claim_buffer::{ClaimedBufferEntry, ClaimedBufferStore};
 pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
 pub use encoded_cursor::{EncodedCursorReader, EncodedCursorSubscription};
