@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -85,6 +85,8 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         partition_renew_interval: Duration::from_secs(15),
         consumer_lease_duration: Duration::from_secs(30),
         consumer_heartbeat_interval: Duration::from_secs(10),
+        rebalance_interval: Duration::from_millis(100),
+        partition_slack: 0,
     };
 
     let group = ConsumerGroupId::new("test-group").unwrap();
@@ -166,4 +168,177 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         overlap.is_empty(),
         "partitions should be disjoint; overlap={overlap:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
+    let (_c, pool) = start_postgres().await;
+
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            partition_count,
+            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let writer = PgWriter::new_with_config(pool.clone(), writer_config);
+
+    for i in 0..16u32 {
+        writer
+            .write(&event_with_key(&format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let reader_config = PgCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(10),
+        partition_renew_interval: Duration::from_secs(5),
+        consumer_lease_duration: Duration::from_secs(10),
+        consumer_heartbeat_interval: Duration::from_secs(3),
+        rebalance_interval: Duration::from_millis(200),
+        partition_slack: 0,
+    };
+
+    let group = ConsumerGroupId::new("rebalance-group").unwrap();
+    let stream_id = StreamId::new("orders").unwrap();
+
+    let make_sub = |g: ConsumerGroupId, s: StreamId| PgCoordinatedSubscription {
+        consumer_group_id: g,
+        stream_id: s,
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: PgSubscription {
+            start: StartFrom::Earliest,
+            ..PgSubscription::default()
+        },
+    };
+
+    let reader_a = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-a").unwrap(),
+        reader_config,
+    );
+    let stream_a = reader_a
+        .read(make_sub(group.clone(), stream_id.clone()))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let reader_b = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-b").unwrap(),
+        reader_config,
+    );
+    let stream_b = reader_b
+        .read(make_sub(group.clone(), stream_id.clone()))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let owned_after_b = query_owned_partitions(&pool, &group, &stream_id).await;
+    let owners_after_b: HashSet<String> = owned_after_b.values().cloned().collect();
+    assert!(
+        owners_after_b.contains("owner-a") || owners_after_b.contains("owner-b"),
+        "at least one owner should hold partitions after B joins; got {owners_after_b:?}"
+    );
+    let max_owned_after_b = owners_after_b
+        .iter()
+        .map(|owner| owned_after_b.values().filter(|v| *v == owner).count())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_owned_after_b <= 4,
+        "no owner should hold more than 4 partitions; got {max_owned_after_b}"
+    );
+
+    let reader_c = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-c").unwrap(),
+        reader_config,
+    );
+    let stream_c = reader_c
+        .read(make_sub(group.clone(), stream_id.clone()))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let owned_after_c = query_owned_partitions(&pool, &group, &stream_id).await;
+
+    assert_eq!(
+        owned_after_c.len(),
+        4,
+        "all 4 partitions should be owned; got {:?}",
+        owned_after_c
+    );
+
+    let all_owners: HashSet<&String> = owned_after_c.values().collect();
+    for owner in &all_owners {
+        let count = owned_after_c.values().filter(|v| v == owner).count();
+        assert!(
+            count <= 2,
+            "owner {owner} holds {count} partitions, expected at most ceil(4/3)=2; distribution: {owned_after_c:?}"
+        );
+    }
+
+    let known_owners: HashSet<&str> = ["owner-a", "owner-b", "owner-c"].iter().copied().collect();
+    for owner in owned_after_c.values() {
+        assert!(
+            known_owners.contains(owner.as_str()),
+            "unexpected owner {owner}"
+        );
+    }
+
+    let drain_some = |mut stream: eventuary_core::io::stream::SpawnedStream<
+        eventuary_postgres::PgCoordinatedAcker,
+        eventuary_postgres::PgPartitionCursor,
+    >| async move {
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_millis(200), stream.next()).await {
+            let _ = msg.ack().await;
+        }
+    };
+
+    tokio::join!(
+        drain_some(stream_a),
+        drain_some(stream_b),
+        drain_some(stream_c)
+    );
+}
+
+async fn query_owned_partitions(
+    pool: &PgPool,
+    group: &ConsumerGroupId,
+    stream_id: &StreamId,
+) -> HashMap<i32, String> {
+    let rows = sqlx::query(
+        "SELECT partition_id, owner_id FROM event_stream_partitions \
+         WHERE consumer_group_id = $1 AND stream_id = $2 AND owner_id IS NOT NULL \
+           AND lease_until > NOW()",
+    )
+    .bind(group.as_str())
+    .bind(stream_id.as_str())
+    .fetch_all(pool)
+    .await
+    .unwrap();
+
+    rows.into_iter()
+        .map(|r| {
+            let partition_id: i32 = r.get("partition_id");
+            let owner_id: String = r.get("owner_id");
+            (partition_id, owner_id)
+        })
+        .collect()
 }
