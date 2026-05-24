@@ -147,6 +147,7 @@ pub mod inspect;
 pub mod multiplexer;
 pub mod rate_limit;
 pub mod retry;
+pub mod subscriber_work;
 pub mod timeout;
 
 pub use filtered::FilteredHandler;
@@ -159,5 +160,9 @@ pub use rate_limit::{HandlerRateLimit, RateLimitHandler};
 pub use retry::{
     DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler, RetryPolicy,
     backoff_delay,
+};
+pub use subscriber_work::{
+    SubscriberWorkAcker, SubscriberWorkItem, SubscriberWorkReader, SubscriberWorkRoute,
+    SubscriberWorkRouter, SubscriberWorkStore, SubscriberWorkSubscription,
 };
 pub use timeout::TimeoutHandler;
