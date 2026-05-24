@@ -133,7 +133,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
     let drain = |mut stream: PgCoordinatedStream| async move {
         let mut results: HashMap<u16, Vec<String>> = HashMap::new();
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(2), stream.next()).await {
-            let partition_id = msg.cursor().partition_id();
+            let partition_id = msg.cursor().partition.id();
             let key = msg
                 .event()
                 .key()

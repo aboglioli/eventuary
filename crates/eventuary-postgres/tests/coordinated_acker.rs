@@ -10,7 +10,7 @@ use eventuary_core::Partition;
 use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{Acker, ConsumerGroupId, OwnerId, PartitionCoordinator, StreamId};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::reader::PgCursorAcker;
+use eventuary_postgres::reader::{PgCursor, PgCursorAcker};
 use eventuary_postgres::{
     PgCoordinatedAcker, PgPartitionCoordinator, PgPartitionCoordinatorConfig,
 };
@@ -66,8 +66,12 @@ async fn acker_ack_advances_checkpoint() {
         .unwrap()
         .expect("claim succeeded");
 
-    let acker =
-        PgCoordinatedAcker::new(PgCursorAcker::dummy(50), Arc::clone(&coord_arc), lease, 50);
+    let acker = PgCoordinatedAcker::new(
+        PgCursorAcker::dummy(50),
+        Arc::clone(&coord_arc),
+        lease,
+        PgCursor::new(50),
+    );
 
     acker.ack().await.unwrap();
 
@@ -119,7 +123,7 @@ async fn acker_ack_fails_after_partition_taken_over() {
         PgCursorAcker::dummy(50),
         Arc::clone(&coord_arc),
         lease_a,
-        50,
+        PgCursor::new(50),
     );
 
     let err = stale_acker.ack().await.unwrap_err();
@@ -147,7 +151,7 @@ async fn acker_nack_does_not_touch_checkpoint() {
         PgCursorAcker::dummy(100),
         Arc::clone(&coord_arc),
         lease,
-        100,
+        PgCursor::new(100),
     );
 
     acker.nack().await.unwrap();
