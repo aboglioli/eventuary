@@ -113,13 +113,13 @@ impl PgPartitionBackfill {
                 let event = serialized.to_event()?;
 
                 let partition_key = self.config.key_resolver.partition_key(&event)?;
-                let partition_hash_u64 = self.config.hasher.hash(&partition_key);
-                let partition_id = (partition_hash_u64 % count as u64) as i32;
+                let partition_hash = self.config.hasher.hash(&partition_key);
+                let partition_id = (partition_hash.get() % count as u64) as i32;
                 let partition_strategy = self.config.hasher.strategy().to_owned();
 
                 let result = sqlx::query(&update_sql)
-                    .bind(&partition_key)
-                    .bind(partition_hash_u64 as i64)
+                    .bind(partition_key.as_str())
+                    .bind(partition_hash.to_sql_i64())
                     .bind(partition_id)
                     .bind(count as i32)
                     .bind(&partition_strategy)

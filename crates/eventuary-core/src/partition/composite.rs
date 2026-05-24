@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::event::Event;
 use crate::partition::PartitionKeyResolver;
+use crate::partition::types::PartitionKey;
 
 pub struct CompositePartitionKeyResolver {
     parts: Vec<Arc<dyn PartitionKeyResolver>>,
@@ -24,13 +25,18 @@ impl CompositePartitionKeyResolver {
 }
 
 impl PartitionKeyResolver for CompositePartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<String> {
+    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
         let segments = self
             .parts
             .iter()
             .map(|r| r.partition_key(event))
             .collect::<Result<Vec<_>>>()?;
-        Ok(segments.join(&self.separator))
+        let joined = segments
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(&self.separator);
+        PartitionKey::new(joined)
     }
 }
 
@@ -59,7 +65,7 @@ mod tests {
         ]);
         let event = test_event();
         assert_eq!(
-            resolver.partition_key(&event).unwrap(),
+            resolver.partition_key(&event).unwrap().as_str(),
             "acme:invoice.created"
         );
     }
@@ -73,7 +79,7 @@ mod tests {
         .with_separator("|");
         let event = test_event();
         assert_eq!(
-            resolver.partition_key(&event).unwrap(),
+            resolver.partition_key(&event).unwrap().as_str(),
             "acme|invoice.created"
         );
     }

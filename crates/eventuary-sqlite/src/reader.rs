@@ -613,7 +613,7 @@ mod tests {
     use crate::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
     use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder, Reader, Writer};
     use eventuary_core::partition::{
-        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher,
+        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
     };
     use eventuary_core::{Event, Payload, StartFrom, StopAt};
 
@@ -663,8 +663,9 @@ mod tests {
     }
 
     fn partition_for_key(key: &str) -> u16 {
-        let hash = Fnv1a64PartitionHasher.hash(key);
-        (hash % PARTITION_COUNT as u64) as u16
+        let k = PartitionKey::new(key).unwrap();
+        let hash = Fnv1a64PartitionHasher.hash(&k);
+        (hash.get() % PARTITION_COUNT as u64) as u16
     }
 
     fn fast_config() -> SqliteReaderConfig {

@@ -1,13 +1,14 @@
 use crate::error::Result;
 use crate::event::Event;
 use crate::partition::PartitionKeyResolver;
+use crate::partition::types::PartitionKey;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NamespacePartitionKeyResolver;
 
 impl PartitionKeyResolver for NamespacePartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<String> {
-        Ok(event.namespace().as_str().to_owned())
+    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
+        PartitionKey::new(event.namespace().as_str())
     }
 }
 
@@ -27,7 +28,7 @@ mod tests {
             Payload::from_string("{}"),
         )
         .unwrap();
-        assert_eq!(resolver.partition_key(&event).unwrap(), "/billing");
+        assert_eq!(resolver.partition_key(&event).unwrap().as_str(), "/billing");
     }
 
     #[test]
@@ -40,6 +41,9 @@ mod tests {
             Payload::from_string("{}"),
         )
         .unwrap();
-        assert_eq!(resolver.partition_key(&event).unwrap(), "/billing/invoices");
+        assert_eq!(
+            resolver.partition_key(&event).unwrap().as_str(),
+            "/billing/invoices"
+        );
     }
 }

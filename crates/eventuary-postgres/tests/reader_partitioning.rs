@@ -9,7 +9,7 @@ use tokio::time::timeout;
 
 use eventuary_core::io::{Acker, Reader, Writer};
 use eventuary_core::partition::{
-    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher,
+    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
 };
 use eventuary_core::{Event, Payload, StartFrom, StopAt};
 use eventuary_postgres::PgPartitioningConfig;
@@ -53,8 +53,9 @@ fn event_with_key(key: &str) -> Event {
 }
 
 fn partition_for_key(key: &str) -> u16 {
-    let hash = Fnv1a64PartitionHasher.hash(key);
-    (hash % PARTITION_COUNT as u64) as u16
+    let k = PartitionKey::new(key).unwrap();
+    let hash = Fnv1a64PartitionHasher.hash(&k);
+    (hash.get() % PARTITION_COUNT as u64) as u16
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

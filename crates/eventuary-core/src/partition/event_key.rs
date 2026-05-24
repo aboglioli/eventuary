@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::partition::types::PartitionKey;
 use crate::partition::{PartitionKeyResolver, UnkeyedPartitionMode};
 
 pub struct EventKeyPartitionKeyResolver {
@@ -27,14 +28,16 @@ impl Default for EventKeyPartitionKeyResolver {
 }
 
 impl PartitionKeyResolver for EventKeyPartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<String> {
+    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
         match event.key() {
-            Some(k) => Ok(k.as_str().to_owned()),
+            Some(k) => PartitionKey::new(k.as_str()),
             None => match self.unkeyed_mode {
                 UnkeyedPartitionMode::Error => Err(Error::InvalidEventKey(
                     "unkeyed event rejected by resolver".to_owned(),
                 )),
-                UnkeyedPartitionMode::EventId => Ok(event.id().as_uuid().to_string()),
+                UnkeyedPartitionMode::EventId => {
+                    PartitionKey::new(event.id().as_uuid().to_string())
+                }
             },
         }
     }
@@ -75,7 +78,10 @@ mod tests {
     fn resolves_key_when_present() {
         let resolver = EventKeyPartitionKeyResolver::default();
         let event = keyed_event();
-        assert_eq!(resolver.partition_key(&event).unwrap(), "invoice-123");
+        assert_eq!(
+            resolver.partition_key(&event).unwrap().as_str(),
+            "invoice-123"
+        );
     }
 
     #[test]
@@ -83,7 +89,7 @@ mod tests {
         let resolver = EventKeyPartitionKeyResolver::event_id_on_unkeyed();
         let event = unkeyed_event();
         let key = resolver.partition_key(&event).unwrap();
-        assert_eq!(key, event.id().as_uuid().to_string());
+        assert_eq!(key.as_str(), event.id().as_uuid().to_string());
     }
 
     #[test]

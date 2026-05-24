@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use crate::event::Event;
+use crate::partition::types::PartitionKey;
 use crate::partition::{PartitionKeyResolver, UnkeyedPartitionMode};
 
 pub struct MetadataPartitionKeyResolver {
@@ -17,15 +18,17 @@ impl MetadataPartitionKeyResolver {
 }
 
 impl PartitionKeyResolver for MetadataPartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<String> {
+    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
         match event.metadata().get(&self.field) {
-            Some(value) => Ok(value.to_owned()),
+            Some(value) => PartitionKey::new(value),
             None => match self.unkeyed_mode {
                 UnkeyedPartitionMode::Error => Err(Error::InvalidEventKey(format!(
                     "unkeyed event rejected by resolver: metadata field '{}' not found",
                     self.field
                 ))),
-                UnkeyedPartitionMode::EventId => Ok(event.id().as_uuid().to_string()),
+                UnkeyedPartitionMode::EventId => {
+                    PartitionKey::new(event.id().as_uuid().to_string())
+                }
             },
         }
     }
@@ -67,7 +70,10 @@ mod tests {
     fn resolves_metadata_field() {
         let resolver = MetadataPartitionKeyResolver::new("tenant", UnkeyedPartitionMode::Error);
         let event = event_with_metadata("tenant", "acme-corp");
-        assert_eq!(resolver.partition_key(&event).unwrap(), "acme-corp");
+        assert_eq!(
+            resolver.partition_key(&event).unwrap().as_str(),
+            "acme-corp"
+        );
     }
 
     #[test]
@@ -83,6 +89,6 @@ mod tests {
         let resolver = MetadataPartitionKeyResolver::new("tenant", UnkeyedPartitionMode::EventId);
         let event = event_without_metadata();
         let key = resolver.partition_key(&event).unwrap();
-        assert_eq!(key, event.id().as_uuid().to_string());
+        assert_eq!(key.as_str(), event.id().as_uuid().to_string());
     }
 }

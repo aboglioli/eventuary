@@ -8,7 +8,7 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 use eventuary_core::io::Writer;
 use eventuary_core::partition::{
-    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher,
+    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
 };
 use eventuary_core::{Event, Payload};
 use eventuary_postgres::database::PgDatabase;
@@ -93,9 +93,10 @@ async fn pg_partition_backfill_populates_partition_columns() {
 
     for (i, row) in rows.iter().enumerate() {
         let expected_key = format!("k{i}");
-        let expected_hash_u64 = hasher.hash(&expected_key);
-        let expected_hash_i64 = expected_hash_u64 as i64;
-        let expected_partition_id = (expected_hash_u64 % 4) as i32;
+        let expected_pk = PartitionKey::new(&expected_key).unwrap();
+        let expected_hash = hasher.hash(&expected_pk);
+        let expected_hash_i64 = expected_hash.to_sql_i64();
+        let expected_partition_id = (expected_hash.get() % 4) as i32;
 
         let partition_key: Option<String> = row.get("partition_key");
         let partition_hash: Option<i64> = row.get("partition_hash");

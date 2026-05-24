@@ -100,13 +100,13 @@ impl SqliteWriter {
                 hasher,
             } => {
                 let partition_key = key_resolver.partition_key(event)?;
-                let partition_hash_u64 = hasher.hash(&partition_key);
+                let partition_hash = hasher.hash(&partition_key);
                 let count = partition_count.get();
-                let partition_id = (partition_hash_u64 % count as u64) as i64;
+                let partition_id = (partition_hash.get() % count as u64) as i64;
                 let partition_strategy = hasher.strategy().to_owned();
                 Ok(PartitionData {
-                    partition_key: Some(partition_key),
-                    partition_hash: Some(partition_hash_u64 as i64),
+                    partition_key: Some(partition_key.as_str().to_owned()),
+                    partition_hash: Some(partition_hash.to_sql_i64()),
                     partition_id: Some(partition_id),
                     partition_count: Some(count as i64),
                     partition_strategy: Some(partition_strategy),

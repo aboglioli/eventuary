@@ -1,13 +1,14 @@
 use crate::error::Result;
 use crate::event::Event;
 use crate::partition::PartitionKeyResolver;
+use crate::partition::types::PartitionKey;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TopicPartitionKeyResolver;
 
 impl PartitionKeyResolver for TopicPartitionKeyResolver {
-    fn partition_key(&self, event: &Event) -> Result<String> {
-        Ok(event.topic().as_str().to_owned())
+    fn partition_key(&self, event: &Event) -> Result<PartitionKey> {
+        PartitionKey::new(event.topic().as_str())
     }
 }
 
@@ -27,6 +28,9 @@ mod tests {
             Payload::from_string("{}"),
         )
         .unwrap();
-        assert_eq!(resolver.partition_key(&event).unwrap(), "invoice.created");
+        assert_eq!(
+            resolver.partition_key(&event).unwrap().as_str(),
+            "invoice.created"
+        );
     }
 }
