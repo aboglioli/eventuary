@@ -234,6 +234,12 @@ impl Event {
 
     /// Determine the partition for this event within a given count.
     /// Uses the event key if present, falls back to event id bytes.
+    #[deprecated(
+        since = "0.1.0-alpha.2",
+        note = "Use the resolver/hasher pipeline via `PartitionHasher::partition_for(&PartitionKey, count)`. \
+                See `PartitionRouteStrategy::ResolverHasher` for `PartitionedReader` integration."
+    )]
+    #[allow(deprecated)]
     pub fn partition(&self, count: NonZeroU16) -> Partition {
         match self.key() {
             Some(key) => key.partition_for(count),

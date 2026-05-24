@@ -666,7 +666,11 @@ fn compute_partition(
     strategy: &PartitionRouteStrategy,
 ) -> Result<Partition> {
     match strategy {
-        PartitionRouteStrategy::EventCompatibility => Ok(event.partition(count)),
+        PartitionRouteStrategy::EventCompatibility =>
+        {
+            #[allow(deprecated)]
+            Ok(event.partition(count))
+        }
         PartitionRouteStrategy::ResolverHasher {
             key_resolver,
             hasher,
@@ -1240,6 +1244,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn event_compatibility_routes_via_event_partition() {
         let count_nz = NonZeroU16::new(4).unwrap();
         let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
