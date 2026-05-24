@@ -10,11 +10,12 @@ use tokio::time::timeout;
 use eventuary_core::io::{Acker, Reader, Writer};
 use eventuary_core::partition::{
     EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
+    PartitionSelection,
 };
-use eventuary_core::{Event, Payload, StartFrom, StopAt};
+use eventuary_core::{Event, Partition, Payload, StartFrom, StopAt};
 use eventuary_postgres::PgPartitioningConfig;
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::reader::{PgPartitionSelection, PgReader, PgReaderConfig, PgSubscription};
+use eventuary_postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
 use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
@@ -134,10 +135,9 @@ async fn pg_reader_one_filters_to_single_partition() {
     let subscription = PgSubscription {
         start: StartFrom::Earliest,
         stop_at: StopAt::CurrentEnd,
-        partitions: PgPartitionSelection::One {
-            count: NonZeroU16::new(PARTITION_COUNT).unwrap(),
-            id: chosen_partition,
-        },
+        partitions: PartitionSelection::One(
+            Partition::new(chosen_partition, NonZeroU16::new(PARTITION_COUNT).unwrap()).unwrap(),
+        ),
         ..PgSubscription::default()
     };
     let mut stream = reader.read(subscription).await.unwrap();

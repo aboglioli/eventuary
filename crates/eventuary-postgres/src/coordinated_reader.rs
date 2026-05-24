@@ -12,12 +12,13 @@ use eventuary_core::io::{
     ConsumerGroupId, Message, OwnerId, PartitionCoordinator, PartitionLease, Reader, StartFrom,
     StreamId,
 };
-use eventuary_core::{Error, Result};
+use eventuary_core::partition::PartitionSelection;
+use eventuary_core::{Error, Partition, Result};
 
 use crate::coordinated_acker::PgCoordinatedAcker;
 use crate::partition_coordinator::PgPartitionCoordinator;
 use crate::partition_cursor::PgPartitionCursor;
-use crate::reader::{PgCursor, PgPartitionSelection, PgReader, PgSubscription};
+use crate::reader::{PgCursor, PgReader, PgSubscription};
 
 #[derive(Clone, Copy)]
 pub struct PgCoordinatedReaderConfig {
@@ -133,10 +134,10 @@ async fn partition_worker(
     };
     let inner_sub = PgSubscription {
         start: inner_start,
-        partitions: PgPartitionSelection::One {
-            count: partition_count,
-            id: lease.partition_id,
-        },
+        partitions: PartitionSelection::One(
+            Partition::new(lease.partition_id, partition_count)
+                .expect("claim invariant: id < count"),
+        ),
         ..inner_subscription_template
     };
 
