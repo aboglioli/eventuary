@@ -6,7 +6,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver};
+use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver, PartitionStrategy};
 use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
 
 use crate::relation::PgRelationName;
@@ -65,7 +65,6 @@ impl PgPartitionBackfill {
 
     pub async fn run(&self) -> Result<BackfillReport> {
         let events = self.config.events_relation.render();
-        let count = self.config.partition_count.get();
         let batch_size = self.config.batch_size;
         let mut report = BackfillReport::default();
 
@@ -114,15 +113,18 @@ impl PgPartitionBackfill {
 
                 let partition_key = self.config.key_resolver.partition_key(&event)?;
                 let partition_hash = self.config.hasher.hash(&partition_key);
-                let partition_id = (partition_hash.get() % count as u64) as i32;
-                let partition_strategy = self.config.hasher.strategy().to_owned();
+                let partition = self
+                    .config
+                    .hasher
+                    .partition_for(&partition_key, self.config.partition_count);
+                let partition_strategy = PartitionStrategy::new(self.config.hasher.strategy())?;
 
                 let result = sqlx::query(&update_sql)
                     .bind(partition_key.as_str())
                     .bind(partition_hash.to_sql_i64())
-                    .bind(partition_id)
-                    .bind(count as i32)
-                    .bind(&partition_strategy)
+                    .bind(partition.id() as i32)
+                    .bind(partition.count() as i32)
+                    .bind(partition_strategy.as_str())
                     .bind(sequence)
                     .execute(&mut *tx)
                     .await

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use eventuary_core::io::Writer;
-use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver};
+use eventuary_core::partition::{
+    PartitionHash, PartitionHasher, PartitionKey, PartitionKeyResolver, PartitionStrategy,
+};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::relation::PgRelationName;
@@ -103,14 +105,13 @@ impl PgWriter {
             } => {
                 let partition_key = key_resolver.partition_key(event)?;
                 let partition_hash = hasher.hash(&partition_key);
-                let count = partition_count.get();
-                let partition_id = (partition_hash.get() % count as u64) as i32;
-                let partition_strategy = hasher.strategy().to_owned();
+                let partition = hasher.partition_for(&partition_key, *partition_count);
+                let partition_strategy = PartitionStrategy::new(hasher.strategy())?;
                 Ok(PartitionData {
-                    partition_key: Some(partition_key.as_str().to_owned()),
-                    partition_hash: Some(partition_hash.to_sql_i64()),
-                    partition_id: Some(partition_id),
-                    partition_count: Some(count as i32),
+                    partition_key: Some(partition_key),
+                    partition_hash: Some(partition_hash),
+                    partition_id: Some(partition.id() as i32),
+                    partition_count: Some(partition.count() as i32),
                     partition_strategy: Some(partition_strategy),
                 })
             }
@@ -137,11 +138,11 @@ impl Writer for PgWriter {
             .bind(&row.parent_id)
             .bind(&row.correlation_id)
             .bind(&row.causation_id)
-            .bind(&pd.partition_key)
-            .bind(pd.partition_hash)
+            .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
+            .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
             .bind(pd.partition_id)
             .bind(pd.partition_count)
-            .bind(&pd.partition_strategy)
+            .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -175,11 +176,11 @@ impl Writer for PgWriter {
                 .bind(&row.parent_id)
                 .bind(&row.correlation_id)
                 .bind(&row.causation_id)
-                .bind(&pd.partition_key)
-                .bind(pd.partition_hash)
+                .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
+                .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
                 .bind(pd.partition_id)
                 .bind(pd.partition_count)
-                .bind(&pd.partition_strategy)
+                .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| Error::Store(e.to_string()))?;
@@ -191,11 +192,11 @@ impl Writer for PgWriter {
 
 #[derive(Default)]
 struct PartitionData {
-    partition_key: Option<String>,
-    partition_hash: Option<i64>,
+    partition_key: Option<PartitionKey>,
+    partition_hash: Option<PartitionHash>,
     partition_id: Option<i32>,
     partition_count: Option<i32>,
-    partition_strategy: Option<String>,
+    partition_strategy: Option<PartitionStrategy>,
 }
 
 struct EventRow {
