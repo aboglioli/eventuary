@@ -20,12 +20,12 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::Result;
 use crate::error::Error;
-use crate::event_key::Partition;
 use crate::io::partition_coordinator::{PartitionCoordinator, PartitionLease};
 use crate::io::partitionable_subscription::PartitionableSubscription;
 use crate::io::position::StartFrom;
 use crate::io::reader::CheckpointScope;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, OwnerId, Reader};
+use crate::partition::Partition;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CoordinatedReaderConfig {

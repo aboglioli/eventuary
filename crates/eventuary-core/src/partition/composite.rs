@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
+use super::{PartitionKey, PartitionKeyResolver};
 use crate::error::Result;
 use crate::event::Event;
-use crate::partition::PartitionKeyResolver;
-use crate::partition::types::PartitionKey;
 use crate::payload::Payload;
 
 pub struct CompositePartitionKeyResolver<P = Payload> {
@@ -43,9 +42,9 @@ impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for CompositePartitionKey
 
 #[cfg(test)]
 mod tests {
+    use super::super::{OrganizationPartitionKeyResolver, TopicPartitionKeyResolver};
     use super::*;
     use crate::event::Event;
-    use crate::partition::{OrganizationPartitionKeyResolver, TopicPartitionKeyResolver};
     use crate::payload::Payload;
 
     fn test_event() -> Event {
@@ -87,7 +86,7 @@ mod tests {
 
     #[test]
     fn propagates_child_error() {
-        use crate::partition::{EventKeyPartitionKeyResolver, UnkeyedPartitionMode};
+        use super::super::{EventKeyPartitionKeyResolver, UnkeyedPartitionMode};
 
         let resolver = CompositePartitionKeyResolver::new(vec![
             Arc::new(OrganizationPartitionKeyResolver),

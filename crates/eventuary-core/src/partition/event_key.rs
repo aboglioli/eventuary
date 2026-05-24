@@ -1,7 +1,6 @@
+use super::{PartitionKey, PartitionKeyResolver, UnkeyedPartitionMode};
 use crate::error::{Error, Result};
 use crate::event::Event;
-use crate::partition::types::PartitionKey;
-use crate::partition::{PartitionKeyResolver, UnkeyedPartitionMode};
 
 pub struct EventKeyPartitionKeyResolver {
     unkeyed_mode: UnkeyedPartitionMode,

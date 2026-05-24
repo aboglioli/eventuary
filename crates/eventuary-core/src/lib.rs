@@ -51,12 +51,13 @@ pub use collector::EventCollector;
 pub use context::{Context, ContextError, ContextValue};
 pub use error::{Error, Result};
 pub use event::{Event, EventId};
-pub use event_key::{EventKey, Partition};
+pub use event_key::EventKey;
 pub use field_map::FieldMap;
 pub use metadata::Metadata;
 pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
+pub use partition::Partition;
 pub use payload_codec::{
     EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
 };

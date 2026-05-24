@@ -1,5 +1,5 @@
-use crate::event_key::Partition;
 use crate::io::position::StartableSubscription;
+use crate::partition::Partition;
 
 pub trait PartitionableSubscription<C>: StartableSubscription<C> + Clone + Send + 'static {
     fn with_partition(self, partition: Partition) -> Self;
