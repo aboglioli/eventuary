@@ -974,9 +974,13 @@ Worth knowing when changing the codebase:
   `io/reader/dedupe.rs`, and `WatermarkStore` in `io/reader/watermark.rs`:
   the persistence/protocol trait a wrapper consumes ships in the same file as
   the wrapper. `Generation`, `PartitionLease<C>`, and `PartitionCoordinator<C>`
-  therefore live in `io/reader/coordinated.rs`; backends import them via the
-  `io::*` re-exports (`use eventuary_core::io::{Generation, PartitionLease,
-  PartitionCoordinator}`).
+  therefore live in `io/reader/coordinated.rs` and are imported by backends
+  via the canonical `io::reader::*` path (`use eventuary_core::io::reader::
+  {Generation, PartitionLease, PartitionCoordinator}`), matching how
+  backends import every other wrapper-companion trait. The `io::*`
+  top-level re-export is reserved for base abstractions (`Reader`,
+  `Writer`, `Acker`, `Cursor`, `Filter`, `Handler`, `Message`) and
+  cross-cutting value types (`OwnerId`, `ConsumerGroupId`, `StreamId`).
 - **`PartitionableSubscription` lives with `StartableSubscription` in
   `io/position.rs`.** Sibling subscription-capability traits: both have the
   same `Self -> Self` builder shape and exist so wrappers can compose

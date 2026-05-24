@@ -31,8 +31,8 @@ pub use message::Message;
 pub use owner_id::OwnerId;
 pub use position::{PartitionableSubscription, StartFrom, StartableSubscription, StopAt};
 pub use reader::{
-    ArcReader, BoxReader, BoxStream, DecodeErrorDisposition, DecodeReader, DynReader, Generation,
-    PartitionCoordinator, PartitionLease, Reader, ReaderExt, ReaderTypedExt,
+    ArcReader, BoxReader, BoxStream, DecodeErrorDisposition, DecodeReader, DynReader, Reader,
+    ReaderExt, ReaderTypedExt,
 };
 pub use stream_id::StreamId;
 pub use writer::{
