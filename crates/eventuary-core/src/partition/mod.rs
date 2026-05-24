@@ -5,6 +5,7 @@ mod metadata;
 mod namespace;
 mod organization;
 mod topic;
+mod types;
 
 use crate::error::Result;
 use crate::event::Event;
@@ -23,6 +24,8 @@ pub enum UnkeyedPartitionMode {
 }
 
 pub use self::hasher::{Fnv1a64PartitionHasher, PartitionHasher};
+pub use self::types::{PartitionHash, PartitionKey, PartitionSelection, PartitionStrategy};
+pub use crate::event_key::Partition;
 pub use composite::CompositePartitionKeyResolver;
 pub use event_key::EventKeyPartitionKeyResolver;
 pub use metadata::MetadataPartitionKeyResolver;
