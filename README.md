@@ -231,6 +231,82 @@ let (tx, _rx) = tokio::sync::mpsc::channel(100);
 let writer: BoxWriter = MemoryWriter::new(tx).into_boxed();
 ```
 
+## Typed Payloads
+
+`Event<P = Payload>` is generic over the payload type. The default `Payload`
+is the canonical wire format used by every durable backend (SQL, SQS, Kafka).
+For in-memory or in-process flows you can carry a typed `P` end-to-end and
+avoid serialization round-trips.
+
+Every IO trait defaults to `Payload` so existing code is unchanged. The same
+traits accept a typed `P`:
+
+```rust,ignore
+pub trait Reader<P = Payload> { /* ... */ }
+pub trait Writer<P = Payload> { /* ... */ }
+pub trait Handler<P = Payload> { /* ... */ }
+pub trait Filter<P = Payload>  { /* ... */ }
+```
+
+Reader/writer/handler wrappers (`MapReader`, `BatchWriter`, `FilteredHandler`,
+`InspectReader`, `Multiplexer`, …) are generic in `P` and compose for any
+custom payload type. The in-memory backend is the natural fit:
+
+```rust,ignore
+use eventuary::memory::reader::{MemoryReader, MemorySubscription};
+use eventuary::memory::writer::MemoryWriter;
+use eventuary::{Event, io::{Reader, Writer}};
+use futures::StreamExt;
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+struct OrderPlaced { order_id: String, total: u64 }
+
+# tokio_test::block_on(async {
+let (tx, rx) = mpsc::channel::<Event<OrderPlaced>>(64);
+let writer = MemoryWriter::new(tx);
+let reader = MemoryReader::new(rx);
+
+let event = Event::create(
+    "acme",
+    "/orders",
+    "order.placed",
+    OrderPlaced { order_id: "o-1".into(), total: 42 },
+).unwrap();
+writer.write(&event).await.unwrap();
+
+let mut stream = reader.read(MemorySubscription { limit: Some(1) }).await.unwrap();
+let msg = stream.next().await.unwrap().unwrap();
+assert_eq!(msg.event().payload().order_id, "o-1");
+# });
+```
+
+### Bridging typed and durable
+
+Durable backends always speak `Payload`. To carry a typed `P` through a
+pipeline whose source or sink is durable, bridge at the edges:
+
+- `DecodeReader<R, C, P>` converts an inner `Reader<Payload>` into a
+  `Reader<P>` by decoding each event through a `PayloadCodec<P>`. Decode
+  failures are routed per `DecodeErrorDisposition` (default: `AckInner` —
+  skip the poison event and advance the source cursor).
+- `EncodeWriter<W, C, P>` converts a typed `Writer<P>` into a
+  `Writer<Payload>` by encoding outgoing events through the same codec.
+
+```rust,ignore
+use eventuary::io::reader::{DecodeReader, ReaderTypedExt};
+use eventuary::{JsonPayloadCodec, PayloadEventCodec};
+
+let typed_reader = source_reader.decode_with::<OrderPlaced>(
+    PayloadEventCodec::new(JsonPayloadCodec::default()),
+);
+```
+
+`SerializedEvent`, the SQL writers/readers, SQS, Kafka, and durable
+`BufferStore` / `DedupeStore` / `MultiplexerStore` implementations all
+remain `Payload`-bound by design — the wire boundary is the only place
+serialization happens.
+
 ## In-Memory Backend Example
 
 ```toml

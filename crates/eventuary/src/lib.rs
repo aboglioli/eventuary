@@ -36,6 +36,29 @@
 //! .build().unwrap();
 //! assert_eq!(event.topic().as_str(), "invoice.created");
 //! ```
+//!
+//! # Typed Payloads
+//!
+//! `Event<P = Payload>` is generic over the payload type. In-memory and
+//! in-process pipelines can carry a typed `P` end-to-end without
+//! serialization; durable backends (SQL, SQS, Kafka) stay bound to
+//! `Payload`. Bridge with `io::reader::DecodeReader` and
+//! `io::writer::EncodeWriter` when crossing the durable boundary.
+//!
+//! ```
+//! use eventuary::Event;
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq)]
+//! struct OrderPlaced { order_id: String, total: u64 }
+//!
+//! let event: Event<OrderPlaced> = Event::create(
+//!     "acme",
+//!     "/orders",
+//!     "order.placed",
+//!     OrderPlaced { order_id: "o-1".to_owned(), total: 42 },
+//! ).unwrap();
+//! assert_eq!(event.payload().order_id, "o-1");
+//! ```
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub use eventuary_core::*;
