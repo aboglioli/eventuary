@@ -320,13 +320,25 @@ where
                         for partition_id in dead_partitions {
                             if let Some((lease, handle)) = owned.remove(&partition_id) {
                                 handle.abort();
-                                let _ = coordinator.release(&lease).await;
+                                if let Err(e) = coordinator.release(&lease).await {
+                                    tracing::warn!(
+                                        owner = %owner_id,
+                                        partition = partition_id,
+                                        "coordinated reader: release of dead worker failed: {e}"
+                                    );
+                                }
                             }
                         }
 
                         let live = match coordinator.live_consumers(&scope).await {
                             Ok(n) => n,
-                            Err(_) => owned.len().max(1),
+                            Err(e) => {
+                                tracing::warn!(
+                                    owner = %owner_id,
+                                    "coordinated reader: live_consumers query failed, falling back to local count: {e}"
+                                );
+                                owned.len().max(1)
+                            }
                         };
                         let target =
                             target_partition_count(partition_count, live, slack) as usize;
@@ -365,7 +377,13 @@ where
                                         owned.insert(partition_id, (lease, worker_handle));
                                     }
                                     Ok(None) => {}
-                                    Err(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            owner = %owner_id,
+                                            partition = partition_id,
+                                            "coordinated reader: claim failed: {e}"
+                                        );
+                                    }
                                 }
                             }
                         } else if owned.len() > target {
@@ -376,7 +394,13 @@ where
                             for partition_id in to_release.into_iter().take(surplus) {
                                 if let Some((lease, handle)) = owned.remove(&partition_id) {
                                     handle.abort();
-                                    let _ = coordinator.release(&lease).await;
+                                    if let Err(e) = coordinator.release(&lease).await {
+                                        tracing::warn!(
+                                            owner = %owner_id,
+                                            partition = partition_id,
+                                            "coordinated reader: surplus release failed: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -398,36 +422,65 @@ where
                                     Err(Error::OwnershipLost(_)) => {
                                         lost.push(partition_id);
                                     }
-                                    Err(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            owner = %owner_id,
+                                            partition = partition_id,
+                                            "coordinated reader: renew failed (transient): {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
                         for partition_id in lost {
+                            tracing::info!(
+                                owner = %owner_id,
+                                partition = partition_id,
+                                "coordinated reader: partition ownership lost, stopping worker"
+                            );
                             if let Some((_, handle)) = owned.remove(&partition_id) {
                                 handle.abort();
                             }
                         }
-                        let _ = coordinator
+                        if let Err(e) = coordinator
                             .heartbeat(&scope, &owner_id, consumer_lease_duration)
-                            .await;
+                            .await
+                        {
+                            tracing::warn!(
+                                owner = %owner_id,
+                                "coordinated reader: consumer heartbeat failed: {e}"
+                            );
+                        }
 
                         next_renew =
                             tokio::time::Instant::now() + jittered_duration(tick_duration);
                     }
 
                     _ = shutdown_notify.notified() => {
-                        for (_, (lease, handle)) in owned.drain() {
+                        for (partition_id, (lease, handle)) in owned.drain() {
                             handle.abort();
-                            let _ = coordinator.release(&lease).await;
+                            if let Err(e) = coordinator.release(&lease).await {
+                                tracing::warn!(
+                                    owner = %owner_id,
+                                    partition = partition_id,
+                                    "coordinated reader: release on shutdown failed: {e}"
+                                );
+                            }
                         }
                         return;
                     }
                 }
 
                 if tx.is_closed() {
-                    for (_, (lease, handle)) in owned.drain() {
+                    for (partition_id, (lease, handle)) in owned.drain() {
                         handle.abort();
-                        let _ = coordinator.release(&lease).await;
+                        if let Err(e) = coordinator.release(&lease).await {
+                            tracing::warn!(
+                                owner = %owner_id,
+                                partition = partition_id,
+                                "coordinated reader: release on stream close failed: {e}"
+                            );
+                        }
                     }
                     return;
                 }
