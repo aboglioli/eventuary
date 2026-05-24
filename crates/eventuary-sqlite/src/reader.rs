@@ -140,6 +140,15 @@ pub struct SqliteReader {
     config: SqliteReaderConfig,
 }
 
+impl Clone for SqliteReader {
+    fn clone(&self) -> Self {
+        Self {
+            conn: Arc::clone(&self.conn),
+            config: self.config.clone(),
+        }
+    }
+}
+
 impl SqliteReader {
     pub fn new(conn: SqliteConn, config: SqliteReaderConfig) -> Self {
         Self { conn, config }
