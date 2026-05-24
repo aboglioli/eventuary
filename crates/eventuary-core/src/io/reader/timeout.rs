@@ -13,7 +13,7 @@ use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
 
-pub type TimeoutStream<A, C> = SpawnedStream<TimeoutAcker<A>, C>;
+pub type TimeoutStream<A, C, P = crate::payload::Payload> = SpawnedStream<TimeoutAcker<A>, C, P>;
 
 pub struct TimeoutReader<R> {
     inner: R,
@@ -26,18 +26,19 @@ impl<R> TimeoutReader<R> {
     }
 }
 
-impl<R> Reader for TimeoutReader<R>
+impl<R, P> Reader<P> for TimeoutReader<R>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
+    P: Send + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = TimeoutAcker<R::Acker>;
     type Cursor = R::Cursor;
-    type Stream = TimeoutStream<R::Acker, R::Cursor>;
+    type Stream = TimeoutStream<R::Acker, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;

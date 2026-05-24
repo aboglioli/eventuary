@@ -23,18 +23,19 @@ impl<R> ConcurrencyLimitReader<R> {
     }
 }
 
-impl<R> Reader for ConcurrencyLimitReader<R>
+impl<R, P> Reader<P> for ConcurrencyLimitReader<R>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
+    P: Send + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = LimitAcker<R::Acker>;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<LimitAcker<R::Acker>, R::Cursor>;
+    type Stream = SpawnedStream<LimitAcker<R::Acker>, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;

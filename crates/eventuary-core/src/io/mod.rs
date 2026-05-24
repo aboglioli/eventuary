@@ -103,4 +103,41 @@ mod tests {
         assert_type::<crate::io::InspectHandler<(), ()>>();
         assert_type::<crate::io::RateLimitHandler<()>>();
     }
+
+    #[test]
+    fn typed_payload_wrapper_reexports_are_available() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct UserUpdated {
+            user_id: String,
+        }
+
+        fn assert_type<T>() {}
+
+        assert_type::<crate::io::BoxWriter<UserUpdated>>();
+        assert_type::<crate::io::ArcWriter<UserUpdated>>();
+        assert_type::<crate::io::BoxHandler<UserUpdated>>();
+        assert_type::<crate::io::ArcHandler<UserUpdated>>();
+        assert_type::<crate::io::BoxFilter<UserUpdated>>();
+        assert_type::<crate::io::ArcFilter<UserUpdated>>();
+
+        assert_type::<crate::io::FilteredWriter<(), crate::io::filter::AllFilter>>();
+        assert_type::<crate::io::RetryWriter<()>>();
+        assert_type::<crate::io::TimeoutWriter<()>>();
+        assert_type::<crate::io::InspectWriter<(), (), UserUpdated>>();
+        assert_type::<crate::io::BatchWriter<UserUpdated>>();
+        assert_type::<crate::io::FanoutWriter<UserUpdated>>();
+        assert_type::<
+            crate::io::MapWriter<
+                (),
+                fn(&crate::Event<UserUpdated>) -> crate::Event<UserUpdated>,
+                UserUpdated,
+                UserUpdated,
+            >,
+        >();
+
+        assert_type::<crate::io::TimeoutHandler<()>>();
+        assert_type::<crate::io::InspectHandler<(), (), UserUpdated>>();
+        assert_type::<crate::io::RateLimitHandler<()>>();
+        assert_type::<crate::io::handler::FilteredHandler<(), crate::io::filter::AllFilter>>();
+    }
 }

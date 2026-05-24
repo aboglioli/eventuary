@@ -21,18 +21,19 @@ impl<R> BatchReader<R> {
     }
 }
 
-impl<R> Reader for BatchReader<R>
+impl<R, P> Reader<P> for BatchReader<R>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: 'static,
     R::Cursor: Clone + Send + Sync + 'static,
     R::Stream: Send + 'static,
+    P: Send + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = BatchAcker<R::Acker>;
     type Cursor = BatchCursor<R::Cursor>;
-    type Stream = SpawnedStream<BatchAcker<R::Acker>, BatchCursor<R::Cursor>>;
+    type Stream = SpawnedStream<BatchAcker<R::Acker>, BatchCursor<R::Cursor>, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner = self.inner.read(subscription).await?;
@@ -41,7 +42,7 @@ where
 
         let handle = tokio::spawn(async move {
             let mut inner = Box::pin(inner);
-            let mut buffer: Vec<(Event, R::Acker, R::Cursor)> = Vec::with_capacity(max_batch);
+            let mut buffer: Vec<(Event<P>, R::Acker, R::Cursor)> = Vec::with_capacity(max_batch);
 
             while let Some(item) = inner.next().await {
                 match item {
@@ -66,20 +67,23 @@ where
     }
 }
 
-pub(crate) async fn flush_batch<A, C>(
-    buffer: &mut Vec<(Event, A, C)>,
-    tx: &mpsc::Sender<Result<Message<BatchAcker<A>, BatchCursor<C>>>>,
+type BatchSender<A, C, P> = mpsc::Sender<Result<Message<BatchAcker<A>, BatchCursor<C>, P>>>;
+
+pub(crate) async fn flush_batch<A, C, P>(
+    buffer: &mut Vec<(Event<P>, A, C)>,
+    tx: &BatchSender<A, C, P>,
 ) -> bool
 where
     A: Acker + 'static,
     C: Clone + Send + Sync + 'static,
+    P: Send + 'static,
 {
     if buffer.is_empty() {
         return !tx.is_closed();
     }
     let mut ackers: Vec<A> = Vec::with_capacity(buffer.len());
     let mut cursors: Vec<C> = Vec::with_capacity(buffer.len());
-    let mut events: Vec<Event> = Vec::with_capacity(buffer.len());
+    let mut events: Vec<Event<P>> = Vec::with_capacity(buffer.len());
     for (event, acker, cursor) in buffer.drain(..) {
         events.push(event);
         ackers.push(acker);

@@ -56,20 +56,36 @@ use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, NoCursor, Reader};
 use crate::partition::{PartitionHasher, PartitionKeyResolver};
+use crate::payload::Payload;
 
-#[derive(Clone, Default)]
-pub enum PartitionRouteStrategy {
+#[derive(Default)]
+pub enum PartitionRouteStrategy<P = Payload> {
     #[default]
     EventCompatibility,
     ResolverHasher {
-        key_resolver: Arc<dyn PartitionKeyResolver>,
+        key_resolver: Arc<dyn PartitionKeyResolver<P>>,
         hasher: Arc<dyn PartitionHasher>,
     },
 }
 
-impl PartitionRouteStrategy {
+impl<P> Clone for PartitionRouteStrategy<P> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::EventCompatibility => Self::EventCompatibility,
+            Self::ResolverHasher {
+                key_resolver,
+                hasher,
+            } => Self::ResolverHasher {
+                key_resolver: Arc::clone(key_resolver),
+                hasher: Arc::clone(hasher),
+            },
+        }
+    }
+}
+
+impl<P> PartitionRouteStrategy<P> {
     pub fn resolver_hasher(
-        key_resolver: impl PartitionKeyResolver + 'static,
+        key_resolver: impl PartitionKeyResolver<P> + 'static,
         hasher: impl PartitionHasher + 'static,
     ) -> Self {
         Self::ResolverHasher {
@@ -79,7 +95,7 @@ impl PartitionRouteStrategy {
     }
 }
 
-impl fmt::Debug for PartitionRouteStrategy {
+impl<P> fmt::Debug for PartitionRouteStrategy<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EventCompatibility => f.write_str("EventCompatibility"),
@@ -88,14 +104,14 @@ impl fmt::Debug for PartitionRouteStrategy {
     }
 }
 
-pub struct PartitionedReaderConfig {
+pub struct PartitionedReaderConfig<P = Payload> {
     pub partition_count: NonZeroU16,
     pub lane_capacity: NonZeroUsize,
     pub scheduling: LaneScheduling,
-    pub route_strategy: PartitionRouteStrategy,
+    pub route_strategy: PartitionRouteStrategy<P>,
 }
 
-impl Clone for PartitionedReaderConfig {
+impl<P> Clone for PartitionedReaderConfig<P> {
     fn clone(&self) -> Self {
         Self {
             partition_count: self.partition_count,
@@ -106,7 +122,7 @@ impl Clone for PartitionedReaderConfig {
     }
 }
 
-impl fmt::Debug for PartitionedReaderConfig {
+impl<P> fmt::Debug for PartitionedReaderConfig<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PartitionedReaderConfig")
             .field("partition_count", &self.partition_count)
@@ -117,7 +133,7 @@ impl fmt::Debug for PartitionedReaderConfig {
     }
 }
 
-impl Default for PartitionedReaderConfig {
+impl<P> Default for PartitionedReaderConfig<P> {
     fn default() -> Self {
         Self {
             partition_count: NonZeroU16::new(64).unwrap(),
@@ -215,28 +231,28 @@ impl<C: Cursor> Cursor for PartitionedCursor<C> {
     }
 }
 
-struct InFlightItem<A: Acker, C> {
+struct InFlightItem<A: Acker, C, P> {
     id: u64,
-    event: Event,
+    event: Event<P>,
     acker: A,
     cursor: C,
 }
 
-struct Lane<A: Acker, C> {
-    queue: VecDeque<BufferedItem<A, C>>,
-    in_flight: Option<InFlightItem<A, C>>,
+struct Lane<A: Acker, C, P> {
+    queue: VecDeque<BufferedItem<A, C, P>>,
+    in_flight: Option<InFlightItem<A, C, P>>,
     capacity: usize,
     burst_consumed: usize,
 }
 
-struct BufferedItem<A: Acker, C> {
-    event: Event,
+struct BufferedItem<A: Acker, C, P> {
+    event: Event<P>,
     acker: A,
     cursor: C,
 }
 
-struct Lanes<A: Acker, C> {
-    lanes: Vec<Lane<A, C>>,
+struct Lanes<A: Acker, C, P> {
+    lanes: Vec<Lane<A, C, P>>,
     next_id: u64,
     last_served: usize,
 }
@@ -244,8 +260,9 @@ struct Lanes<A: Acker, C> {
 pub struct PartitionAcker<
     A: Acker + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
+    P = crate::payload::Payload,
 > {
-    state: Arc<Mutex<Lanes<A, C>>>,
+    state: Arc<Mutex<Lanes<A, C, P>>>,
     notify: Arc<Notify>,
     lane_id: usize,
     id: u64,
@@ -253,10 +270,11 @@ pub struct PartitionAcker<
     ack_mode: PartitionedAckMode,
 }
 
-impl<A, C> Acker for PartitionAcker<A, C>
+impl<A, C, P> Acker for PartitionAcker<A, C, P>
 where
     A: Acker + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
+    P: Send + Sync + 'static,
 {
     async fn ack(&self) -> Result<()> {
         if matches!(self.ack_mode, PartitionedAckMode::AckInnerOnDownstreamAck) {
@@ -329,16 +347,16 @@ where
     }
 }
 
-pub struct PartitionedReader<R> {
+pub struct PartitionedReader<R, P = Payload> {
     inner: R,
-    config: PartitionedReaderConfig,
+    config: PartitionedReaderConfig<P>,
     ack_mode: PartitionedAckMode,
 }
 
-impl<R> PartitionedReader<R> {
+impl<R, P> PartitionedReader<R, P> {
     /// Source-cursor mode: acks inner on lane accept.
     /// For PgReader, SqliteReader — inner ack only advances a local cursor.
-    pub fn source(inner: R, config: PartitionedReaderConfig) -> Self {
+    pub fn source(inner: R, config: PartitionedReaderConfig<P>) -> Self {
         Self {
             inner,
             config,
@@ -348,7 +366,7 @@ impl<R> PartitionedReader<R> {
 
     /// Delivery-preserving mode: defers inner ack to downstream ack.
     /// For SqsReader, KafkaReader — inner ack deletes/commits the message.
-    pub fn delivery(inner: R, config: PartitionedReaderConfig) -> Self {
+    pub fn delivery(inner: R, config: PartitionedReaderConfig<P>) -> Self {
         Self {
             inner,
             config,
@@ -357,18 +375,20 @@ impl<R> PartitionedReader<R> {
     }
 }
 
-impl<R> Reader for PartitionedReader<R>
+impl<R, P> Reader<P> for PartitionedReader<R, P>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Cursor: Cursor + Clone + Ord + Send + Sync + 'static,
     R::Subscription: StartableSubscription<R::Cursor>,
     R::Acker: Acker + Clone + Send + Sync + 'static,
     R::Stream: Send + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     type Subscription = PartitionedSubscription<R::Subscription, R::Cursor>;
-    type Acker = PartitionAcker<R::Acker, R::Cursor>;
+    type Acker = PartitionAcker<R::Acker, R::Cursor, P>;
     type Cursor = PartitionedCursor<R::Cursor>;
-    type Stream = SpawnedStream<PartitionAcker<R::Acker, R::Cursor>, PartitionedCursor<R::Cursor>>;
+    type Stream =
+        SpawnedStream<PartitionAcker<R::Acker, R::Cursor, P>, PartitionedCursor<R::Cursor>, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let mismatch_err = || {
@@ -423,7 +443,8 @@ where
         let ack_mode = self.ack_mode;
         let route_strategy = self.config.route_strategy.clone();
 
-        let lanes_inner: Vec<Lane<R::Acker, R::Cursor>> = (0..count)
+        type LanesState<A, C, P> = std::sync::Arc<Mutex<Lanes<A, C, P>>>;
+        let lanes_inner: Vec<Lane<R::Acker, R::Cursor, P>> = (0..count)
             .map(|_| Lane {
                 queue: VecDeque::new(),
                 in_flight: None,
@@ -431,7 +452,7 @@ where
                 burst_consumed: 0,
             })
             .collect();
-        let state: Arc<Mutex<Lanes<R::Acker, R::Cursor>>> = Arc::new(Mutex::new(Lanes {
+        let state: LanesState<R::Acker, R::Cursor, P> = Arc::new(Mutex::new(Lanes {
             lanes: lanes_inner,
             next_id: 0,
             last_served: 0,
@@ -439,7 +460,9 @@ where
         let notify = Arc::new(Notify::new());
 
         let (tx, rx) = mpsc::channel::<
-            Result<Message<PartitionAcker<R::Acker, R::Cursor>, PartitionedCursor<R::Cursor>>>,
+            Result<
+                Message<PartitionAcker<R::Acker, R::Cursor, P>, PartitionedCursor<R::Cursor>, P>,
+            >,
         >(64);
 
         let intake_done = Arc::new(AtomicBool::new(false));
@@ -660,10 +683,10 @@ where
     }
 }
 
-fn compute_partition(
-    event: &Event,
+fn compute_partition<P: 'static>(
+    event: &Event<P>,
     count: NonZeroU16,
-    strategy: &PartitionRouteStrategy,
+    strategy: &PartitionRouteStrategy<P>,
 ) -> Result<Partition> {
     match strategy {
         PartitionRouteStrategy::EventCompatibility =>
@@ -1236,7 +1259,7 @@ mod tests {
 
     #[test]
     fn default_route_strategy_is_event_compatibility() {
-        let config = PartitionedReaderConfig::default();
+        let config: PartitionedReaderConfig = PartitionedReaderConfig::default();
         assert!(matches!(
             config.route_strategy,
             PartitionRouteStrategy::EventCompatibility

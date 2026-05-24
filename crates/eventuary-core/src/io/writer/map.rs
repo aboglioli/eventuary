@@ -1,56 +1,73 @@
+use std::marker::PhantomData;
+
 use crate::error::Result;
 use crate::event::Event;
 use crate::io::Writer;
+use crate::payload::Payload;
 
-pub struct MapWriter<W, F> {
+pub struct MapWriter<W, F, P = Payload, Q = Payload> {
     inner: W,
     mapper: F,
+    _payload: PhantomData<fn(P) -> Q>,
 }
 
-pub struct TryMapWriter<W, F> {
+pub struct TryMapWriter<W, F, P = Payload, Q = Payload> {
     inner: W,
     mapper: F,
+    _payload: PhantomData<fn(P) -> Q>,
 }
 
-impl<W, F> MapWriter<W, F> {
+impl<W, F, P, Q> MapWriter<W, F, P, Q> {
     pub fn new(inner: W, mapper: F) -> Self {
-        Self { inner, mapper }
+        Self {
+            inner,
+            mapper,
+            _payload: PhantomData,
+        }
     }
 }
 
-impl<W, F> TryMapWriter<W, F> {
+impl<W, F, P, Q> TryMapWriter<W, F, P, Q> {
     pub fn new(inner: W, mapper: F) -> Self {
-        Self { inner, mapper }
+        Self {
+            inner,
+            mapper,
+            _payload: PhantomData,
+        }
     }
 }
 
-impl<W, F> Writer for MapWriter<W, F>
+impl<W, F, P, Q> Writer<P> for MapWriter<W, F, P, Q>
 where
-    W: Writer,
-    F: Fn(&Event) -> Event + Send + Sync,
+    W: Writer<Q>,
+    F: Fn(&Event<P>) -> Event<Q> + Send + Sync,
+    P: Send + Sync,
+    Q: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         let mapped = (self.mapper)(event);
         self.inner.write(&mapped).await
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let mapped = events.iter().map(&self.mapper).collect::<Vec<_>>();
         self.inner.write_all(&mapped).await
     }
 }
 
-impl<W, F> Writer for TryMapWriter<W, F>
+impl<W, F, P, Q> Writer<P> for TryMapWriter<W, F, P, Q>
 where
-    W: Writer,
-    F: Fn(&Event) -> Result<Event> + Send + Sync,
+    W: Writer<Q>,
+    F: Fn(&Event<P>) -> Result<Event<Q>> + Send + Sync,
+    P: Send + Sync,
+    Q: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         let mapped = (self.mapper)(event)?;
         self.inner.write(&mapped).await
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let mapped = events
             .iter()
             .map(&self.mapper)

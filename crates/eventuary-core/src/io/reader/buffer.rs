@@ -38,24 +38,28 @@ use crate::event::Event;
 use crate::io::acker::NackContext;
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Message, Reader};
+use crate::payload::Payload;
 
 const CHANNEL_BUFFER: usize = 64;
 
-pub struct BufferEntry<C, Id> {
+pub struct BufferEntry<C, Id, P = Payload> {
     pub id: Id,
-    pub event: Event,
+    pub event: Event<P>,
     pub cursor: C,
 }
 
-pub trait BufferStore<C>: Clone + Send + Sync + 'static {
+pub trait BufferStore<C, P = Payload>: Clone + Send + Sync + 'static
+where
+    P: Send + Sync,
+{
     type Id: Clone + Send + Sync;
 
-    fn push(&self, event: &Event, cursor: &C) -> impl Future<Output = Result<Self::Id>> + Send;
+    fn push(&self, event: &Event<P>, cursor: &C) -> impl Future<Output = Result<Self::Id>> + Send;
 
     /// Returns a snapshot of entries currently held by the store
     /// without removing them. Re-calling without ack/nack returns the
     /// same set.
-    fn pending(&self) -> impl Future<Output = Result<Vec<BufferEntry<C, Self::Id>>>> + Send;
+    fn pending(&self) -> impl Future<Output = Result<Vec<BufferEntry<C, Self::Id, P>>>> + Send;
 
     fn ack(&self, id: &Self::Id) -> impl Future<Output = Result<()>> + Send;
 
@@ -72,18 +76,22 @@ impl Default for BufferedReaderConfig {
     }
 }
 
-pub struct BufferAcker<S: BufferStore<C>, C> {
+pub struct BufferAcker<S: BufferStore<C, P>, C, P = Payload>
+where
+    P: Send + Sync,
+{
     store: S,
     id: S::Id,
     permit: Arc<Mutex<Option<OwnedSemaphorePermit>>>,
-    _cursor: PhantomData<C>,
+    _cursor: PhantomData<fn(C, P)>,
 }
 
-impl<S, C> BufferAcker<S, C>
+impl<S, C, P> BufferAcker<S, C, P>
 where
-    S: BufferStore<C>,
+    S: BufferStore<C, P>,
+    P: Send + Sync,
 {
-    fn new(store: S, id: S::Id, permit: OwnedSemaphorePermit) -> Self {
+    fn new(store: S, id: <S as BufferStore<C, P>>::Id, permit: OwnedSemaphorePermit) -> Self {
         Self {
             store,
             id,
@@ -97,10 +105,11 @@ where
     }
 }
 
-impl<S, C> Acker for BufferAcker<S, C>
+impl<S, C, P> Acker for BufferAcker<S, C, P>
 where
-    S: BufferStore<C> + 'static,
+    S: BufferStore<C, P> + 'static,
     C: Send + Sync + 'static,
+    P: Send + Sync + 'static,
 {
     async fn ack(&self) -> Result<()> {
         self.store.ack(&self.id).await?;
@@ -121,9 +130,10 @@ where
     }
 }
 
-impl<S, C> Clone for BufferAcker<S, C>
+impl<S, C, P> Clone for BufferAcker<S, C, P>
 where
-    S: BufferStore<C> + Clone,
+    S: BufferStore<C, P> + Clone,
+    P: Send + Sync,
 {
     fn clone(&self) -> Self {
         Self {
@@ -135,9 +145,10 @@ where
     }
 }
 
-impl<S, C> Drop for BufferAcker<S, C>
+impl<S, C, P> Drop for BufferAcker<S, C, P>
 where
-    S: BufferStore<C>,
+    S: BufferStore<C, P>,
+    P: Send + Sync,
 {
     fn drop(&mut self) {
         self.release_slot();
@@ -168,24 +179,26 @@ impl<R, S> BufferedReader<R, S> {
     }
 }
 
-impl<R, S> Reader for BufferedReader<R, S>
+impl<R, S, P> Reader<P> for BufferedReader<R, S>
 where
-    R: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
     R::Cursor: Clone + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     R::Acker: Acker + 'static,
     R::Stream: Send + 'static,
-    S: BufferStore<R::Cursor> + 'static,
+    S: BufferStore<R::Cursor, P> + 'static,
+    P: Send + Sync + 'static,
 {
     type Subscription = R::Subscription;
-    type Acker = BufferAcker<S, R::Cursor>;
+    type Acker = BufferAcker<S, R::Cursor, P>;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<BufferAcker<S, R::Cursor>, R::Cursor>;
+    type Stream = SpawnedStream<BufferAcker<S, R::Cursor, P>, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let store = self.store.clone();
-        let (tx, rx) =
-            mpsc::channel::<Result<Message<BufferAcker<S, R::Cursor>, R::Cursor>>>(CHANNEL_BUFFER);
+        let (tx, rx) = mpsc::channel::<Result<Message<BufferAcker<S, R::Cursor, P>, R::Cursor, P>>>(
+            CHANNEL_BUFFER,
+        );
 
         let pending_entries = store.pending().await?;
         let inner = self.inner.read(subscription).await?;

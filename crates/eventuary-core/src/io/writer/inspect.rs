@@ -1,24 +1,32 @@
+use std::marker::PhantomData;
+
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::Writer;
+use crate::payload::Payload;
 
-pub trait InspectWriterHooks: Send + Sync {
-    fn on_write(&self, _event: &Event) {}
-    fn on_write_success(&self, _event: &Event) {}
-    fn on_write_error(&self, _event: &Event, _error: &Error) {}
-    fn on_write_all(&self, _events: &[Event]) {}
-    fn on_write_all_success(&self, _events: &[Event]) {}
-    fn on_write_all_error(&self, _events: &[Event], _error: &Error) {}
+pub trait InspectWriterHooks<P = Payload>: Send + Sync {
+    fn on_write(&self, _event: &Event<P>) {}
+    fn on_write_success(&self, _event: &Event<P>) {}
+    fn on_write_error(&self, _event: &Event<P>, _error: &Error) {}
+    fn on_write_all(&self, _events: &[Event<P>]) {}
+    fn on_write_all_success(&self, _events: &[Event<P>]) {}
+    fn on_write_all_error(&self, _events: &[Event<P>], _error: &Error) {}
 }
 
-pub struct InspectWriter<W, H> {
+pub struct InspectWriter<W, H, P = Payload> {
     inner: W,
     hooks: H,
+    _payload: PhantomData<fn(P)>,
 }
 
-impl<W, H> InspectWriter<W, H> {
+impl<W, H, P> InspectWriter<W, H, P> {
     pub fn new(inner: W, hooks: H) -> Self {
-        Self { inner, hooks }
+        Self {
+            inner,
+            hooks,
+            _payload: PhantomData,
+        }
     }
 
     pub fn hooks(&self) -> &H {
@@ -26,12 +34,13 @@ impl<W, H> InspectWriter<W, H> {
     }
 }
 
-impl<W, H> Writer for InspectWriter<W, H>
+impl<W, H, P> Writer<P> for InspectWriter<W, H, P>
 where
-    W: Writer,
-    H: InspectWriterHooks,
+    W: Writer<P>,
+    H: InspectWriterHooks<P>,
+    P: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         self.hooks.on_write(event);
         match self.inner.write(event).await {
             Ok(()) => {
@@ -45,7 +54,7 @@ where
         }
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         self.hooks.on_write_all(events);
         match self.inner.write_all(events).await {
             Ok(()) => {

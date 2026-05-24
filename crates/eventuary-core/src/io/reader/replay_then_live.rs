@@ -11,8 +11,8 @@ use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
 
-pub type ReplayThenLiveStream<RA, LA, RC, LC> =
-    SpawnedStream<ReplayLiveAcker<RA, LA>, ReplayLiveCursor<RC, LC>>;
+pub type ReplayThenLiveStream<RA, LA, RC, LC, P = crate::payload::Payload> =
+    SpawnedStream<ReplayLiveAcker<RA, LA>, ReplayLiveCursor<RC, LC>, P>;
 
 #[derive(Debug, Clone, Default)]
 pub struct ReplayThenLiveConfig {
@@ -180,10 +180,10 @@ impl<RA: Acker, LA: Acker> Acker for ReplayLiveAcker<RA, LA> {
     }
 }
 
-impl<R, L> Reader for ReplayThenLiveReader<R, L>
+impl<R, L, P> Reader<P> for ReplayThenLiveReader<R, L>
 where
-    R: Reader + Send + Sync + 'static,
-    L: Reader + Send + Sync + 'static,
+    R: Reader<P> + Send + Sync + 'static,
+    L: Reader<P> + Send + Sync + 'static,
     R::Subscription: Send + 'static,
     L::Subscription: Send + 'static,
     R::Acker: Send + Sync + 'static,
@@ -192,11 +192,12 @@ where
     L::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
     L::Stream: Send + 'static,
+    P: Send + Sync + 'static,
 {
     type Subscription = ReplayThenLiveSubscription<R::Subscription, L::Subscription>;
     type Acker = ReplayLiveAcker<R::Acker, L::Acker>;
     type Cursor = ReplayLiveCursor<R::Cursor, L::Cursor>;
-    type Stream = ReplayThenLiveStream<R::Acker, L::Acker, R::Cursor, L::Cursor>;
+    type Stream = ReplayThenLiveStream<R::Acker, L::Acker, R::Cursor, L::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let replay = self.historical.read(subscription.replay).await?;

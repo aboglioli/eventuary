@@ -5,12 +5,13 @@ use futures::future::join_all;
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::{ArcWriter, Writer};
+use crate::payload::Payload;
 
-pub struct FanoutWriter {
-    writers: Vec<ArcWriter>,
+pub struct FanoutWriter<P = Payload> {
+    writers: Vec<ArcWriter<P>>,
 }
 
-impl fmt::Debug for FanoutWriter {
+impl<P> fmt::Debug for FanoutWriter<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FanoutWriter")
             .field("writers", &self.writers.len())
@@ -18,8 +19,8 @@ impl fmt::Debug for FanoutWriter {
     }
 }
 
-impl FanoutWriter {
-    pub fn new(writers: Vec<ArcWriter>) -> Result<Self> {
+impl<P> FanoutWriter<P> {
+    pub fn new(writers: Vec<ArcWriter<P>>) -> Result<Self> {
         if writers.is_empty() {
             return Err(Error::Config(
                 "fanout writer requires at least one writer".to_owned(),
@@ -44,13 +45,16 @@ fn first_error(results: Vec<Result<()>>) -> Result<()> {
     }
 }
 
-impl Writer for FanoutWriter {
-    async fn write(&self, event: &Event) -> Result<()> {
+impl<P> Writer<P> for FanoutWriter<P>
+where
+    P: Send + Sync,
+{
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         let futures = self.writers.iter().map(|writer| writer.write(event));
         first_error(join_all(futures).await)
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         let futures = self.writers.iter().map(|writer| writer.write_all(events));
         first_error(join_all(futures).await)
     }
@@ -126,7 +130,7 @@ mod tests {
 
     #[test]
     fn fanout_writer_rejects_empty_destinations() {
-        let err = FanoutWriter::new(Vec::new()).unwrap_err();
+        let err = FanoutWriter::<Payload>::new(Vec::new()).unwrap_err();
 
         assert!(err.to_string().contains("at least one writer"));
     }

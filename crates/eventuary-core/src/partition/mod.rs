@@ -9,9 +9,10 @@ mod types;
 
 use crate::error::Result;
 use crate::event::Event;
+use crate::payload::Payload;
 
-pub trait PartitionKeyResolver: Send + Sync + 'static {
-    fn partition_key(&self, event: &Event) -> Result<types::PartitionKey>;
+pub trait PartitionKeyResolver<P = Payload>: Send + Sync + 'static {
+    fn partition_key(&self, event: &Event<P>) -> Result<types::PartitionKey>;
 }
 
 // FixedPartition variant is intentionally deferred: it requires bypassing the hasher,

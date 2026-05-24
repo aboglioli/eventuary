@@ -62,18 +62,19 @@ impl<R> RecoverReader<R> {
     }
 }
 
-impl<R> Reader for RecoverReader<R>
+impl<R, P> Reader<P> for RecoverReader<R>
 where
-    R: Reader + Clone + Send + Sync + 'static,
+    R: Reader<P> + Clone + Send + Sync + 'static,
     R::Subscription: Clone + Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Cursor: Send + Sync + 'static,
     R::Stream: Send + 'static,
+    P: Send + 'static,
 {
     type Subscription = R::Subscription;
     type Acker = R::Acker;
     type Cursor = R::Cursor;
-    type Stream = SpawnedStream<R::Acker, R::Cursor>;
+    type Stream = SpawnedStream<R::Acker, R::Cursor, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let inner_reader = self.inner.clone();

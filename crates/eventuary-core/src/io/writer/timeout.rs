@@ -15,17 +15,18 @@ impl<W> TimeoutWriter<W> {
     }
 }
 
-impl<W> Writer for TimeoutWriter<W>
+impl<W, P> Writer<P> for TimeoutWriter<W>
 where
-    W: Writer,
+    W: Writer<P>,
+    P: Send + Sync,
 {
-    async fn write(&self, event: &Event) -> Result<()> {
+    async fn write(&self, event: &Event<P>) -> Result<()> {
         tokio::time::timeout(self.timeout, self.inner.write(event))
             .await
             .map_err(|_| Error::Timeout(format!("writer timed out after {:?}", self.timeout)))?
     }
 
-    async fn write_all(&self, events: &[Event]) -> Result<()> {
+    async fn write_all(&self, events: &[Event<P>]) -> Result<()> {
         tokio::time::timeout(self.timeout, self.inner.write_all(events))
             .await
             .map_err(|_| {
