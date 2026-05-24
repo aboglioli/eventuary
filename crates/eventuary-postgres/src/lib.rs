@@ -33,7 +33,7 @@ pub use buffer_store::{PgBufferStore, PgBufferStoreConfig, PgBufferStoreId};
 pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 pub use coordinated_acker::PgCoordinatedAcker;
 pub use coordinated_reader::{
-    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedSubscription,
+    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedStream, PgCoordinatedSubscription,
 };
 pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
 pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};

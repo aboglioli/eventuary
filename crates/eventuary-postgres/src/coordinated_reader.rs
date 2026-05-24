@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::num::NonZeroU16;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::StreamExt;
-use tokio::sync::mpsc;
+use futures::Stream;
+use tokio::sync::{Notify, mpsc};
 
-use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{
     ConsumerGroupId, Message, OwnerId, PartitionCoordinator, PartitionLease, Reader, StartFrom,
     StreamId,
@@ -74,6 +75,35 @@ impl PgCoordinatedReader {
     }
 }
 
+pub struct PgCoordinatedStream {
+    rx: mpsc::Receiver<Result<Message<PgCoordinatedAcker, PgPartitionCursor>>>,
+    shutdown: Arc<Notify>,
+}
+
+impl Stream for PgCoordinatedStream {
+    type Item = Result<Message<PgCoordinatedAcker, PgPartitionCursor>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+impl Drop for PgCoordinatedStream {
+    fn drop(&mut self) {
+        self.shutdown.notify_one();
+    }
+}
+
+fn jittered_duration(base: Duration) -> Duration {
+    use rand::Rng;
+    let jitter_ms = (base.as_millis() as f64 * 0.2) as u64;
+    if jitter_ms == 0 {
+        return base;
+    }
+    let extra = rand::rng().random_range(0..=jitter_ms);
+    base + Duration::from_millis(extra)
+}
+
 fn target_partition_count(total: NonZeroU16, live: usize, slack: u16) -> u16 {
     let total = total.get();
     let live = live.max(1) as u64;
@@ -94,6 +124,8 @@ async fn partition_worker(
     start: StartFrom<PgCursor>,
     tx: mpsc::Sender<Result<Message<PgCoordinatedAcker, PgPartitionCursor>>>,
 ) {
+    use futures::StreamExt;
+
     let inner_start = if lease.checkpoint_sequence == 0 {
         start
     } else {
@@ -152,7 +184,7 @@ impl Reader for PgCoordinatedReader {
     type Subscription = PgCoordinatedSubscription;
     type Acker = PgCoordinatedAcker;
     type Cursor = PgPartitionCursor;
-    type Stream = SpawnedStream<PgCoordinatedAcker, PgPartitionCursor>;
+    type Stream = PgCoordinatedStream;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         self.coordinator
@@ -165,6 +197,7 @@ impl Reader for PgCoordinatedReader {
             .await?;
 
         let (tx, rx) = mpsc::channel::<Result<Message<PgCoordinatedAcker, PgPartitionCursor>>>(16);
+        let shutdown = Arc::new(Notify::new());
 
         let inner_reader = self.inner.clone();
         let coordinator = Arc::clone(&self.coordinator);
@@ -180,8 +213,9 @@ impl Reader for PgCoordinatedReader {
         let heartbeat_interval = self.config.consumer_heartbeat_interval;
         let rebalance_interval = self.config.rebalance_interval;
         let slack = self.config.partition_slack;
+        let shutdown_notify = Arc::clone(&shutdown);
 
-        let handle = tokio::spawn(async move {
+        tokio::spawn(async move {
             let mut owned: HashMap<u16, (PartitionLease, tokio::task::JoinHandle<()>)> =
                 HashMap::new();
 
@@ -195,6 +229,8 @@ impl Reader for PgCoordinatedReader {
             loop {
                 tokio::select! {
                     _ = rebalance_ticker.tick() => {
+                        tokio::time::sleep(jittered_duration(rebalance_interval) - rebalance_interval).await;
+
                         let dead_partitions: Vec<u16> = owned
                             .iter()
                             .filter(|(_, (_, h))| h.is_finished())
@@ -280,6 +316,8 @@ impl Reader for PgCoordinatedReader {
                     }
 
                     _ = renew_ticker.tick() => {
+                        tokio::time::sleep(jittered_duration(tick_duration) - tick_duration).await;
+
                         let partition_ids: Vec<u16> = owned.keys().copied().collect();
                         let mut lost: Vec<u16> = Vec::new();
                         for partition_id in partition_ids {
@@ -312,6 +350,22 @@ impl Reader for PgCoordinatedReader {
                             .heartbeat(&group, &stream_id_val, &owner_id, consumer_lease_duration)
                             .await;
                     }
+
+                    _ = shutdown_notify.notified() => {
+                        for (_, (lease, handle)) in owned.drain() {
+                            handle.abort();
+                            let _ = coordinator
+                                .release(
+                                    &group,
+                                    &stream_id_val,
+                                    lease.partition_id,
+                                    &owner_id,
+                                    lease.generation,
+                                )
+                                .await;
+                        }
+                        return;
+                    }
                 }
 
                 if tx.is_closed() {
@@ -332,7 +386,7 @@ impl Reader for PgCoordinatedReader {
             }
         });
 
-        Ok(SpawnedStream::new(rx, handle))
+        Ok(PgCoordinatedStream { rx, shutdown })
     }
 }
 
@@ -368,5 +422,23 @@ mod tests {
     fn target_partition_count_zero_consumers_treated_as_one() {
         let total = NonZeroU16::new(8).unwrap();
         assert_eq!(target_partition_count(total, 0, 0), 8);
+    }
+
+    #[test]
+    fn jittered_duration_zero_base_returns_zero() {
+        assert_eq!(jittered_duration(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn jittered_duration_100ms_stays_in_range() {
+        let base = Duration::from_millis(100);
+        let max = Duration::from_millis(120);
+        for _ in 0..20 {
+            let result = jittered_duration(base);
+            assert!(
+                result >= base && result <= max,
+                "jittered_duration({base:?}) = {result:?} not in [100ms, 120ms]"
+            );
+        }
     }
 }

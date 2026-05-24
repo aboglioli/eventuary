@@ -13,6 +13,7 @@ use tokio::time::timeout;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, Payload, StartFrom};
+use eventuary_postgres::coordinated_reader::PgCoordinatedStream;
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
 use eventuary_postgres::{
@@ -133,10 +134,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
     let stream_a = stream_a.unwrap();
     let stream_b = stream_b.unwrap();
 
-    let drain = |mut stream: eventuary_core::io::stream::SpawnedStream<
-        eventuary_postgres::PgCoordinatedAcker,
-        eventuary_postgres::PgPartitionCursor,
-    >| async move {
+    let drain = |mut stream: PgCoordinatedStream| async move {
         let mut results: HashMap<u16, Vec<String>> = HashMap::new();
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(2), stream.next()).await {
             let partition_id = msg.cursor().partition_id();
@@ -302,10 +300,7 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         );
     }
 
-    let drain_some = |mut stream: eventuary_core::io::stream::SpawnedStream<
-        eventuary_postgres::PgCoordinatedAcker,
-        eventuary_postgres::PgPartitionCursor,
-    >| async move {
+    let drain_some = |mut stream: PgCoordinatedStream| async move {
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_millis(200), stream.next()).await {
             let _ = msg.ack().await;
         }
@@ -316,6 +311,142 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         drain_some(stream_b),
         drain_some(stream_c)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_drop_releases_owned_partitions() {
+    let (_c, pool) = start_postgres().await;
+
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            partition_count,
+            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let writer = PgWriter::new_with_config(pool.clone(), writer_config);
+
+    for i in 0..8u32 {
+        writer
+            .write(&event_with_key(&format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let group = ConsumerGroupId::new("drop-release-group").unwrap();
+    let stream_id = StreamId::new("orders").unwrap();
+
+    let reader_config = PgCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(30),
+        partition_renew_interval: Duration::from_secs(10),
+        consumer_lease_duration: Duration::from_secs(30),
+        consumer_heartbeat_interval: Duration::from_secs(10),
+        rebalance_interval: Duration::from_millis(100),
+        partition_slack: 0,
+    };
+
+    let reader_a = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-a").unwrap(),
+        reader_config,
+    );
+
+    let sub_a = PgCoordinatedSubscription {
+        consumer_group_id: group.clone(),
+        stream_id: stream_id.clone(),
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: PgSubscription {
+            start: StartFrom::Earliest,
+            ..PgSubscription::default()
+        },
+    };
+
+    {
+        let mut stream_a = reader_a.read(sub_a).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let mut drained = 0usize;
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_millis(200), stream_a.next()).await {
+            let _ = msg.ack().await;
+            drained += 1;
+            if drained >= 2 {
+                break;
+            }
+        }
+
+        let owned_before = query_owned_partitions(&pool, &group, &stream_id).await;
+        assert!(
+            !owned_before.is_empty(),
+            "owner-a should hold at least one partition before drop; got {owned_before:?}"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let rows = sqlx::query(
+        "SELECT partition_id, owner_id FROM event_stream_partitions \
+         WHERE consumer_group_id = $1 AND stream_id = $2",
+    )
+    .bind(group.as_str())
+    .bind(stream_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    for row in &rows {
+        let owner_id: Option<String> = row.get("owner_id");
+        assert!(
+            owner_id.is_none(),
+            "partition {} should be released after stream drop; still owned by {:?}",
+            row.get::<i32, _>("partition_id"),
+            owner_id
+        );
+    }
+
+    let reader_b = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-b").unwrap(),
+        reader_config,
+    );
+
+    let sub_b = PgCoordinatedSubscription {
+        consumer_group_id: group.clone(),
+        stream_id: stream_id.clone(),
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: PgSubscription {
+            start: StartFrom::Earliest,
+            ..PgSubscription::default()
+        },
+    };
+
+    let _stream_b = reader_b.read(sub_b).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let owned_b = query_owned_partitions(&pool, &group, &stream_id).await;
+    assert!(
+        !owned_b.is_empty(),
+        "owner-b should be able to claim released partitions; got none"
+    );
+    for owner in owned_b.values() {
+        assert_eq!(
+            owner, "owner-b",
+            "unexpected owner after reacquisition: {owner}"
+        );
+    }
 }
 
 async fn query_owned_partitions(
