@@ -291,4 +291,78 @@ mod tests {
         let _ = stream.next().await.unwrap();
         assert_eq!(hooks.errors.load(Ordering::SeqCst), 1);
     }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    type TypedInspectItems =
+        Mutex<Option<Vec<Result<Message<NoopAcker, TestCursor, UserUpdated>>>>>;
+
+    struct TypedVecReader {
+        items: TypedInspectItems,
+    }
+
+    impl Reader<UserUpdated> for TypedVecReader {
+        type Subscription = ();
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor, UserUpdated>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let items = self.items.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(stream::iter(items)))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TypedHooks {
+        delivered_ids: Arc<Mutex<Vec<String>>>,
+        acked_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl InspectHooks<UserUpdated> for TypedHooks {
+        fn on_deliver(&self, event: &Event<UserUpdated>) {
+            self.delivered_ids
+                .lock()
+                .unwrap()
+                .push(event.payload().user_id.clone());
+        }
+        fn on_ack(&self, event: &Event<UserUpdated>) {
+            self.acked_ids
+                .lock()
+                .unwrap()
+                .push(event.payload().user_id.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn inspect_reader_supports_typed_payloads_and_hooks() {
+        let hooks = TypedHooks::default();
+        let event = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+        let reader = TypedVecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                event,
+                NoopAcker,
+                TestCursor(1),
+            ))])),
+        };
+        let inspect: InspectReader<_, _, UserUpdated> = InspectReader::new(reader, hooks.clone());
+        let mut stream = inspect.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg.event().payload().user_id, "u-1");
+        msg.ack().await.unwrap();
+        assert_eq!(hooks.delivered_ids.lock().unwrap().as_slice(), &["u-1"]);
+        assert_eq!(hooks.acked_ids.lock().unwrap().as_slice(), &["u-1"]);
+    }
 }

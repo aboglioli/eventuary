@@ -132,4 +132,49 @@ mod tests {
             "rate limit too fast: {elapsed:?}"
         );
     }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct UserUpdated {
+        user_id: String,
+    }
+
+    struct TypedVecReader {
+        events: Mutex<Option<Vec<Event<UserUpdated>>>>,
+    }
+
+    impl Reader<UserUpdated> for TypedVecReader {
+        type Subscription = ();
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor, UserUpdated>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let events = self.events.lock().unwrap().take().unwrap_or_default();
+            Ok(Box::pin(stream::iter(events.into_iter().enumerate().map(
+                |(i, e)| Ok(Message::new(e, NoopAcker, TestCursor(i as u64))),
+            ))))
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_reader_supports_typed_payloads() {
+        let event = Event::create(
+            "org",
+            "/users",
+            "user.updated",
+            UserUpdated {
+                user_id: "u-1".to_owned(),
+            },
+        )
+        .unwrap();
+        let reader = TypedVecReader {
+            events: Mutex::new(Some(vec![event])),
+        };
+        let rate = RateLimit::MessagesPerSec(NonZeroU32::new(1000).unwrap());
+        let limited = RateLimitReader::new(reader, rate);
+        let mut stream = limited.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg.event().payload().user_id, "u-1");
+    }
 }
