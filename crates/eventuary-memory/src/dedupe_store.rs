@@ -61,8 +61,8 @@ impl MemoryDedupeStore {
     }
 }
 
-impl DedupeStore for MemoryDedupeStore {
-    async fn exists(&self, event: &Event) -> Result<bool> {
+impl<P: Send + Sync + 'static> DedupeStore<P> for MemoryDedupeStore {
+    async fn exists(&self, event: &Event<P>) -> Result<bool> {
         Ok(self
             .state
             .lock()
@@ -71,7 +71,7 @@ impl DedupeStore for MemoryDedupeStore {
             .contains(&event.id().to_string()))
     }
 
-    async fn mark_processed(&self, event: &Event) -> Result<()> {
+    async fn mark_processed(&self, event: &Event<P>) -> Result<()> {
         let key = event.id().to_string();
         let mut state = self.state.lock().unwrap();
         if state.set.insert(key.clone()) {
@@ -89,7 +89,7 @@ impl DedupeStore for MemoryDedupeStore {
         Ok(())
     }
 
-    async fn mark_if_new(&self, event: &Event) -> Result<bool> {
+    async fn mark_if_new(&self, event: &Event<P>) -> Result<bool> {
         let key = event.id().to_string();
         let mut state = self.state.lock().unwrap();
         if !state.set.insert(key.clone()) {
@@ -159,5 +159,45 @@ mod tests {
         assert!(!store.is_empty());
         store.clear();
         assert!(store.is_empty());
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct OrderPlaced {
+        order_id: String,
+    }
+
+    #[tokio::test]
+    async fn memory_dedupe_store_works_for_typed_payloads() {
+        let store = MemoryDedupeStore::unbounded();
+        let event: Event<OrderPlaced> = Event::create(
+            "acme",
+            "/orders",
+            "order.placed",
+            OrderPlaced {
+                order_id: "o-1".into(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !<MemoryDedupeStore as DedupeStore<OrderPlaced>>::exists(&store, &event)
+                .await
+                .unwrap()
+        );
+        assert!(
+            <MemoryDedupeStore as DedupeStore<OrderPlaced>>::mark_if_new(&store, &event)
+                .await
+                .unwrap()
+        );
+        assert!(
+            <MemoryDedupeStore as DedupeStore<OrderPlaced>>::exists(&store, &event)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !<MemoryDedupeStore as DedupeStore<OrderPlaced>>::mark_if_new(&store, &event)
+                .await
+                .unwrap()
+        );
     }
 }
