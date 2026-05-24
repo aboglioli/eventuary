@@ -17,6 +17,7 @@
 
 pub mod buffer_store;
 pub mod checkpoint_store;
+pub mod claim_buffer_store;
 pub mod coordinated_acker;
 pub mod coordinated_reader;
 pub mod database;
@@ -32,6 +33,7 @@ pub mod writer;
 
 pub use buffer_store::{PgBufferStore, PgBufferStoreConfig, PgBufferStoreId};
 pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+pub use claim_buffer_store::{PgClaimedBufferStore, PgClaimedBufferStoreConfig};
 pub use coordinated_acker::PgCoordinatedAcker;
 pub use coordinated_reader::{
     PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedStream, PgCoordinatedSubscription,

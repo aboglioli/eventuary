@@ -64,8 +64,7 @@ impl ClaimedBufferStore for MemoryClaimedBufferStore {
     ) -> Result<Vec<ClaimedBufferEntry<Self::Id>>> {
         let mut state = self.state.lock().await;
         let now = Utc::now();
-        let until =
-            now + chrono::Duration::from_std(visibility).unwrap_or(chrono::Duration::MAX);
+        let until = now + chrono::Duration::from_std(visibility).unwrap_or(chrono::Duration::MAX);
         let mut claimed = Vec::new();
 
         for (&id, entry) in state.entries.iter_mut() {
