@@ -56,6 +56,15 @@ impl SubscriberId {
         Ok(Self(Arc::from(value)))
     }
 
+    /// Build a subscriber id by joining `prefix` and `id` with a `:`
+    /// separator. Useful for namespacing subscriber ids when multiple
+    /// multiplexers share one `MultiplexerStore` — a prefix per
+    /// multiplexer keeps `(event_id, subscriber_id)` collisions
+    /// impossible across multiplexers.
+    pub fn with_prefix(prefix: impl AsRef<str>, id: impl AsRef<str>) -> Result<Self> {
+        Self::new(format!("{}:{}", prefix.as_ref(), id.as_ref()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -711,5 +720,97 @@ mod tests {
 
         assert_eq!(first.load(Ordering::SeqCst), 1);
         assert_eq!(second.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn subscriber_id_with_prefix_joins_with_colon() {
+        let id = SubscriberId::with_prefix("orders", "projection").unwrap();
+        assert_eq!(id.as_str(), "orders:projection");
+    }
+
+    #[test]
+    fn subscriber_id_with_prefix_rejects_invalid_segments() {
+        // Whitespace in either segment is invalid for SubscriberId.
+        assert!(SubscriberId::with_prefix("orders", "bad id").is_err());
+        assert!(SubscriberId::with_prefix("bad prefix", "ok").is_err());
+        // Length cap (128) is enforced after joining.
+        let long = "a".repeat(130);
+        assert!(SubscriberId::with_prefix(&long, "id").is_err());
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct OrderPlaced {
+        order_id: String,
+    }
+
+    struct TypedRecordingHandler {
+        id: String,
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Handler<OrderPlaced> for TypedRecordingHandler {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        async fn handle(&self, event: &Event<OrderPlaced>) -> Result<()> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(event.payload().order_id.clone());
+            Ok(())
+        }
+    }
+
+    fn typed_event(order_id: &str) -> Event<OrderPlaced> {
+        Event::create(
+            "acme",
+            "/orders",
+            "order.placed",
+            OrderPlaced {
+                order_id: order_id.to_owned(),
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn multiplexer_fanouts_typed_events() {
+        let projection_seen: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let audit_seen: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let multiplexer: Multiplexer<NoMultiplexerStore, OrderPlaced> = Multiplexer::builder()
+            .route(
+                SubscriberId::with_prefix("orders", "projection")
+                    .unwrap()
+                    .as_str(),
+                crate::io::filter::AllFilter,
+                TypedRecordingHandler {
+                    id: "projection".to_owned(),
+                    seen: Arc::clone(&projection_seen),
+                },
+            )
+            .unwrap()
+            .route(
+                SubscriberId::with_prefix("orders", "audit")
+                    .unwrap()
+                    .as_str(),
+                crate::io::filter::AllFilter,
+                TypedRecordingHandler {
+                    id: "audit".to_owned(),
+                    seen: Arc::clone(&audit_seen),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        multiplexer.handle(&typed_event("o-1")).await.unwrap();
+        multiplexer.handle(&typed_event("o-2")).await.unwrap();
+
+        assert_eq!(*projection_seen.lock().unwrap(), vec!["o-1", "o-2"]);
+        assert_eq!(*audit_seen.lock().unwrap(), vec!["o-1", "o-2"]);
     }
 }
