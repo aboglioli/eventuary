@@ -1326,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_hasher_routing_yields_distinct_lanes_from_event_compatibility_for_unkeyed_events() {
+    fn resolver_hasher_unkeyed_event_uses_uuid_string_not_bytes() {
         use crate::partition::{
             EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionKey,
         };
@@ -1340,24 +1340,19 @@ mod tests {
         )
         .unwrap();
 
-        let compatibility_lane = unkeyed.partition(count_nz).id();
-
         let resolver = EventKeyPartitionKeyResolver::event_id_on_unkeyed();
         let hasher = Fnv1a64PartitionHasher;
-        let key = resolver.partition_key(&unkeyed).unwrap();
-        let resolver_hasher_lane = hasher.partition_for(&key, count_nz).id();
-
+        let resolver_key = resolver.partition_key(&unkeyed).unwrap();
         let uuid_str = unkeyed.id().as_uuid().to_string();
-        let key_from_str = PartitionKey::new(&uuid_str).unwrap();
-        assert_eq!(
-            hasher.partition_for(&key_from_str, count_nz).id(),
-            resolver_hasher_lane,
-            "resolver_hasher lane should use UUID string hash"
-        );
+        let manual_key = PartitionKey::new(&uuid_str).unwrap();
 
-        assert_ne!(
-            compatibility_lane, resolver_hasher_lane,
-            "UUID-bytes hash and UUID-string hash must diverge for at least one event (this UUID didn't — regenerate the test event if this fires unexpectedly)"
+        assert_eq!(
+            resolver_key, manual_key,
+            "EventKeyPartitionKeyResolver::event_id_on_unkeyed must use the UUID string representation"
+        );
+        assert_eq!(
+            hasher.partition_for(&resolver_key, count_nz).id(),
+            hasher.partition_for(&manual_key, count_nz).id(),
         );
     }
 }
