@@ -1,0 +1,1 @@
+ALTER TABLE {offsets} ADD COLUMN IF NOT EXISTS cursor_order BYTEA NOT NULL DEFAULT ''::bytea;

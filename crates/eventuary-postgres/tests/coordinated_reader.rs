@@ -1,0 +1,444 @@
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU16;
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::StreamExt;
+use sqlx::{PgPool, Row};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::runners::AsyncRunner;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use tokio::time::timeout;
+
+use eventuary_core::io::reader::CheckpointScope;
+use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
+use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
+use eventuary_core::{Event, Payload, StartFrom};
+use eventuary_postgres::coordinated_reader::PgCoordinatedStream;
+use eventuary_postgres::database::PgDatabase;
+use eventuary_postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
+use eventuary_postgres::{
+    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedSubscription,
+    PgPartitionCoordinator, PgPartitionCoordinatorConfig, PgPartitioningConfig, PgWriter,
+    PgWriterConfig,
+};
+
+async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
+    let container = GenericImage::new("postgres", "18-alpine")
+        .with_exposed_port(5432.tcp())
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
+        .with_env_var("POSTGRES_USER", "eventuary")
+        .with_env_var("POSTGRES_PASSWORD", "eventuary")
+        .with_env_var("POSTGRES_DB", "eventuary")
+        .start()
+        .await
+        .expect("postgres start");
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
+    let db = PgDatabase::connect(&url).await.unwrap();
+    let pool = db.pool();
+    (container, pool)
+}
+
+fn event_with_key(key: &str) -> Event {
+    Event::builder(
+        "acme",
+        "/orders",
+        "order.placed",
+        Payload::from_string("{}"),
+    )
+    .unwrap()
+    .key(key)
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+fn make_sub(scope: CheckpointScope, partition_count: NonZeroU16) -> PgCoordinatedSubscription {
+    PgCoordinatedSubscription {
+        scope,
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: PgSubscription {
+            start: StartFrom::Earliest,
+            ..PgSubscription::default()
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
+    let (_c, pool) = start_postgres().await;
+
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            partition_count,
+            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let writer = PgWriter::new_with_config(pool.clone(), writer_config);
+
+    let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
+    for key in &keys {
+        writer.write(&event_with_key(key)).await.unwrap();
+    }
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let reader_config = PgCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(60),
+        partition_renew_interval: Duration::from_secs(15),
+        consumer_lease_duration: Duration::from_secs(30),
+        consumer_heartbeat_interval: Duration::from_secs(10),
+        rebalance_interval: Duration::from_millis(100),
+        partition_slack: 0,
+    };
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("test-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let reader_a = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-a").unwrap(),
+        reader_config,
+    );
+
+    let reader_b = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-b").unwrap(),
+        reader_config,
+    );
+
+    let (stream_a, stream_b) = tokio::join!(
+        reader_a.read(make_sub(scope.clone(), partition_count)),
+        reader_b.read(make_sub(scope.clone(), partition_count)),
+    );
+
+    let stream_a = stream_a.unwrap();
+    let stream_b = stream_b.unwrap();
+
+    let drain = |mut stream: PgCoordinatedStream| async move {
+        let mut results: HashMap<u16, Vec<String>> = HashMap::new();
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(2), stream.next()).await {
+            let partition_id = msg.cursor().partition.id();
+            let key = msg
+                .event()
+                .key()
+                .map(|k| k.as_str().to_owned())
+                .unwrap_or_default();
+            msg.ack().await.unwrap();
+            results.entry(partition_id).or_default().push(key);
+        }
+        results
+    };
+
+    let (results_a, results_b) = tokio::join!(drain(stream_a), drain(stream_b));
+
+    let total_a: usize = results_a.values().map(|v| v.len()).sum();
+    let total_b: usize = results_b.values().map(|v| v.len()).sum();
+    assert_eq!(
+        total_a + total_b,
+        keys.len(),
+        "combined count must be 8; got a={total_a} b={total_b}"
+    );
+
+    let partitions_a: HashSet<u16> = results_a.keys().copied().collect();
+    let partitions_b: HashSet<u16> = results_b.keys().copied().collect();
+    let overlap: HashSet<u16> = partitions_a.intersection(&partitions_b).copied().collect();
+    assert!(
+        overlap.is_empty(),
+        "partitions should be disjoint; overlap={overlap:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
+    let (_c, pool) = start_postgres().await;
+
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            partition_count,
+            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let writer = PgWriter::new_with_config(pool.clone(), writer_config);
+
+    for i in 0..16u32 {
+        writer
+            .write(&event_with_key(&format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let reader_config = PgCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(10),
+        partition_renew_interval: Duration::from_secs(5),
+        consumer_lease_duration: Duration::from_secs(10),
+        consumer_heartbeat_interval: Duration::from_secs(3),
+        rebalance_interval: Duration::from_millis(200),
+        partition_slack: 0,
+    };
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("rebalance-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let reader_a = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-a").unwrap(),
+        reader_config,
+    );
+    let stream_a = reader_a
+        .read(make_sub(scope.clone(), partition_count))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let reader_b = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-b").unwrap(),
+        reader_config,
+    );
+    let stream_b = reader_b
+        .read(make_sub(scope.clone(), partition_count))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let owned_after_b = query_owned_partitions(&pool, &scope).await;
+    let owners_after_b: HashSet<String> = owned_after_b.values().cloned().collect();
+    assert!(
+        owners_after_b.contains("owner-a") || owners_after_b.contains("owner-b"),
+        "at least one owner should hold partitions after B joins; got {owners_after_b:?}"
+    );
+    let max_owned_after_b = owners_after_b
+        .iter()
+        .map(|owner| owned_after_b.values().filter(|v| *v == owner).count())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_owned_after_b <= 4,
+        "no owner should hold more than 4 partitions; got {max_owned_after_b}"
+    );
+
+    let reader_c = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-c").unwrap(),
+        reader_config,
+    );
+    let stream_c = reader_c
+        .read(make_sub(scope.clone(), partition_count))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let owned_after_c = query_owned_partitions(&pool, &scope).await;
+
+    assert_eq!(
+        owned_after_c.len(),
+        4,
+        "all 4 partitions should be owned; got {:?}",
+        owned_after_c
+    );
+
+    let all_owners: HashSet<&String> = owned_after_c.values().collect();
+    for owner in &all_owners {
+        let count = owned_after_c.values().filter(|v| v == owner).count();
+        assert!(
+            count <= 2,
+            "owner {owner} holds {count} partitions, expected at most ceil(4/3)=2; distribution: {owned_after_c:?}"
+        );
+    }
+
+    let known_owners: HashSet<&str> = ["owner-a", "owner-b", "owner-c"].iter().copied().collect();
+    for owner in owned_after_c.values() {
+        assert!(
+            known_owners.contains(owner.as_str()),
+            "unexpected owner {owner}"
+        );
+    }
+
+    let drain_some = |mut stream: PgCoordinatedStream| async move {
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_millis(200), stream.next()).await {
+            let _ = msg.ack().await;
+        }
+    };
+
+    tokio::join!(
+        drain_some(stream_a),
+        drain_some(stream_b),
+        drain_some(stream_c)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_drop_releases_owned_partitions() {
+    let (_c, pool) = start_postgres().await;
+
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            partition_count,
+            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let writer = PgWriter::new_with_config(pool.clone(), writer_config);
+
+    for i in 0..8u32 {
+        writer
+            .write(&event_with_key(&format!("k{i}")))
+            .await
+            .unwrap();
+    }
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("drop-release-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let reader_config = PgCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(30),
+        partition_renew_interval: Duration::from_secs(10),
+        consumer_lease_duration: Duration::from_secs(30),
+        consumer_heartbeat_interval: Duration::from_secs(10),
+        rebalance_interval: Duration::from_millis(100),
+        partition_slack: 0,
+    };
+
+    let reader_a = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-a").unwrap(),
+        reader_config,
+    );
+
+    {
+        let mut stream_a = reader_a
+            .read(make_sub(scope.clone(), partition_count))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let mut drained = 0usize;
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_millis(200), stream_a.next()).await {
+            let _ = msg.ack().await;
+            drained += 1;
+            if drained >= 2 {
+                break;
+            }
+        }
+
+        let owned_before = query_owned_partitions(&pool, &scope).await;
+        assert!(
+            !owned_before.is_empty(),
+            "owner-a should hold at least one partition before drop; got {owned_before:?}"
+        );
+    }
+
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+
+    let rows = sqlx::query(
+        "SELECT partition_id, owner_id FROM event_stream_partitions \
+         WHERE consumer_group_id = $1 AND stream_id = $2",
+    )
+    .bind(scope.consumer_group_id.as_str())
+    .bind(scope.stream_id.as_str())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+
+    for row in &rows {
+        let owner_id: Option<String> = row.get("owner_id");
+        assert!(
+            owner_id.is_none(),
+            "partition {} should be released after stream drop; still owned by {:?}",
+            row.get::<i32, _>("partition_id"),
+            owner_id
+        );
+    }
+
+    let reader_b = PgCoordinatedReader::new(
+        PgReader::new(pool.clone(), PgReaderConfig::default()),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-b").unwrap(),
+        reader_config,
+    );
+
+    let _stream_b = reader_b
+        .read(make_sub(scope.clone(), partition_count))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let owned_b = query_owned_partitions(&pool, &scope).await;
+    assert!(
+        !owned_b.is_empty(),
+        "owner-b should be able to claim released partitions; got none"
+    );
+    for owner in owned_b.values() {
+        assert_eq!(
+            owner, "owner-b",
+            "unexpected owner after reacquisition: {owner}"
+        );
+    }
+}
+
+async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashMap<i32, String> {
+    let rows = sqlx::query(
+        "SELECT partition_id, owner_id FROM event_stream_partitions \
+         WHERE consumer_group_id = $1 AND stream_id = $2 AND owner_id IS NOT NULL \
+           AND lease_until > NOW()",
+    )
+    .bind(scope.consumer_group_id.as_str())
+    .bind(scope.stream_id.as_str())
+    .fetch_all(pool)
+    .await
+    .unwrap();
+
+    rows.into_iter()
+        .map(|r| {
+            let partition_id: i32 = r.get("partition_id");
+            let owner_id: String = r.get("owner_id");
+            (partition_id, owner_id)
+        })
+        .collect()
+}

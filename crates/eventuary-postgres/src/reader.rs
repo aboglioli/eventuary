@@ -11,9 +11,10 @@ use tokio::sync::mpsc;
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
+use eventuary_core::partition::PartitionSelection;
 use eventuary_core::{
-    Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
-    StartableSubscription, StopAt, TopicPattern,
+    Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
+    SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
 };
 
 use crate::relation::PgRelationName;
@@ -55,6 +56,7 @@ pub struct PgSubscription {
     pub filter: EventFilter,
     pub batch_size: Option<usize>,
     pub limit: Option<usize>,
+    pub partitions: PartitionSelection,
 }
 
 impl Default for PgSubscription {
@@ -65,6 +67,7 @@ impl Default for PgSubscription {
             filter: EventFilter::default(),
             batch_size: None,
             limit: None,
+            partitions: PartitionSelection::All,
         }
     }
 }
@@ -72,6 +75,13 @@ impl Default for PgSubscription {
 impl StartableSubscription<PgCursor> for PgSubscription {
     fn with_start(mut self, start: StartFrom<PgCursor>) -> Self {
         self.start = start;
+        self
+    }
+}
+
+impl PartitionableSubscription<PgCursor> for PgSubscription {
+    fn with_partition(mut self, partition: Partition) -> Self {
+        self.partitions = PartitionSelection::One(partition);
         self
     }
 }
@@ -107,6 +117,20 @@ struct CursorState {
     pending_nack: bool,
 }
 
+impl PgCursorAcker {
+    #[doc(hidden)]
+    pub fn dummy(sequence: i64) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CursorState {
+                last_acked: 0,
+                pending_nack: false,
+            })),
+            notify: Arc::new(Notify::new()),
+            sequence,
+        }
+    }
+}
+
 impl Acker for PgCursorAcker {
     async fn ack(&self) -> Result<()> {
         let mut state = self.state.lock().await;
@@ -126,6 +150,7 @@ impl Acker for PgCursorAcker {
     }
 }
 
+#[derive(Clone)]
 pub struct PgReader {
     pool: PgPool,
     config: PgReaderConfig,
@@ -155,6 +180,7 @@ impl Reader for PgReader {
             .clamp(1, 1000);
         let filter = subscription.filter.clone();
         let limit = subscription.limit;
+        let partitions = subscription.partitions;
 
         let (mut after_seq, lower_bound_ts) =
             match resolve_initial_position(&pool, &events_relation, &subscription).await {
@@ -186,12 +212,15 @@ impl Reader for PgReader {
                 if buffer.is_empty() {
                     let fetched = match fetch_batch(
                         &pool,
-                        &events_relation,
-                        after_seq,
-                        stop_seq,
-                        batch_size,
-                        lower_bound_ts,
-                        &filter,
+                        FetchBatchParams {
+                            events_relation: &events_relation,
+                            after_seq,
+                            stop_seq,
+                            take: batch_size,
+                            lower_bound_ts,
+                            filter: &filter,
+                            partitions: &partitions,
+                        },
                     )
                     .await
                     {
@@ -352,15 +381,29 @@ async fn resolve_stop_position(
     }
 }
 
-async fn fetch_batch(
-    pool: &PgPool,
-    events_relation: &str,
+struct FetchBatchParams<'a> {
+    events_relation: &'a str,
     after_seq: i64,
     stop_seq: Option<i64>,
     take: usize,
     lower_bound_ts: Option<DateTime<Utc>>,
-    filter: &EventFilter,
+    filter: &'a EventFilter,
+    partitions: &'a PartitionSelection,
+}
+
+async fn fetch_batch(
+    pool: &PgPool,
+    p: FetchBatchParams<'_>,
 ) -> Result<Vec<(SerializedEvent, i64)>> {
+    let FetchBatchParams {
+        events_relation,
+        after_seq,
+        stop_seq,
+        take,
+        lower_bound_ts,
+        filter,
+        partitions,
+    } = p;
     let mut sql = format!(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
@@ -401,6 +444,13 @@ async fn fetch_batch(
         sql.push_str(&format!(" AND timestamp >= ${bind_index}::timestamptz"));
         bind_index += 1;
     }
+    if let PartitionSelection::One(_) = partitions {
+        sql.push_str(&format!(
+            " AND partition_count = ${bind_index} AND partition_id = ${}",
+            bind_index + 1
+        ));
+        bind_index += 2;
+    }
     sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ${bind_index}"));
 
     let mut q = sqlx::query(&sql).bind(after_seq);
@@ -420,6 +470,10 @@ async fn fetch_batch(
     }
     if let Some(ts) = lower_bound_ts {
         q = q.bind(ts.to_rfc3339());
+    }
+    if let PartitionSelection::One(partition) = partitions {
+        q = q.bind(partition.count() as i32);
+        q = q.bind(partition.id() as i32);
     }
     q = q.bind(take as i64);
 
@@ -478,8 +532,25 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use super::*;
     use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder};
+
+    #[test]
+    fn pg_subscription_with_partition_sets_partition_selection_one() {
+        use eventuary_core::PartitionableSubscription;
+        let count = NonZeroU16::new(8).unwrap();
+        let partition = Partition::new(3, count).unwrap();
+        let sub = PgSubscription::default().with_partition(partition);
+        match sub.partitions {
+            PartitionSelection::One(p) => {
+                assert_eq!(p.id(), 3);
+                assert_eq!(p.count(), 8);
+            }
+            _ => panic!("expected PartitionSelection::One"),
+        }
+    }
 
     #[test]
     fn pg_cursor_id_is_global() {

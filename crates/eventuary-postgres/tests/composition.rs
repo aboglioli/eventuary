@@ -62,6 +62,7 @@ fn sub_for(org: &str) -> PgSubscription {
         filter: EventFilter::for_organization(OrganizationId::new(org).unwrap()),
         batch_size: Some(10),
         limit: None,
+        ..PgSubscription::default()
     }
 }
 

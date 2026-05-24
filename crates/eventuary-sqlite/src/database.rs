@@ -30,6 +30,18 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0002_stores.sql",
         template: include_str!("../migrations/0002_stores.sql"),
     },
+    Migration {
+        filename: "0003_monotonic_checkpoints.sql",
+        template: include_str!("../migrations/0003_monotonic_checkpoints.sql"),
+    },
+    Migration {
+        filename: "0004_partition_columns.sql",
+        template: include_str!("../migrations/0004_partition_columns.sql"),
+    },
+    Migration {
+        filename: "0005_partition_coordination.sql",
+        template: include_str!("../migrations/0005_partition_coordination.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {
@@ -44,6 +56,8 @@ pub struct SqliteDatabaseConfig {
     pub dedupe_keys_relation: SqliteRelationName,
     pub buffer_entries_relation: SqliteRelationName,
     pub watermarks_relation: SqliteRelationName,
+    pub consumers_relation: SqliteRelationName,
+    pub partitions_relation: SqliteRelationName,
 }
 
 impl Default for SqliteDatabaseConfig {
@@ -60,6 +74,10 @@ impl Default for SqliteDatabaseConfig {
                 .expect("default buffer relation"),
             watermarks_relation: SqliteRelationName::new("watermarks")
                 .expect("default watermarks relation"),
+            consumers_relation: SqliteRelationName::new("event_stream_consumers")
+                .expect("default consumers relation"),
+            partitions_relation: SqliteRelationName::new("event_stream_partitions")
+                .expect("default partitions relation"),
         }
     }
 }
@@ -76,6 +94,8 @@ pub fn render_migration_sql(migration: &Migration, config: &SqliteDatabaseConfig
         .replace("{dedupe_keys}", &config.dedupe_keys_relation.render())
         .replace("{buffer_entries}", &config.buffer_entries_relation.render())
         .replace("{watermarks}", &config.watermarks_relation.render())
+        .replace("{consumers}", &config.consumers_relation.render())
+        .replace("{partitions}", &config.partitions_relation.render())
 }
 
 pub fn render_schema_sql(config: &SqliteDatabaseConfig) -> String {
@@ -146,12 +166,24 @@ fn apply_migrations(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<
     // on every open is safe and avoids skipping configured-relation
     // creation when the previous opener wrote `PRAGMA user_version`
     // against a different relation pair.
+    //
+    // Exception: `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS`
+    // equivalent in SQLite, so we tolerate "duplicate column name" errors
+    // to achieve idempotency on re-open.
     for migration in migrations() {
         let sql = render_migration_sql(migration, config);
-        conn.execute_batch(&sql)
-            .map_err(|e| Error::Store(e.to_string()))?;
+        let result = conn.execute_batch(&sql);
+        match result {
+            Ok(()) => {}
+            Err(ref e) if is_duplicate_column_error(e) => {}
+            Err(e) => return Err(Error::Store(e.to_string())),
+        }
     }
     Ok(())
+}
+
+fn is_duplicate_column_error(e: &rusqlite::Error) -> bool {
+    e.to_string().contains("duplicate column name")
 }
 
 fn migration_version(filename: &str) -> i64 {

@@ -1,0 +1,1 @@
+ALTER TABLE {offsets} ADD COLUMN cursor_order BLOB NOT NULL DEFAULT x'';

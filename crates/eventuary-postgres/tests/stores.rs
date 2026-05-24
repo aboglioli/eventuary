@@ -5,13 +5,19 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
 use chrono::Utc;
 
+use eventuary_core::io::StreamId;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore, SubscriberId};
-use eventuary_core::io::reader::{BufferStore, DedupeStore, WatermarkStore};
+use eventuary_core::io::reader::{BufferStore, CheckpointStore, DedupeStore, WatermarkStore};
+use eventuary_core::io::{
+    ConsumerGroupId, Cursor, CursorOrder,
+    reader::{CheckpointKey, CheckpointScope},
+};
 use eventuary_core::{Event, EventId, Payload};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::{
-    PgBufferStore, PgBufferStoreConfig, PgDedupeStore, PgDedupeStoreConfig, PgMultiplexerStore,
-    PgMultiplexerStoreConfig, PgWatermarkStore, PgWatermarkStoreConfig,
+    PgBufferStore, PgBufferStoreConfig, PgCheckpointStore, PgCheckpointStoreConfig, PgDedupeStore,
+    PgDedupeStoreConfig, PgMultiplexerStore, PgMultiplexerStoreConfig, PgWatermarkStore,
+    PgWatermarkStoreConfig,
 };
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
@@ -167,4 +173,69 @@ async fn pg_watermark_store_scopes_by_key() {
     store.save_watermark("a", now).await.unwrap();
     assert!(store.load_watermark("a").await.unwrap().is_some());
     assert!(store.load_watermark("b").await.unwrap().is_none());
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SeqCursor(i64);
+
+impl Cursor for SeqCursor {
+    fn order_key(&self) -> CursorOrder {
+        CursorOrder::from_i64(self.0)
+    }
+}
+
+fn checkpoint_key() -> CheckpointKey {
+    CheckpointKey::new(
+        CheckpointScope::new(
+            ConsumerGroupId::new("test-group").unwrap(),
+            StreamId::new("test-stream").unwrap(),
+        ),
+        eventuary_core::io::CursorId::global(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_checkpoint_store_regression_guard_rejects_older_cursor() {
+    let (_c, pool) = start_postgres().await;
+    let store: PgCheckpointStore<SeqCursor> =
+        PgCheckpointStore::new(pool, PgCheckpointStoreConfig::default());
+    let key = checkpoint_key();
+
+    store.commit(&key, SeqCursor(100)).await.unwrap();
+    store.commit(&key, SeqCursor(50)).await.unwrap();
+
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.0, 100);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_checkpoint_store_forward_commit_advances_cursor() {
+    let (_c, pool) = start_postgres().await;
+    let store: PgCheckpointStore<SeqCursor> =
+        PgCheckpointStore::new(pool, PgCheckpointStoreConfig::default());
+    let key = checkpoint_key();
+
+    store.commit(&key, SeqCursor(100)).await.unwrap();
+    store.commit(&key, SeqCursor(200)).await.unwrap();
+
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_checkpoint_store_idempotent_recommit_is_safe() {
+    let (_c, pool) = start_postgres().await;
+    let store: PgCheckpointStore<SeqCursor> =
+        PgCheckpointStore::new(pool, PgCheckpointStoreConfig::default());
+    let key = checkpoint_key();
+
+    store.commit(&key, SeqCursor(100)).await.unwrap();
+    store.commit(&key, SeqCursor(100)).await.unwrap();
+
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.0, 100);
+
+    store.commit(&key, SeqCursor(150)).await.unwrap();
+    let loaded = store.load(&key).await.unwrap().unwrap();
+    assert_eq!(loaded.0, 150);
 }

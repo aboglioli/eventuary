@@ -1,0 +1,686 @@
+use std::sync::Arc;
+
+use chrono::{Duration, Utc};
+
+use eventuary_core::Partition;
+use eventuary_core::io::reader::CheckpointScope;
+use eventuary_core::io::{Generation, OwnerId, PartitionCoordinator, PartitionLease};
+use eventuary_core::{Error, Result};
+
+use crate::database::SqliteConn;
+use crate::reader::SqliteCursor;
+use crate::relation::SqliteRelationName;
+
+#[derive(Debug, Clone)]
+pub struct SqlitePartitionCoordinatorConfig {
+    pub consumers_relation: SqliteRelationName,
+    pub partitions_relation: SqliteRelationName,
+}
+
+impl Default for SqlitePartitionCoordinatorConfig {
+    fn default() -> Self {
+        Self {
+            consumers_relation: SqliteRelationName::new("event_stream_consumers")
+                .expect("default consumers relation"),
+            partitions_relation: SqliteRelationName::new("event_stream_partitions")
+                .expect("default partitions relation"),
+        }
+    }
+}
+
+pub struct SqlitePartitionCoordinator {
+    conn: SqliteConn,
+    consumers_relation: Arc<String>,
+    partitions_relation: Arc<String>,
+}
+
+impl Clone for SqlitePartitionCoordinator {
+    fn clone(&self) -> Self {
+        Self {
+            conn: Arc::clone(&self.conn),
+            consumers_relation: Arc::clone(&self.consumers_relation),
+            partitions_relation: Arc::clone(&self.partitions_relation),
+        }
+    }
+}
+
+impl SqlitePartitionCoordinator {
+    pub fn new(conn: SqliteConn, config: SqlitePartitionCoordinatorConfig) -> Self {
+        Self {
+            conn,
+            consumers_relation: Arc::new(config.consumers_relation.render()),
+            partitions_relation: Arc::new(config.partitions_relation.render()),
+        }
+    }
+}
+
+fn compute_lease_until(lease_duration: std::time::Duration) -> Result<String> {
+    let dt = Utc::now()
+        + Duration::from_std(lease_duration)
+            .map_err(|_| Error::Config("lease duration out of range".to_owned()))?;
+    Ok(dt.to_rfc3339())
+}
+
+impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
+    async fn heartbeat<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+        lease_duration: std::time::Duration,
+    ) -> Result<()> {
+        let lease_until = compute_lease_until(lease_duration)?;
+        let conn = Arc::clone(&self.conn);
+        let consumers = Arc::clone(&self.consumers_relation);
+        let group = scope.consumer_group_id.as_str().to_owned();
+        let stream = scope.stream_id.as_str().to_owned();
+        let owner = owner_id.as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "INSERT INTO {consumers} (consumer_group_id, stream_id, owner_id, lease_until) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (consumer_group_id, stream_id, owner_id) \
+                 DO UPDATE SET lease_until = excluded.lease_until"
+            );
+            guard
+                .execute(&sql, rusqlite::params![group, stream, owner, lease_until])
+                .map_err(|e| Error::Store(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+
+    async fn live_consumers<'a>(&'a self, scope: &'a CheckpointScope) -> Result<usize> {
+        let conn = Arc::clone(&self.conn);
+        let consumers = Arc::clone(&self.consumers_relation);
+        let group = scope.consumer_group_id.as_str().to_owned();
+        let stream = scope.stream_id.as_str().to_owned();
+        let now = Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "SELECT COUNT(*) FROM {consumers} \
+                 WHERE consumer_group_id = ?1 \
+                   AND stream_id = ?2 \
+                   AND lease_until > ?3"
+            );
+            let count: i64 = guard
+                .query_row(&sql, rusqlite::params![group, stream, now], |r| r.get(0))
+                .map_err(|e| Error::Store(e.to_string()))?;
+            Ok(count as usize)
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+
+    async fn claim<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+        partition: Partition,
+        lease_duration: std::time::Duration,
+    ) -> Result<Option<PartitionLease<SqliteCursor>>> {
+        let lease_until = compute_lease_until(lease_duration)?;
+        let conn = Arc::clone(&self.conn);
+        let partitions = Arc::clone(&self.partitions_relation);
+        let group = scope.consumer_group_id.as_str().to_owned();
+        let stream = scope.stream_id.as_str().to_owned();
+        let owner = owner_id.as_str().to_owned();
+        let partition_id_i64 = partition.id() as i64;
+        let now = Utc::now().to_rfc3339();
+        let scope = scope.clone();
+        let owner_id = owner_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "INSERT INTO {partitions} \
+                   (consumer_group_id, stream_id, partition_id, owner_id, lease_until, generation, checkpoint_sequence) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 0) \
+                 ON CONFLICT (consumer_group_id, stream_id, partition_id) DO UPDATE \
+                 SET owner_id = excluded.owner_id, \
+                     lease_until = excluded.lease_until, \
+                     generation = {partitions}.generation + 1 \
+                 WHERE {partitions}.owner_id IS NULL \
+                    OR {partitions}.lease_until IS NULL \
+                    OR {partitions}.lease_until < ?6 \
+                    OR {partitions}.owner_id = excluded.owner_id \
+                 RETURNING owner_id, lease_until, generation, checkpoint_sequence"
+            );
+            let row = guard
+                .query_row(
+                    &sql,
+                    rusqlite::params![group, stream, partition_id_i64, owner, lease_until, now],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })
+                .map_err(|e| Error::Store(e.to_string()))?;
+            match row {
+                None => Ok(None),
+                Some((_returned_owner, lease_until_text, generation, checkpoint_sequence)) => {
+                    let lease_until = chrono::DateTime::parse_from_rfc3339(&lease_until_text)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|e| {
+                            Error::Serialization(format!("lease_until decode: {e}"))
+                        })?;
+                    Ok(Some(PartitionLease {
+                        scope,
+                        owner_id,
+                        partition,
+                        generation: Generation::from_i64(generation),
+                        checkpoint_cursor: Some(SqliteCursor::new(checkpoint_sequence)),
+                        lease_until,
+                    }))
+                }
+            }
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+
+    async fn renew<'a>(
+        &'a self,
+        lease: &'a PartitionLease<SqliteCursor>,
+        lease_duration: std::time::Duration,
+    ) -> Result<()> {
+        let lease_until = compute_lease_until(lease_duration)?;
+        let conn = Arc::clone(&self.conn);
+        let partitions = Arc::clone(&self.partitions_relation);
+        let group = lease.scope.consumer_group_id.as_str().to_owned();
+        let stream = lease.scope.stream_id.as_str().to_owned();
+        let owner = lease.owner_id.as_str().to_owned();
+        let partition_id_i64 = lease.partition.id() as i64;
+        let generation = lease.generation.get();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "UPDATE {partitions} \
+                 SET lease_until = ?5 \
+                 WHERE consumer_group_id = ?1 \
+                   AND stream_id = ?2 \
+                   AND partition_id = ?3 \
+                   AND owner_id = ?4 \
+                   AND generation = ?6"
+            );
+            let affected = guard
+                .execute(
+                    &sql,
+                    rusqlite::params![
+                        group,
+                        stream,
+                        partition_id_i64,
+                        owner,
+                        lease_until,
+                        generation
+                    ],
+                )
+                .map_err(|e| Error::Store(e.to_string()))?;
+            if affected == 0 {
+                return Err(Error::OwnershipLost(format!(
+                    "partition {partition_id_i64} generation {generation}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+
+    async fn release<'a>(&'a self, lease: &'a PartitionLease<SqliteCursor>) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let partitions = Arc::clone(&self.partitions_relation);
+        let group = lease.scope.consumer_group_id.as_str().to_owned();
+        let stream = lease.scope.stream_id.as_str().to_owned();
+        let owner = lease.owner_id.as_str().to_owned();
+        let partition_id_i64 = lease.partition.id() as i64;
+        let generation = lease.generation.get();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "UPDATE {partitions} \
+                 SET owner_id = NULL, \
+                     lease_until = NULL, \
+                     generation = generation + 1 \
+                 WHERE consumer_group_id = ?1 \
+                   AND stream_id = ?2 \
+                   AND partition_id = ?3 \
+                   AND owner_id = ?4 \
+                   AND generation = ?5"
+            );
+            let affected = guard
+                .execute(
+                    &sql,
+                    rusqlite::params![group, stream, partition_id_i64, owner, generation],
+                )
+                .map_err(|e| Error::Store(e.to_string()))?;
+            if affected == 0 {
+                return Err(Error::OwnershipLost(format!(
+                    "partition {partition_id_i64} generation {generation}"
+                )));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+
+    async fn checkpoint<'a>(
+        &'a self,
+        lease: &'a PartitionLease<SqliteCursor>,
+        cursor: SqliteCursor,
+    ) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let partitions = Arc::clone(&self.partitions_relation);
+        let group = lease.scope.consumer_group_id.as_str().to_owned();
+        let stream = lease.scope.stream_id.as_str().to_owned();
+        let owner = lease.owner_id.as_str().to_owned();
+        let partition_id_i64 = lease.partition.id() as i64;
+        let generation = lease.generation.get();
+        let sequence = cursor.sequence;
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "UPDATE {partitions} \
+                 SET checkpoint_sequence = ?6 \
+                 WHERE consumer_group_id = ?1 \
+                   AND stream_id = ?2 \
+                   AND partition_id = ?3 \
+                   AND owner_id = ?4 \
+                   AND generation = ?5 \
+                   AND ?6 > {partitions}.checkpoint_sequence"
+            );
+            let affected = guard
+                .execute(
+                    &sql,
+                    rusqlite::params![group, stream, partition_id_i64, owner, generation, sequence],
+                )
+                .map_err(|e| Error::Store(e.to_string()))?;
+            if affected == 0 {
+                let check_sql = format!(
+                    "SELECT owner_id, generation FROM {partitions} \
+                     WHERE consumer_group_id = ?1 AND stream_id = ?2 AND partition_id = ?3"
+                );
+                let check_row = guard
+                    .query_row(
+                        &check_sql,
+                        rusqlite::params![group, stream, partition_id_i64],
+                        |r| {
+                            Ok((
+                                r.get::<_, Option<String>>(0)?,
+                                r.get::<_, i64>(1)?,
+                            ))
+                        },
+                    )
+                    .map(Some)
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })
+                    .map_err(|e| Error::Store(e.to_string()))?;
+                match check_row {
+                    Some((current_owner, current_generation)) => {
+                        if current_generation == generation
+                            && current_owner.as_deref() == Some(owner.as_str())
+                        {
+                            return Ok(());
+                        }
+                        Err(Error::OwnershipLost(format!(
+                            "checkpoint rejected for partition {partition_id_i64}: stale owner/generation"
+                        )))
+                    }
+                    None => Err(Error::OwnershipLost(format!(
+                        "partition {partition_id_i64} generation {generation}"
+                    ))),
+                }
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU16;
+
+    use super::*;
+    use eventuary_core::io::{ConsumerGroupId, OwnerId, PartitionCoordinator, StreamId};
+
+    use crate::database::SqliteDatabase;
+
+    fn make_coordinator() -> SqlitePartitionCoordinator {
+        let db = SqliteDatabase::open_in_memory().unwrap();
+        SqlitePartitionCoordinator::new(db.conn(), SqlitePartitionCoordinatorConfig::default())
+    }
+
+    fn scope() -> CheckpointScope {
+        CheckpointScope::new(
+            ConsumerGroupId::new("group-1").unwrap(),
+            StreamId::new("orders").unwrap(),
+        )
+    }
+
+    fn partition(id: u16) -> Partition {
+        Partition::new(id, NonZeroU16::new(64).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn heartbeat_and_live_count() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let long_lease = std::time::Duration::from_secs(60);
+
+        coord.heartbeat(&s, &owner_a, long_lease).await.unwrap();
+        coord.heartbeat(&s, &owner_b, long_lease).await.unwrap();
+
+        let live = coord.live_consumers(&s).await.unwrap();
+        assert_eq!(live, 2);
+    }
+
+    #[tokio::test]
+    async fn live_consumers_excludes_expired() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let long_lease = std::time::Duration::from_secs(60);
+        let short_lease = std::time::Duration::from_millis(50);
+
+        coord.heartbeat(&s, &owner_a, long_lease).await.unwrap();
+        coord.heartbeat(&s, &owner_b, short_lease).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let live = coord.live_consumers(&s).await.unwrap();
+        assert_eq!(live, 1);
+    }
+
+    #[tokio::test]
+    async fn claim_free_partition_succeeds() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner = OwnerId::new("worker-a").unwrap();
+        let lease_dur = std::time::Duration::from_secs(60);
+
+        let lease = coord
+            .claim(&s, &owner, partition(0), lease_dur)
+            .await
+            .unwrap()
+            .expect("should get lease");
+
+        assert_eq!(lease.generation.get(), 1);
+        assert_eq!(lease.checkpoint_cursor.unwrap().sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn claim_contested_returns_none() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let lease_dur = std::time::Duration::from_secs(60);
+
+        let first = coord
+            .claim(&s, &owner_a, partition(0), lease_dur)
+            .await
+            .unwrap();
+        assert!(first.is_some());
+
+        let second = coord
+            .claim(&s, &owner_b, partition(0), lease_dur)
+            .await
+            .unwrap();
+        assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_after_expiry_succeeds() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let short_lease = std::time::Duration::from_millis(50);
+        let long_lease = std::time::Duration::from_secs(60);
+
+        let first = coord
+            .claim(&s, &owner_a, partition(0), short_lease)
+            .await
+            .unwrap();
+        assert_eq!(first.unwrap().generation.get(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let second = coord
+            .claim(&s, &owner_b, partition(0), long_lease)
+            .await
+            .unwrap()
+            .expect("should succeed after expiry");
+        assert_eq!(second.generation.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn renew_with_matching_generation() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner = OwnerId::new("worker-a").unwrap();
+        let lease_dur = std::time::Duration::from_secs(60);
+
+        let lease = coord
+            .claim(&s, &owner, partition(0), lease_dur)
+            .await
+            .unwrap()
+            .unwrap();
+
+        coord.renew(&lease, lease_dur).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renew_with_stale_generation_returns_ownership_lost() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let short_lease = std::time::Duration::from_millis(50);
+        let long_lease = std::time::Duration::from_secs(60);
+
+        let lease_a = coord
+            .claim(&s, &owner_a, partition(0), short_lease)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease_a.generation.get(), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        coord
+            .claim(&s, &owner_b, partition(0), long_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = coord.renew(&lease_a, long_lease).await.unwrap_err();
+        assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+    }
+
+    #[tokio::test]
+    async fn release_with_matching_generation() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let lease_dur = std::time::Duration::from_secs(60);
+
+        let lease = coord
+            .claim(&s, &owner_a, partition(0), lease_dur)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.generation.get(), 1);
+
+        coord.release(&lease).await.unwrap();
+
+        let new_lease = coord
+            .claim(&s, &owner_b, partition(0), lease_dur)
+            .await
+            .unwrap()
+            .expect("should claim after release");
+        assert_eq!(new_lease.generation.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn release_with_stale_generation_returns_ownership_lost() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let short_lease = std::time::Duration::from_millis(50);
+        let long_lease = std::time::Duration::from_secs(60);
+
+        let lease_a = coord
+            .claim(&s, &owner_a, partition(0), short_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        coord
+            .claim(&s, &owner_b, partition(0), long_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = coord.release(&lease_a).await.unwrap_err();
+        assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_with_matching_generation_advances() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let long_lease = std::time::Duration::from_secs(60);
+
+        let lease = coord
+            .claim(&s, &owner_a, partition(0), long_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        coord
+            .checkpoint(&lease, SqliteCursor::new(100))
+            .await
+            .unwrap();
+
+        coord.release(&lease).await.unwrap();
+
+        let new_lease = coord
+            .claim(&s, &owner_b, partition(0), long_lease)
+            .await
+            .unwrap()
+            .expect("should claim after release");
+        assert_eq!(new_lease.checkpoint_cursor.unwrap().sequence, 100);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_is_monotonic() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let long_lease = std::time::Duration::from_secs(60);
+
+        let lease = coord
+            .claim(&s, &owner_a, partition(0), long_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        coord
+            .checkpoint(&lease, SqliteCursor::new(100))
+            .await
+            .unwrap();
+        coord
+            .checkpoint(&lease, SqliteCursor::new(50))
+            .await
+            .unwrap();
+
+        coord.release(&lease).await.unwrap();
+
+        let new_lease = coord
+            .claim(&s, &owner_b, partition(0), long_lease)
+            .await
+            .unwrap()
+            .expect("should claim after release");
+        assert_eq!(new_lease.checkpoint_cursor.unwrap().sequence, 100);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_with_stale_generation_returns_ownership_lost() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let short_lease = std::time::Duration::from_millis(50);
+        let long_lease = std::time::Duration::from_secs(60);
+
+        let lease_a = coord
+            .claim(&s, &owner_a, partition(0), short_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        coord
+            .claim(&s, &owner_b, partition(0), long_lease)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let err = coord
+            .checkpoint(&lease_a, SqliteCursor::new(100))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_after_release_returns_ownership_lost() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let lease_dur = std::time::Duration::from_secs(60);
+
+        let lease = coord
+            .claim(&s, &owner_a, partition(0), lease_dur)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.generation.get(), 1);
+
+        coord.release(&lease).await.unwrap();
+
+        let err = coord
+            .checkpoint(&lease, SqliteCursor::new(100))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+    }
+}

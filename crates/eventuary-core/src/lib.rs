@@ -39,6 +39,7 @@ mod metadata;
 mod namespace;
 mod namespace_pattern;
 mod organization;
+pub mod partition;
 mod payload;
 mod serialization;
 mod snapshot;
@@ -56,6 +57,7 @@ pub use namespace::Namespace;
 pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
 
+pub use io::partitionable_subscription::PartitionableSubscription;
 pub use io::position::{StartFrom, StartableSubscription, StopAt};
 pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};

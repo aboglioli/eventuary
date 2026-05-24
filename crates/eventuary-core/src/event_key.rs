@@ -71,6 +71,11 @@ impl EventKey {
     }
 
     /// Determine the partition for this key within a given count.
+    #[deprecated(
+        since = "0.1.0-alpha.2",
+        note = "Use the resolver/hasher pipeline via `PartitionHasher::partition_for(&PartitionKey, count)`. \
+                See `EventKeyPartitionKeyResolver` + `Fnv1a64PartitionHasher`."
+    )]
     pub fn partition_for(&self, count: NonZeroU16) -> Partition {
         let id = (fnv1a_u64(self.0.as_bytes()) % count.get() as u64) as u16;
         Partition::new(id, count).expect("id < count by modulo")
@@ -97,6 +102,7 @@ impl From<EventKey> for String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
