@@ -13,8 +13,8 @@ use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
 use eventuary_core::partition::PartitionSelection;
 use eventuary_core::{
-    Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
-    StartableSubscription, StopAt, TopicPattern,
+    Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
+    SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
 };
 
 use crate::relation::PgRelationName;
@@ -75,6 +75,13 @@ impl Default for PgSubscription {
 impl StartableSubscription<PgCursor> for PgSubscription {
     fn with_start(mut self, start: StartFrom<PgCursor>) -> Self {
         self.start = start;
+        self
+    }
+}
+
+impl PartitionableSubscription<PgCursor> for PgSubscription {
+    fn with_partition(mut self, partition: Partition) -> Self {
+        self.partitions = PartitionSelection::One(partition);
         self
     }
 }
@@ -525,8 +532,25 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use super::*;
     use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder};
+
+    #[test]
+    fn pg_subscription_with_partition_sets_partition_selection_one() {
+        use eventuary_core::PartitionableSubscription;
+        let count = NonZeroU16::new(8).unwrap();
+        let partition = Partition::new(3, count).unwrap();
+        let sub = PgSubscription::default().with_partition(partition);
+        match sub.partitions {
+            PartitionSelection::One(p) => {
+                assert_eq!(p.id(), 3);
+                assert_eq!(p.count(), 8);
+            }
+            _ => panic!("expected PartitionSelection::One"),
+        }
+    }
 
     #[test]
     fn pg_cursor_id_is_global() {

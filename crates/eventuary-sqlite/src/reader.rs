@@ -13,8 +13,8 @@ use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, CursorOrder, JsonCursorCodec, Message, Reader};
 use eventuary_core::partition::PartitionSelection;
 use eventuary_core::{
-    Error, NamespacePattern, Result, SerializedEvent, SerializedPayload, StartFrom,
-    StartableSubscription, StopAt, TopicPattern,
+    Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
+    SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
 };
 
 use crate::database::SqliteConn;
@@ -76,6 +76,13 @@ impl Default for SqliteSubscription {
 impl StartableSubscription<SqliteCursor> for SqliteSubscription {
     fn with_start(mut self, start: StartFrom<SqliteCursor>) -> Self {
         self.start = start;
+        self
+    }
+}
+
+impl PartitionableSubscription<SqliteCursor> for SqliteSubscription {
+    fn with_partition(mut self, partition: Partition) -> Self {
+        self.partitions = PartitionSelection::One(partition);
         self
     }
 }
@@ -605,7 +612,21 @@ mod tests {
         EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionHasher,
         PartitionKey,
     };
-    use eventuary_core::{Event, Payload, StartFrom, StopAt};
+    use eventuary_core::{Event, PartitionableSubscription, Payload, StartFrom, StopAt};
+
+    #[test]
+    fn sqlite_subscription_with_partition_sets_partition_selection_one() {
+        let count = NonZeroU16::new(8).unwrap();
+        let partition = Partition::new(3, count).unwrap();
+        let sub = SqliteSubscription::default().with_partition(partition);
+        match sub.partitions {
+            PartitionSelection::One(p) => {
+                assert_eq!(p.id(), 3);
+                assert_eq!(p.count(), 8);
+            }
+            _ => panic!("expected PartitionSelection::One"),
+        }
+    }
 
     #[test]
     fn sqlite_cursor_id_is_global() {
