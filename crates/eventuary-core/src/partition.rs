@@ -162,11 +162,63 @@ impl From<PartitionStrategy> for String {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+/// Validated set of partitions sharing the same `partition_count`.
+///
+/// Constructed via `PartitionGroup::new` so the invariants hold:
+/// - non-empty
+/// - all partitions share the same `count`
+///
+/// Used by `PartitionSelection::Many` so a single reader read can fetch
+/// across several owned lanes in one query (`partition_id IN (...)` /
+/// `partition_id = ANY(...)`) instead of one query per lane.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PartitionGroup {
+    partitions: Vec<Partition>,
+}
+
+impl PartitionGroup {
+    pub fn new(partitions: Vec<Partition>) -> Result<Self> {
+        if partitions.is_empty() {
+            return Err(Error::Config(
+                "partition group must not be empty".to_owned(),
+            ));
+        }
+        let count = partitions[0].count_nz();
+        if partitions.iter().any(|p| p.count_nz() != count) {
+            return Err(Error::Config(
+                "all partitions in a group must share the same count".to_owned(),
+            ));
+        }
+        Ok(Self { partitions })
+    }
+
+    pub fn partitions(&self) -> &[Partition] {
+        &self.partitions
+    }
+
+    pub fn count_nz(&self) -> NonZeroU16 {
+        self.partitions[0].count_nz()
+    }
+
+    pub fn count(&self) -> u16 {
+        self.count_nz().get()
+    }
+
+    pub fn len(&self) -> usize {
+        self.partitions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 pub enum PartitionSelection {
     #[default]
     All,
     One(Partition),
+    Many(PartitionGroup),
 }
 
 // FixedPartition variant is intentionally deferred: it requires bypassing the hasher,
@@ -369,6 +421,46 @@ mod tests {
         let p = Partition::new(2, count).unwrap();
         let sel = PartitionSelection::One(p);
         assert_eq!(sel, PartitionSelection::One(p));
+    }
+
+    #[test]
+    fn partition_group_rejects_empty() {
+        let err = PartitionGroup::new(Vec::new()).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn partition_group_rejects_mismatched_counts() {
+        let p1 = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
+        let p2 = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let err = PartitionGroup::new(vec![p1, p2]).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn partition_group_accepts_uniform_counts() {
+        let count = NonZeroU16::new(8).unwrap();
+        let group = PartitionGroup::new(vec![
+            Partition::new(0, count).unwrap(),
+            Partition::new(3, count).unwrap(),
+            Partition::new(7, count).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(group.len(), 3);
+        assert_eq!(group.count(), 8);
+        assert_eq!(group.partitions().len(), 3);
+    }
+
+    #[test]
+    fn partition_selection_many_constructs_from_group() {
+        let count = NonZeroU16::new(4).unwrap();
+        let group = PartitionGroup::new(vec![
+            Partition::new(0, count).unwrap(),
+            Partition::new(1, count).unwrap(),
+        ])
+        .unwrap();
+        let sel = PartitionSelection::Many(group.clone());
+        assert_eq!(sel, PartitionSelection::Many(group));
     }
 
     #[test]
