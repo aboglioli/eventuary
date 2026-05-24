@@ -388,6 +388,30 @@ single source. Cross-cutting concerns live in generic core wrappers in
   under a `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
   cursor_id)`.
 
+- `CoordinatedReader<R, Coord>` is the multi-instance distributed reader.
+  It wraps a partition-aware source reader (any `R` whose `Subscription`
+  implements `PartitionableSubscription<C>`) with a
+  `PartitionCoordinator<C>` to provide Kafka-like consumer-group
+  semantics over SQL. It heartbeats the local owner into
+  `event_stream_consumers`, claims partitions in `event_stream_partitions`,
+  spawns one inner partition reader per owned lease and merges them into
+  one stream, renews leases in a shared background loop with bounded
+  jitter, writes fenced checkpoints via `Coord::checkpoint(&lease, cursor)`
+  on every ack, and rebalances when consumers join or owners disappear.
+  A stale `(owner_id, generation)` surfaces `Error::OwnershipLost` and the
+  worker stops. Type aliases: `PgCoordinatedReader`,
+  `SqliteCoordinatedReader`. Companion types: `CoordinatedAcker<A, C, Coord>`,
+  `CoordinatedCursor<C>`, `CoordinatedSubscription<S, C>`,
+  `CoordinatedReaderConfig`. Checkpoints currently flush per ack;
+  contiguous-progress batching by count/interval is a planned addition.
+
+- `PartitionCoordinator<C>` is the membership + lease + checkpoint trait.
+  `heartbeat`, `live_consumers`, `claim`, `renew`, `release`, `checkpoint`
+  are the surface. Backends (`PgPartitionCoordinator`,
+  `SqlitePartitionCoordinator`, `MemoryPartitionCoordinator<C>`) own the
+  storage. `PartitionLease<C>` carries `(scope, owner_id, partition,
+  generation, checkpoint_cursor, lease_until)` and is the fencing token.
+
 **Cross-cutting wrappers:**
 
 | Wrapper | Acker / Cursor | Purpose |
@@ -451,13 +475,13 @@ possible: route failed messages with `OutcomeRouterReader`, map the event with
 
 **Backend capability matrix.**
 
-| Backend | delivery cursor | `CheckpointStore` | Notes |
-|---|---|---|---|
-| `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<C>` (JSON cursor column) | composes with `PartitionedReader` + `CheckpointReader` |
-| `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | composes with `PartitionedReader` + `CheckpointReader` |
-| `eventuary-memory` | `NoCursor` | — | mpsc source; no replay/checkpoint semantics |
-| `eventuary-sqs` | `NoCursor` | — | queue visibility/delete is the native progress model |
-| `eventuary-kafka` | `KafkaCursor` | — | consumer group commits are the native progress model |
+| Backend | delivery cursor | `CheckpointStore` | `PartitionCoordinator` | Notes |
+|---|---|---|---|---|
+| `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<C>` (JSON cursor column) | ✅ `PgPartitionCoordinator` (`event_stream_consumers` + `event_stream_partitions`) | composes with `PartitionedReader` + `CheckpointReader`; `PgCoordinatedReader` for multi-instance ownership |
+| `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | ✅ `SqlitePartitionCoordinator` | composes with `PartitionedReader` + `CheckpointReader`; `SqliteCoordinatedReader` for multi-instance ownership |
+| `eventuary-memory` | `NoCursor` | — | ✅ `MemoryPartitionCoordinator<C>` (testing) | mpsc source; no replay/checkpoint semantics |
+| `eventuary-sqs` | `NoCursor` | — | — | queue visibility/delete is the native progress model |
+| `eventuary-kafka` | `KafkaCursor` | — | — | consumer group commits are the native progress model |
 
 Checkpoint compatibility is validated by the reader or wrapper that interprets
 the cursor, not by a global topology fingerprint. `CheckpointReader` seeds the
@@ -879,6 +903,31 @@ Worth knowing when changing the codebase:
   they need isolation between multiplexers sharing a store. For fully
   independent progress, use backend-native isolation
   (`CheckpointScope`, Kafka consumer group, SQS queue).
+- **Distributed consumption is core-generic, backend-storage-only.**
+  `CoordinatedReader<R, Coord>` and `CoordinatedAcker<A, C, Coord>` live
+  in `eventuary-core`; backend crates ship only `pub type` aliases plus a
+  `PartitionCoordinator<C>` implementation. The trait surface is
+  intentionally small: `heartbeat`, `live_consumers`, `claim`, `renew`,
+  `release`, `checkpoint`. The reader owns the rebalance loop, jittered
+  renewal, lease handoff to per-partition workers, and graceful release
+  on shutdown. `event_stream_consumers` (ephemeral membership) and
+  `event_stream_partitions` (durable ownership + checkpoint, fenced by
+  `generation`) are separate tables because they have different
+  lifecycles. `CoordinatedReader` is not stacked with `CheckpointReader`:
+  it owns its own fenced, owner-aware checkpoint path; `CheckpointStore`
+  remains for single-active-reader flows.
+- **Coordinator trait is per-partition `claim`, not bulk
+  `claim_assignments`.** The reader loops over partition ids and calls
+  `claim(partition) -> Option<PartitionLease<C>>`. This keeps the trait
+  small, lets the reader decide rebalance policy (target count, slack,
+  release ordering), and makes `MemoryPartitionCoordinator` trivial to
+  implement for tests.
+- **Checkpoint flush is per-ack in the first cut.** A batched
+  contiguous-progress flush by `checkpoint_flush_count` /
+  `checkpoint_flush_interval` is planned but deliberately deferred so the
+  first implementation matches `CheckpointReader`'s commit-on-ack
+  semantics; high-throughput deployments should add the buffer before
+  optimizing.
 
 ## Releasing
 

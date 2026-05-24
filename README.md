@@ -437,6 +437,82 @@ Source mode acks the inner source when a message is accepted into a lane and
 handles downstream `nack` by requeueing the event in memory. Delivery mode keeps
 the inner acker until downstream `ack`/`nack`, preserving broker semantics.
 
+## Multi-Instance Coordinated Readers
+
+`PartitionedReader` distributes partitions inside one process. To distribute
+partitions across multiple service instances sharing the same logical consumer
+group, compose a partition-aware source reader with `CoordinatedReader<R, Coord>`
+and a `PartitionCoordinator<C>`.
+
+`CoordinatedReader` provides Kafka-like consumer-group semantics over a SQL log:
+
+- heartbeats this instance into `event_stream_consumers` for the
+  `(consumer_group_id, stream_id)` scope,
+- claims free, expired, or released partitions from `event_stream_partitions`,
+- spawns one inner partition reader per owned lease, merges them into one stream,
+- renews leases in a shared background loop with bounded jitter,
+- writes monotonic checkpoints fenced by `(owner_id, generation)` on every ack;
+  a stale owner's checkpoint update affects zero rows and surfaces
+  `Error::OwnershipLost`,
+- rebalances when new instances heartbeat in or owners disappear,
+- releases owned partitions gracefully when the stream is dropped or shut down.
+
+The backend crates expose this as thin type aliases over the core generic:
+
+| Backend | Type aliases | Coordinator |
+|---------|--------------|-------------|
+| PostgreSQL | `PgCoordinatedReader`, `PgCoordinatedAcker`, `PgCoordinatedCursor` | `PgPartitionCoordinator` |
+| SQLite | `SqliteCoordinatedReader`, `SqliteCoordinatedAcker`, `SqliteCoordinatedCursor` | `SqlitePartitionCoordinator` |
+| memory | — (use the core generic directly) | `MemoryPartitionCoordinator` |
+
+```rust,ignore
+use std::num::NonZeroU16;
+use std::sync::Arc;
+use std::time::Duration;
+
+use eventuary::StartFrom;
+use eventuary::io::{ConsumerGroupId, OwnerId, StreamId};
+use eventuary::io::reader::{CheckpointScope, CoordinatedReaderConfig, CoordinatedSubscription};
+use eventuary::postgres::coordinated_reader::{PgCoordinatedReader, PgCoordinatedReaderConfig};
+use eventuary::postgres::partition_coordinator::PgPartitionCoordinator;
+use eventuary::postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
+
+let source = PgReader::new(pool.clone(), PgReaderConfig::default());
+let coordinator = Arc::new(PgPartitionCoordinator::new(pool, Default::default()));
+
+let reader = PgCoordinatedReader::new(
+    source,
+    Arc::clone(&coordinator),
+    OwnerId::generate(),
+    CoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(60),
+        partition_renew_interval: Duration::from_secs(15),
+        consumer_lease_duration: Duration::from_secs(30),
+        consumer_heartbeat_interval: Duration::from_secs(10),
+        rebalance_interval: Duration::from_secs(10),
+        partition_slack: 1,
+    },
+);
+
+let subscription = CoordinatedSubscription {
+    inner: PgSubscription::default(),
+    scope: CheckpointScope::new(
+        ConsumerGroupId::new("orders-projection-v1")?,
+        StreamId::new("orders-events")?,
+    ),
+    partition_count: NonZeroU16::new(1024).unwrap(),
+    start: StartFrom::Earliest,
+};
+```
+
+Identity for coordinated state is `(consumer_group_id, stream_id, partition_id)`,
+so multiple consumer groups can independently consume the same `stream_id` with
+their own ownership and checkpoint progress.
+
+Checkpoints currently flush on every ack. High-throughput deployments should
+plan for a future contiguous-progress flush buffer; the API does not yet expose
+`checkpoint_flush_count` / `checkpoint_flush_interval`.
+
 ## Reader Wrappers
 
 Cross-cutting reader behavior lives in `eventuary::io::reader` and can be
@@ -460,6 +536,7 @@ composed around backend readers.
 | `WindowReader` | Window event delivery |
 | `PartitionedReader` | Route events into deterministic logical lanes |
 | `CheckpointReader` | Persist cursor progress on ack |
+| `CoordinatedReader` | Multi-instance partition ownership over SQL (heartbeat, lease, fenced checkpoint, rebalance) |
 | `OutcomeRouterReader` | Route delivered, acked, and/or nacked events to writers while preserving message lifecycle semantics |
 
 Wrappers are generic over the `Reader` trait, so they are backend-independent.
