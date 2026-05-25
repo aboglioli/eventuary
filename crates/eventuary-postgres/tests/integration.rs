@@ -16,7 +16,7 @@ use eventuary_core::{
 };
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
-use eventuary_postgres::writer::PgWriter;
+use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
@@ -34,6 +34,9 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
+    PgWriter::prepare_schema(&pool, &PgWriterConfig::default())
+        .await
+        .unwrap();
     (container, pool)
 }
 

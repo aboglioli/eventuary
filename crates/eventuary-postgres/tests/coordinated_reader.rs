@@ -39,7 +39,17 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
+    prepare_test_schema(&pool).await;
     (container, pool)
+}
+
+async fn prepare_test_schema(pool: &PgPool) {
+    PgWriter::prepare_schema(pool, &PgWriterConfig::default())
+        .await
+        .unwrap();
+    PgPartitionCoordinator::prepare_schema(pool, &PgPartitionCoordinatorConfig::default())
+        .await
+        .unwrap();
 }
 
 fn event_with_key(key: &str) -> Event {
