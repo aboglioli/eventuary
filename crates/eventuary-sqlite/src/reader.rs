@@ -19,6 +19,7 @@ use eventuary_core::{
 };
 
 use crate::database::SqliteConn;
+use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 use crate::relation::SqliteRelationName;
 
 #[derive(
@@ -162,6 +163,27 @@ impl Clone for SqliteReader {
 }
 
 impl SqliteReader {
+    pub fn connect(conn: SqliteConn, config: SqliteReaderConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteReaderConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        SqliteEventLogSchema::prepare(
+            &guard,
+            &SqliteEventLogSchemaConfig {
+                events_relation: config.events_relation.clone(),
+            },
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteReaderConfig) -> String {
+        SqliteEventLogSchema::schema_sql(&SqliteEventLogSchemaConfig {
+            events_relation: config.events_relation.clone(),
+        })
+    }
+
     pub fn new(conn: SqliteConn, config: SqliteReaderConfig) -> Self {
         Self { conn, config }
     }

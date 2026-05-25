@@ -9,6 +9,7 @@ use eventuary_core::partition::{
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::database::SqliteConn;
+use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 use crate::relation::SqliteRelationName;
 
 #[derive(Clone, Default)]
@@ -72,6 +73,27 @@ pub struct SqliteWriter {
 }
 
 impl SqliteWriter {
+    pub fn connect(conn: SqliteConn, config: SqliteWriterConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new_with_config(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteWriterConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        SqliteEventLogSchema::prepare(
+            &guard,
+            &SqliteEventLogSchemaConfig {
+                events_relation: config.events_relation.clone(),
+            },
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteWriterConfig) -> String {
+        SqliteEventLogSchema::schema_sql(&SqliteEventLogSchemaConfig {
+            events_relation: config.events_relation.clone(),
+        })
+    }
+
     pub fn new(conn: SqliteConn) -> Self {
         Self::new_with_config(conn, SqliteWriterConfig::default())
     }
