@@ -977,10 +977,12 @@ Worth knowing when changing the codebase:
   therefore live in `io/reader/coordinated.rs` and are imported by backends
   via the canonical `io::reader::*` path (`use eventuary_core::io::reader::
   {Generation, PartitionLease, PartitionCoordinator}`), matching how
-  backends import every other wrapper-companion trait. The `io::*`
-  top-level re-export is reserved for base abstractions (`Reader`,
-  `Writer`, `Acker`, `Cursor`, `Filter`, `Handler`, `Message`) and
-  cross-cutting value types (`OwnerId`, `ConsumerGroupId`, `StreamId`).
+  backends import every other wrapper-companion trait. Coordinator
+  companions (`PartitionCoordinator`, `PartitionLease`, `Generation`,
+  and coordinated aliases) live under `eventuary_core::io::reader::*` and
+  are not re-exported from `eventuary_core::io::*`. Existing
+  compatibility re-exports for common handler, writer, and typed bridge
+  wrappers remain available at `io::*`.
 - **`PartitionableSubscription` lives with `StartableSubscription` in
   `io/position.rs`.** Sibling subscription-capability traits: both have the
   same `Self -> Self` builder shape and exist so wrappers can compose
@@ -1026,7 +1028,7 @@ Worth knowing when changing the codebase:
   a `PayloadCodec<P>` / `EventCodec<P>`. Built-in codecs:
   `JsonPayloadCodec` (serde-based), `PayloadPassthroughCodec` (identity),
   and `PayloadEventCodec<C>` (lifts a payload codec to a full event
-  codec). `DecodeErrorDisposition::{AckInner, Nack, DeadLetter, Fail}`
+  codec). `DecodeErrorDisposition::{AckInner, NackInner, Surface}`
   governs poison-event behaviour; the default is `AckInner` so a single
   bad row does not stall the source cursor.
 - **`PartitionKeyResolver<P = Payload>` is generic.** Built-in resolvers
@@ -1038,10 +1040,10 @@ Worth knowing when changing the codebase:
   `PartitionRouteStrategy<P>` thread `P` through; the default
   `EventCompatibility` route inlines the same FNV-1a routing
   (`event.key()` bytes else `event.id()` bytes) and is available for
-  every `P`. `Event::partition` / `EventKey::partition_for` were
-  intentionally removed during the typed-payload follow-ups; callers go
-  through the resolver/hasher pipeline directly or rely on
-  `EventCompatibility`.
+  every `P`. The legacy inherent partitioning helpers on `Event` and
+  `EventKey` were intentionally removed during the typed-payload
+  follow-ups; callers go through the resolver/hasher pipeline directly
+  or rely on `EventCompatibility`.
 - **`MultiplexerStore` is intentionally NOT generic over `P`.** The
   store keys on `(event_id, subscriber_id)` only — the value stored is
   completion state, never the payload. Keeping the trait monomorphic

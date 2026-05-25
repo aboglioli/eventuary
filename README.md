@@ -115,7 +115,10 @@ Important model types:
 - `OrganizationId` — tenant scope; `_platform` is reserved for platform-wide
   events.
 - `EventKey` — flexible non-empty key used for event keys, correlation IDs, and
-  causation IDs. It provides deterministic FNV-1a partitioning.
+  causation IDs. `EventKey` is the stable entity key commonly used by the
+  partition resolver pipeline. Use
+  `eventuary::partition::EventKeyPartitionKeyResolver` with
+  `Fnv1a64PartitionHasher` for deterministic FNV-1a partition routing.
 - `Metadata` — validated string key/value metadata.
 - `SerializedEvent` — stable wire format used by every backend.
 - `FieldMap<V>` — reusable validated key/value storage backing `Metadata` and
@@ -286,20 +289,21 @@ assert_eq!(msg.event().payload().order_id, "o-1");
 Durable backends always speak `Payload`. To carry a typed `P` through a
 pipeline whose source or sink is durable, bridge at the edges:
 
-- `DecodeReader<R, C, P>` converts an inner `Reader<Payload>` into a
-  `Reader<P>` by decoding each event through a `PayloadCodec<P>`. Decode
-  failures are routed per `DecodeErrorDisposition` (default: `AckInner` —
-  skip the poison event and advance the source cursor).
-- `EncodeWriter<W, C, P>` converts a typed `Writer<P>` into a
-  `Writer<Payload>` by encoding outgoing events through the same codec.
+- `DecodeReader<R, C, P>` wraps a durable `Reader<Payload>` and exposes a
+  typed `Reader<P>` by decoding each event through a `PayloadCodec<P>` or
+  `EventCodec<P>`. Decode failures are routed per
+  `DecodeErrorDisposition` (`AckInner`, `NackInner`, or `Surface`); the
+  default is `AckInner` so a poison event does not stall source progress.
+- `EncodeWriter<W, C, P>` wraps a durable `Writer<Payload>` and exposes a
+  typed `Writer<P>` by encoding outgoing typed events at the boundary.
 
 ```rust,ignore
-use eventuary::io::reader::{DecodeReader, ReaderTypedExt};
-use eventuary::{JsonPayloadCodec, PayloadEventCodec};
+use eventuary::io::reader::ReaderTypedExt;
+use eventuary::io::writer::WriterTypedExt;
+use eventuary::JsonPayloadCodec;
 
-let typed_reader = source_reader.decode_with::<OrderPlaced>(
-    PayloadEventCodec::new(JsonPayloadCodec::default()),
-);
+let typed_reader = source_reader.decode::<OrderPlaced, _>(JsonPayloadCodec);
+let typed_writer = durable_writer.encode::<OrderPlaced, _>(JsonPayloadCodec);
 ```
 
 `SerializedEvent`, the SQL writers/readers, SQS, Kafka, and durable
@@ -548,6 +552,44 @@ the inner acker until downstream `ack`/`nack`, preserving broker semantics.
 
 ## Multi-Instance Coordinated Readers
 
+### SQL partitioning prerequisite
+
+SQL partitioned and coordinated readers filter on persisted `partition_count`
+and `partition_id` columns. The default SQL writers leave those columns `NULL`,
+so coordinated readers only see events written with inline partitioning enabled
+or rows that have been backfilled.
+
+PostgreSQL example:
+
+```rust,ignore
+use std::num::NonZeroU16;
+
+use eventuary::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
+use eventuary::postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
+
+let partition_count = NonZeroU16::new(1024).unwrap();
+let writer = PgWriter::new_with_config(
+    pool.clone(),
+    PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            partition_count,
+            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    },
+);
+```
+
+SQLite uses the same shape with `SqlitePartitioningConfig` and `SqliteWriter`.
+
+For existing PostgreSQL rows, run `PgPartitionBackfill` with the same resolver,
+hasher, and partition count before starting coordinated readers. SQLite does not
+yet expose a backfill helper; backfill SQLite rows during your migration with the
+same FNV-1a resolver/hasher strategy used by the writer, or rewrite historical
+events through an inline-partitioned writer in a controlled maintenance window.
+
+
 `PartitionedReader` distributes partitions inside one process. To distribute
 partitions across multiple service instances sharing the same logical consumer
 group, compose a partition-aware source reader with `CoordinatedReader<R, Coord>`
@@ -599,7 +641,7 @@ let reader = PgCoordinatedReader::new(
         consumer_lease_duration: Duration::from_secs(30),
         consumer_heartbeat_interval: Duration::from_secs(10),
         rebalance_interval: Duration::from_secs(10),
-        partition_slack: 1,
+        partition_slack: 0,
     },
 );
 
@@ -617,6 +659,11 @@ let subscription = CoordinatedSubscription {
 Identity for coordinated state is `(consumer_group_id, stream_id, partition_id)`,
 so multiple consumer groups can independently consume the same `stream_id` with
 their own ownership and checkpoint progress.
+
+`partition_slack` defaults to `0` so rebalances converge toward
+`ceil(partitions / live_consumers)` ownership. Increase it only when you
+intentionally prefer fewer releases during churn over immediate even
+distribution.
 
 Checkpoints currently flush on every ack. High-throughput deployments should
 plan for a future contiguous-progress flush buffer; the API does not yet expose

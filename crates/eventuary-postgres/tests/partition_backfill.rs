@@ -10,7 +10,7 @@ use eventuary_core::io::Writer;
 use eventuary_core::partition::{
     EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
 };
-use eventuary_core::{Event, Payload};
+use eventuary_core::{Error, Event, Payload};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::relation::PgRelationName;
 use eventuary_postgres::{
@@ -69,7 +69,8 @@ async fn pg_partition_backfill_populates_partition_columns() {
         EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
         Fnv1a64PartitionHasher,
         3,
-    );
+    )
+    .unwrap();
     let backfill = PgPartitionBackfill::new(pool.clone(), config);
     let report: BackfillReport = backfill.run().await.unwrap();
 
@@ -150,7 +151,8 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
         EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
         Fnv1a64PartitionHasher,
         10,
-    );
+    )
+    .unwrap();
     let backfill = PgPartitionBackfill::new(pool.clone(), config);
     let report = backfill.run().await.unwrap();
 
@@ -162,4 +164,18 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
             .await
             .unwrap();
     assert_eq!(null_count, 0);
+}
+
+#[test]
+fn pg_partition_backfill_config_rejects_zero_batch_size() {
+    let err = PgPartitionBackfillConfig::new(
+        PgRelationName::new("events").unwrap(),
+        NonZeroU16::new(4).unwrap(),
+        EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+        Fnv1a64PartitionHasher,
+        0,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, Error::Config(message) if message.contains("batch size")));
 }

@@ -66,13 +66,14 @@ impl fmt::Display for Generation {
 /// A lease on a single partition granted by a [`PartitionCoordinator`].
 ///
 /// `checkpoint_cursor` encodes the last durable progress position for this
-/// partition. Backends vary in how they represent "no prior progress":
+/// partition. All backends use `None` to signal "no prior progress":
 /// - Memory: `None` for a freshly-claimed partition, `Some(C)` after the
 ///   first `checkpoint` call.
-/// - Postgres and SQLite: always `Some(C)` — the cursor is constructed from
-///   the stored `checkpoint_sequence` column (which defaults to `0` on
-///   insert). Higher layers such as `CoordinatedReader` interpret a
-///   sequence of `0` as "start from the subscription's initial position".
+/// - Postgres and SQLite: `None` when the stored `checkpoint_sequence` is
+///   the sentinel `0` (no checkpoint has ever been committed; SQL event
+///   sequences start at `1`), and `Some(C)` once a checkpoint advances it.
+///   `CoordinatedReader` falls back to the subscription's `start` whenever
+///   the cursor is `None`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PartitionLease<C> {
     pub scope: CheckpointScope,
@@ -154,7 +155,7 @@ impl Default for CoordinatedReaderConfig {
             consumer_lease_duration: Duration::from_secs(30),
             consumer_heartbeat_interval: Duration::from_secs(10),
             rebalance_interval: Duration::from_secs(10),
-            partition_slack: 1,
+            partition_slack: 0,
         }
     }
 }
@@ -225,31 +226,31 @@ where
     }
 }
 
-pub struct CoordinatedStream<A, C, Coord>
+pub struct CoordinatedStream<A, C, Coord, P = crate::Payload>
 where
     A: Acker + Send + Sync + 'static,
     C: Cursor + Clone + Send + Sync + 'static,
     Coord: PartitionCoordinator<C>,
 {
     #[allow(clippy::type_complexity)]
-    rx: mpsc::Receiver<Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>>>>,
+    rx: mpsc::Receiver<Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>>,
     shutdown: Arc<Notify>,
 }
 
-impl<A, C, Coord> Stream for CoordinatedStream<A, C, Coord>
+impl<A, C, Coord, P> Stream for CoordinatedStream<A, C, Coord, P>
 where
     A: Acker + Send + Sync + 'static,
     C: Cursor + Clone + Send + Sync + 'static,
     Coord: PartitionCoordinator<C>,
 {
-    type Item = Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>>>;
+    type Item = Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.rx.poll_recv(cx)
     }
 }
 
-impl<A, C, Coord> Drop for CoordinatedStream<A, C, Coord>
+impl<A, C, Coord, P> Drop for CoordinatedStream<A, C, Coord, P>
 where
     A: Acker + Send + Sync + 'static,
     C: Cursor + Clone + Send + Sync + 'static,
@@ -311,19 +312,20 @@ fn target_partition_count(total: NonZeroU16, live: usize, slack: u16) -> u16 {
 }
 
 #[allow(clippy::type_complexity)]
-async fn partition_worker<R, S, C, A, Coord>(
+async fn partition_worker<R, S, C, A, Coord, P>(
     inner_reader: R,
     coordinator: Arc<Coord>,
     lease: PartitionLease<C>,
     base_subscription: S,
     start: StartFrom<C>,
-    tx: mpsc::Sender<Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>>>>,
+    tx: mpsc::Sender<Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>>,
 ) where
-    R: Reader<Subscription = S, Cursor = C, Acker = A>,
+    R: Reader<P, Subscription = S, Cursor = C, Acker = A>,
     S: PartitionableSubscription<C>,
     C: Cursor + Clone + Send + Sync + 'static,
     A: Acker + Send + Sync + 'static,
     Coord: PartitionCoordinator<C>,
+    P: Send + 'static,
 {
     let inner_start = match &lease.checkpoint_cursor {
         Some(cursor) => StartFrom::After(cursor.clone()),
@@ -366,18 +368,19 @@ async fn partition_worker<R, S, C, A, Coord>(
     }
 }
 
-impl<R, S, C, A, Coord> Reader for CoordinatedReader<R, Coord>
+impl<R, S, C, A, Coord, P> Reader<P> for CoordinatedReader<R, Coord>
 where
-    R: Reader<Subscription = S, Cursor = C, Acker = A> + Clone + Send + Sync + 'static,
+    R: Reader<P, Subscription = S, Cursor = C, Acker = A> + Clone + Send + Sync + 'static,
     S: PartitionableSubscription<C> + Send + 'static,
     C: Cursor + Clone + Send + Sync + 'static,
     A: Acker + Send + Sync + 'static,
     Coord: PartitionCoordinator<C>,
+    P: Send + 'static,
 {
     type Subscription = CoordinatedSubscription<S, C>;
     type Acker = CoordinatedAcker<A, C, Coord>;
     type Cursor = CoordinatedCursor<C>;
-    type Stream = CoordinatedStream<A, C, Coord>;
+    type Stream = CoordinatedStream<A, C, Coord, P>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         self.coordinator
@@ -389,7 +392,7 @@ where
             .await?;
 
         let (tx, rx) = mpsc::channel::<
-            Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>>>,
+            Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>,
         >(16);
         let shutdown = Arc::new(Notify::new());
 
@@ -603,7 +606,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::{ConsumerGroupId, StreamId};
+    use crate::io::acker::NoopAcker;
+    use crate::io::position::StartableSubscription;
+    use crate::io::{ConsumerGroupId, NoCursor, StreamId};
+    use futures::stream;
 
     #[test]
     fn generation_initial_is_zero() {
@@ -688,6 +694,11 @@ mod tests {
     }
 
     #[test]
+    fn coordinated_reader_config_default_has_no_partition_slack() {
+        assert_eq!(CoordinatedReaderConfig::default().partition_slack, 0);
+    }
+
+    #[test]
     fn jittered_duration_zero_base_returns_zero() {
         assert_eq!(jittered_duration(Duration::ZERO), Duration::ZERO);
     }
@@ -703,5 +714,261 @@ mod tests {
                 "jittered_duration({base:?}) = {result:?} not in [100ms, 120ms]"
             );
         }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestPayload {
+        value: String,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct TypedSubscription {
+        start: StartFrom<NoCursor>,
+        partition: Option<Partition>,
+    }
+
+    impl StartableSubscription<NoCursor> for TypedSubscription {
+        fn with_start(mut self, start: StartFrom<NoCursor>) -> Self {
+            self.start = start;
+            self
+        }
+    }
+
+    impl PartitionableSubscription<NoCursor> for TypedSubscription {
+        fn with_partition(mut self, partition: Partition) -> Self {
+            self.partition = Some(partition);
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct TypedOneShotReader;
+
+    impl Reader<TestPayload> for TypedOneShotReader {
+        type Subscription = TypedSubscription;
+        type Acker = NoopAcker;
+        type Cursor = NoCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor, TestPayload>>> + Send>>;
+
+        async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+            assert!(subscription.partition.is_some());
+            let event = crate::Event::create(
+                "acme",
+                "/typed",
+                "typed.delivered",
+                TestPayload {
+                    value: "typed-value".to_owned(),
+                },
+            )?;
+            Ok(Box::pin(stream::once(async move {
+                Ok(Message::new(event, NoopAcker, NoCursor))
+            })))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestCoordinatorState {
+        consumers: HashMap<(CheckpointScope, OwnerId), DateTime<Utc>>,
+        partitions: HashMap<(CheckpointScope, u16), TestPartitionState>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestPartitionState {
+        owner_id: Option<OwnerId>,
+        lease_until: Option<DateTime<Utc>>,
+        generation: Generation,
+        checkpoint_cursor: Option<NoCursor>,
+    }
+
+    impl Default for TestPartitionState {
+        fn default() -> Self {
+            Self {
+                owner_id: None,
+                lease_until: None,
+                generation: Generation::initial(),
+                checkpoint_cursor: None,
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestCoordinator {
+        state: Arc<tokio::sync::Mutex<TestCoordinatorState>>,
+    }
+
+    impl TestCoordinator {
+        fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    impl Clone for TestCoordinator {
+        fn clone(&self) -> Self {
+            Self {
+                state: Arc::clone(&self.state),
+            }
+        }
+    }
+
+    impl PartitionCoordinator<NoCursor> for TestCoordinator {
+        async fn heartbeat<'a>(
+            &'a self,
+            scope: &'a CheckpointScope,
+            owner_id: &'a OwnerId,
+            lease_duration: Duration,
+        ) -> Result<()> {
+            let lease_until = Utc::now() + lease_duration;
+            self.state
+                .lock()
+                .await
+                .consumers
+                .insert((scope.clone(), owner_id.clone()), lease_until);
+            Ok(())
+        }
+
+        async fn live_consumers<'a>(&'a self, scope: &'a CheckpointScope) -> Result<usize> {
+            let now = Utc::now();
+            let state = self.state.lock().await;
+            Ok(state
+                .consumers
+                .iter()
+                .filter(|((s, _), lease_until)| s == scope && **lease_until > now)
+                .count())
+        }
+
+        async fn claim<'a>(
+            &'a self,
+            scope: &'a CheckpointScope,
+            owner_id: &'a OwnerId,
+            partition: Partition,
+            lease_duration: Duration,
+        ) -> Result<Option<PartitionLease<NoCursor>>> {
+            let now = Utc::now();
+            let lease_until = now + lease_duration;
+            let key = (scope.clone(), partition.id());
+            let mut state = self.state.lock().await;
+            let entry = state.partitions.entry(key).or_default();
+            let is_expired = entry.lease_until.map(|t| t <= now).unwrap_or(true);
+            let is_unowned = entry.owner_id.is_none();
+            let is_self = entry.owner_id.as_ref() == Some(owner_id);
+            if is_unowned || is_expired || is_self {
+                entry.generation = entry.generation.next();
+                entry.owner_id = Some(owner_id.clone());
+                entry.lease_until = Some(lease_until);
+                Ok(Some(PartitionLease {
+                    scope: scope.clone(),
+                    owner_id: owner_id.clone(),
+                    partition,
+                    generation: entry.generation,
+                    checkpoint_cursor: entry.checkpoint_cursor,
+                    lease_until,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn renew<'a>(
+            &'a self,
+            lease: &'a PartitionLease<NoCursor>,
+            lease_duration: Duration,
+        ) -> Result<()> {
+            let key = (lease.scope.clone(), lease.partition.id());
+            let mut state = self.state.lock().await;
+            match state.partitions.get_mut(&key) {
+                Some(entry)
+                    if entry.owner_id.as_ref() == Some(&lease.owner_id)
+                        && entry.generation == lease.generation =>
+                {
+                    entry.lease_until = Some(Utc::now() + lease_duration);
+                    Ok(())
+                }
+                _ => Err(Error::OwnershipLost(format!(
+                    "partition {}: ownership lost",
+                    lease.partition.id()
+                ))),
+            }
+        }
+
+        async fn release<'a>(&'a self, lease: &'a PartitionLease<NoCursor>) -> Result<()> {
+            let key = (lease.scope.clone(), lease.partition.id());
+            let mut state = self.state.lock().await;
+            match state.partitions.get_mut(&key) {
+                Some(entry)
+                    if entry.owner_id.as_ref() == Some(&lease.owner_id)
+                        && entry.generation == lease.generation =>
+                {
+                    entry.owner_id = None;
+                    entry.lease_until = None;
+                    entry.generation = entry.generation.next();
+                    Ok(())
+                }
+                _ => Err(Error::OwnershipLost(format!(
+                    "partition {}: ownership lost",
+                    lease.partition.id()
+                ))),
+            }
+        }
+
+        async fn checkpoint<'a>(
+            &'a self,
+            lease: &'a PartitionLease<NoCursor>,
+            cursor: NoCursor,
+        ) -> Result<()> {
+            let key = (lease.scope.clone(), lease.partition.id());
+            let mut state = self.state.lock().await;
+            match state.partitions.get_mut(&key) {
+                Some(entry)
+                    if entry.owner_id.as_ref() == Some(&lease.owner_id)
+                        && entry.generation == lease.generation =>
+                {
+                    entry.checkpoint_cursor = Some(cursor);
+                    Ok(())
+                }
+                _ => Err(Error::OwnershipLost(format!(
+                    "partition {}: ownership lost",
+                    lease.partition.id()
+                ))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinated_reader_preserves_typed_payloads() {
+        let coordinator = Arc::new(TestCoordinator::new());
+        let reader = CoordinatedReader::new(
+            TypedOneShotReader,
+            coordinator,
+            OwnerId::new("typed-owner").unwrap(),
+            CoordinatedReaderConfig {
+                rebalance_interval: Duration::from_millis(10),
+                partition_lease_duration: Duration::from_secs(1),
+                partition_renew_interval: Duration::from_millis(100),
+                consumer_lease_duration: Duration::from_secs(1),
+                consumer_heartbeat_interval: Duration::from_millis(100),
+                partition_slack: 0,
+            },
+        );
+
+        let sub = CoordinatedSubscription {
+            inner: TypedSubscription::default(),
+            scope: CheckpointScope::new(
+                ConsumerGroupId::new("typed-group").unwrap(),
+                StreamId::new("typed-stream").unwrap(),
+            ),
+            partition_count: NonZeroU16::new(1).unwrap(),
+            start: StartFrom::Earliest,
+        };
+
+        let mut stream = Reader::<TestPayload>::read(&reader, sub).await.unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(msg.event().payload().value, "typed-value");
+        msg.ack().await.unwrap();
     }
 }

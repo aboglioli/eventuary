@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS {partitions} (
     consumer_group_id   TEXT    NOT NULL,
     stream_id           TEXT    NOT NULL,
     partition_id        INTEGER NOT NULL,
+    partition_count     INTEGER NULL,
     owner_id            TEXT    NULL,
     lease_until         TEXT    NULL,
     checkpoint_sequence INTEGER NOT NULL DEFAULT 0,

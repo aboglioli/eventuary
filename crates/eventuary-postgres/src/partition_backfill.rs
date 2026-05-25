@@ -26,14 +26,20 @@ impl PgPartitionBackfillConfig {
         key_resolver: impl PartitionKeyResolver + 'static,
         hasher: impl PartitionHasher + 'static,
         batch_size: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        if batch_size == 0 {
+            return Err(Error::Config(
+                "partition backfill batch size must be greater than zero".to_owned(),
+            ));
+        }
+
+        Ok(Self {
             events_relation,
             partition_count,
             key_resolver: Arc::new(key_resolver),
             hasher: Arc::new(hasher),
             batch_size,
-        }
+        })
     }
 }
 
