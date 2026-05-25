@@ -225,10 +225,16 @@ mod tests {
     );
 
     fn keyed_event(key: &str) -> Event {
-        Event::builder("acme", "/orders", "order.created", key, Payload::from_string("{}"))
-            .unwrap()
-            .build()
-            .unwrap()
+        Event::builder(
+            "acme",
+            "/orders",
+            "order.created",
+            key,
+            Payload::from_string("{}"),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
     }
 
     fn query_partition_row(conn: &rusqlite::Connection, event_id: &str) -> PartitionRow {

@@ -32,10 +32,16 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
 }
 
 fn ev(key: &str) -> Event {
-    Event::builder("org", "/x", "thing.happened", key, Payload::from_string("p"))
-        .unwrap()
-        .build()
-        .unwrap()
+    Event::builder(
+        "org",
+        "/x",
+        "thing.happened",
+        key,
+        Payload::from_string("p"),
+    )
+    .unwrap()
+    .build()
+    .unwrap()
 }
 
 fn owner(s: &str) -> OwnerId {

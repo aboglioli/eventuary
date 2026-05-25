@@ -63,15 +63,21 @@ async fn reader_roundtrips_lineage_fields() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     let writer = SqliteWriter::new(db.conn());
     let parent_id = EventId::new();
-    let event = Event::builder("acme", "/x", "thing.happened", "k", Payload::from_string("p"))
-        .unwrap()
-        .parent_id(parent_id)
-        .correlation_id("corr")
-        .unwrap()
-        .causation_id("cause")
-        .unwrap()
-        .build()
-        .unwrap();
+    let event = Event::builder(
+        "acme",
+        "/x",
+        "thing.happened",
+        "k",
+        Payload::from_string("p"),
+    )
+    .unwrap()
+    .parent_id(parent_id)
+    .correlation_id("corr")
+    .unwrap()
+    .causation_id("cause")
+    .unwrap()
+    .build()
+    .unwrap();
     writer.write(&event).await.unwrap();
 
     let reader = SqliteReader::new(db.conn(), fast_config());

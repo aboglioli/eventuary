@@ -195,9 +195,7 @@ fn event_key_already_not_null(conn: &Connection, config: &SqliteDatabaseConfig) 
     let mut stmt = conn
         .prepare(&pragma_sql)
         .map_err(|e| Error::Store(e.to_string()))?;
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| Error::Store(e.to_string()))?;
+    let mut rows = stmt.query([]).map_err(|e| Error::Store(e.to_string()))?;
     while let Some(row) = rows.next().map_err(|e| Error::Store(e.to_string()))? {
         let name: String = row.get(1).map_err(|e| Error::Store(e.to_string()))?;
         if name == "event_key" {
@@ -368,7 +366,10 @@ mod tests {
         let row_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(row_count, 1, "event row must survive second apply_migrations");
+        assert_eq!(
+            row_count, 1,
+            "event row must survive second apply_migrations"
+        );
 
         let temp_table_count: i64 = conn
             .query_row(
@@ -386,6 +387,9 @@ mod tests {
             let config = SqliteDatabaseConfig::default();
             event_key_already_not_null(&conn, &config).unwrap()
         };
-        assert!(is_not_null, "event_key must be NOT NULL after second apply_migrations");
+        assert!(
+            is_not_null,
+            "event_key must be NOT NULL after second apply_migrations"
+        );
     }
 }

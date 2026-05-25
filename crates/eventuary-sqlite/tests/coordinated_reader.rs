@@ -20,10 +20,16 @@ use eventuary_sqlite::{
 };
 
 fn event_with_key(key: &str) -> Event {
-    Event::builder("acme", "/orders", "order.placed", key, Payload::from_string("{}"))
-        .unwrap()
-        .build()
-        .unwrap()
+    Event::builder(
+        "acme",
+        "/orders",
+        "order.placed",
+        key,
+        Payload::from_string("{}"),
+    )
+    .unwrap()
+    .build()
+    .unwrap()
 }
 
 #[tokio::test]

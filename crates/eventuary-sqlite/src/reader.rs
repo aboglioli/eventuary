@@ -720,10 +720,16 @@ mod tests {
     const PARTITION_COUNT: u16 = 4;
 
     fn event_with_key(key: &str) -> Event {
-        Event::builder("acme", "/orders", "order.placed", key, Payload::from_string("{}"))
-            .unwrap()
-            .build()
-            .unwrap()
+        Event::builder(
+            "acme",
+            "/orders",
+            "order.placed",
+            key,
+            Payload::from_string("{}"),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
     }
 
     fn partition_for_key(key: &str) -> u16 {
@@ -818,11 +824,7 @@ mod tests {
 
         let mut received_keys: Vec<String> = Vec::new();
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
-            let key = msg
-                .event()
-                .key()
-                .as_str()
-                .to_owned();
+            let key = msg.event().key().as_str().to_owned();
             msg.acker().ack().await.unwrap();
             received_keys.push(key);
         }
@@ -894,11 +896,7 @@ mod tests {
 
         let mut received: Vec<String> = Vec::new();
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
-            let key = msg
-                .event()
-                .key()
-                .as_str()
-                .to_owned();
+            let key = msg.event().key().as_str().to_owned();
             msg.acker().ack().await.unwrap();
             received.push(key);
         }
