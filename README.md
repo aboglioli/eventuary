@@ -290,20 +290,29 @@ Durable backends always speak `Payload`. To carry a typed `P` through a
 pipeline whose source or sink is durable, bridge at the edges:
 
 - `DecodeReader<R, C, P>` wraps a durable `Reader<Payload>` and exposes a
-  typed `Reader<P>` by decoding each event through a `PayloadCodec<P>` or
-  `EventCodec<P>`. Decode failures are routed per
+  typed `Reader<P>`. Use `ReaderTypedExt::decode(codec)` with a
+  `PayloadCodec<P>` when only the payload needs decoding, or
+  `ReaderTypedExt::decode_event(codec)` with an `EventCodec<P>` when decoding
+  needs access to the full event envelope. Decode failures are routed per
   `DecodeErrorDisposition` (`AckInner`, `NackInner`, or `Surface`); the
   default is `AckInner` so a poison event does not stall source progress.
 - `EncodeWriter<W, C, P>` wraps a durable `Writer<Payload>` and exposes a
-  typed `Writer<P>` by encoding outgoing typed events at the boundary.
+  typed `Writer<P>`. Use `WriterTypedExt::encode(codec)` with a
+  `PayloadCodec<P>` for payload-only encoding, or
+  `WriterTypedExt::encode_event(codec)` with an `EventCodec<P>` when encoding
+  needs full-event context.
 
 ```rust,ignore
 use eventuary::io::reader::ReaderTypedExt;
 use eventuary::io::writer::WriterTypedExt;
-use eventuary::JsonPayloadCodec;
+use eventuary::{JsonPayloadCodec, PayloadEventCodec};
 
 let typed_reader = source_reader.decode::<OrderPlaced, _>(JsonPayloadCodec);
 let typed_writer = durable_writer.encode::<OrderPlaced, _>(JsonPayloadCodec);
+
+let event_codec = PayloadEventCodec::new(JsonPayloadCodec);
+let typed_reader = source_reader.decode_event::<OrderPlaced, _>(event_codec.clone());
+let typed_writer = durable_writer.encode_event::<OrderPlaced, _>(event_codec);
 ```
 
 `SerializedEvent`, the SQL writers/readers, SQS, Kafka, and durable
