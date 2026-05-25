@@ -13,19 +13,19 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0-alpha.1"
+version = "0.1.0"
 license = "MIT"
 repository = "https://github.com/aboglioli/eventuary"
 
 [workspace.dependencies]
-eventuary = { path = "crates/eventuary", version = "0.1.0-alpha.1" }
-eventuary-core = { path = "crates/eventuary-core", version = "0.1.0-alpha.1" }
-eventuary-memory = { path = "crates/eventuary-memory", version = "0.1.0-alpha.1" }
-eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.1.0-alpha.1" }
-eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.1.0-alpha.1" }
-eventuary-sqs = { path = "crates/eventuary-sqs", version = "0.1.0-alpha.1" }
-eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.1.0-alpha.1" }
-eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.1.0-alpha.1" }
+eventuary = { path = "crates/eventuary", version = "0.1.0" }
+eventuary-core = { path = "crates/eventuary-core", version = "0.1.0" }
+eventuary-memory = { path = "crates/eventuary-memory", version = "0.1.0" }
+eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.1.0" }
+eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.1.0" }
+eventuary-sqs = { path = "crates/eventuary-sqs", version = "0.1.0" }
+eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.1.0" }
+eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.1.0" }
 
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-sqs = "1.89"

@@ -9,7 +9,7 @@ PostgreSQL, AWS SQS, and Apache Kafka. Everything intended for application use i
 available through the `eventuary` umbrella crate, with backends enabled by Cargo
 features.
 
-> **Status:** Alpha (`0.1.0-alpha.1`). API may change before `0.1.0`.
+> **Status:** Stable (`0.1.0`).
 
 Eventuary is a library you embed in your application. It is not a server, broker,
 daemon, or transport runtime.
@@ -21,7 +21,7 @@ features they need. No backend is enabled by default.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.1.0-alpha.1", features = ["postgres"] }
+eventuary = { version = "0.1.0", features = ["postgres"] }
 ```
 
 | Feature | Module | Backend crate |
@@ -324,7 +324,7 @@ serialization happens.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.1.0-alpha.1", features = ["memory"] }
+eventuary = { version = "0.1.0", features = ["memory"] }
 ```
 
 ```rust
@@ -1010,7 +1010,7 @@ Release procedure:
 # 1. Bump workspace.package.version in Cargo.toml.
 # 2. Commit and push the version bump.
 # 3. Create and publish a GitHub Release targeting main.
-#    Use tag v0.1.0-alpha.1 and title v0.1.0-alpha.1.
+#    Use tag v0.1.0 and title v0.1.0.
 # 4. The publish workflow runs automatically from the release event.
 ```
 
