@@ -22,6 +22,7 @@ pub mod checkpoint_store;
 pub mod coordinated_reader;
 pub mod database;
 pub mod dedupe_store;
+pub mod event_log;
 pub mod multiplexer_store;
 pub mod partition_coordinator;
 pub mod reader;
@@ -37,6 +38,7 @@ pub use coordinated_reader::{
     SqliteCoordinatedReaderConfig, SqliteCoordinatedStream, SqliteCoordinatedSubscription,
 };
 pub use dedupe_store::{SqliteDedupeStore, SqliteDedupeStoreConfig};
+pub use event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 pub use multiplexer_store::{SqliteMultiplexerStore, SqliteMultiplexerStoreConfig};
 pub use partition_coordinator::{SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig};
 pub use watermark_store::{SqliteWatermarkStore, SqliteWatermarkStoreConfig};
