@@ -18,6 +18,7 @@ use eventuary_core::{
     StartFrom, StartableSubscription, StopAt,
 };
 
+use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
 #[derive(
@@ -171,6 +172,27 @@ pub struct PgReader {
 impl PgReader {
     pub fn new(pool: PgPool, config: PgReaderConfig) -> Self {
         Self { pool, config }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgReaderConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgReaderConfig) -> Result<()> {
+        PgEventLogSchema::prepare(
+            pool,
+            &PgEventLogSchemaConfig {
+                events_relation: config.events_relation.clone(),
+            },
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgReaderConfig) -> String {
+        PgEventLogSchema::schema_sql(&PgEventLogSchemaConfig {
+            events_relation: config.events_relation.clone(),
+        })
     }
 }
 

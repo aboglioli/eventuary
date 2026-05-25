@@ -9,6 +9,7 @@ use sqlx::{PgPool, Row};
 use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver, PartitionStrategy};
 use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
 
+use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
 pub struct PgPartitionBackfillConfig {
@@ -67,6 +68,27 @@ pub struct PgPartitionBackfill {
 impl PgPartitionBackfill {
     pub fn new(pool: PgPool, config: PgPartitionBackfillConfig) -> Self {
         Self { pool, config }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgPartitionBackfillConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgPartitionBackfillConfig) -> Result<()> {
+        PgEventLogSchema::prepare(
+            pool,
+            &PgEventLogSchemaConfig {
+                events_relation: config.events_relation.clone(),
+            },
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgPartitionBackfillConfig) -> String {
+        PgEventLogSchema::schema_sql(&PgEventLogSchemaConfig {
+            events_relation: config.events_relation.clone(),
+        })
     }
 
     pub async fn run(&self) -> Result<BackfillReport> {
