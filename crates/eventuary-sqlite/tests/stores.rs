@@ -3,12 +3,19 @@ use chrono::Utc;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore, SubscriberId};
 use eventuary_core::io::reader::{BufferStore, DedupeStore, WatermarkStore};
 use eventuary_core::{Event, EventId, Payload};
-use eventuary_sqlite::database::SqliteDatabase;
+use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
 use eventuary_sqlite::{
     SqliteBufferStore, SqliteBufferStoreConfig, SqliteDedupeStore, SqliteDedupeStoreConfig,
     SqliteMultiplexerStore, SqliteMultiplexerStoreConfig, SqliteWatermarkStore,
     SqliteWatermarkStoreConfig,
 };
+
+fn prepare_test_schema(conn: &SqliteConn) {
+    SqliteMultiplexerStore::prepare_schema(conn, &SqliteMultiplexerStoreConfig::default()).unwrap();
+    SqliteDedupeStore::prepare_schema(conn, &SqliteDedupeStoreConfig::default()).unwrap();
+    SqliteBufferStore::<i64>::prepare_schema(conn, &SqliteBufferStoreConfig::default()).unwrap();
+    SqliteWatermarkStore::prepare_schema(conn, &SqliteWatermarkStoreConfig::default()).unwrap();
+}
 
 fn ev(topic: &str) -> Event {
     Event::builder("acme", "/x", topic, "k", Payload::from_string("p"))
@@ -20,6 +27,7 @@ fn ev(topic: &str) -> Event {
 #[tokio::test]
 async fn sqlite_multiplexer_store_records_and_skips_completed() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteMultiplexerStore::new(db.conn(), SqliteMultiplexerStoreConfig::default());
     let key = MultiplexerKey::new(EventId::new(), SubscriberId::new("audit").unwrap());
 
@@ -34,6 +42,7 @@ async fn sqlite_multiplexer_store_records_and_skips_completed() {
 #[tokio::test]
 async fn sqlite_multiplexer_store_scopes_by_subscriber() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteMultiplexerStore::new(db.conn(), SqliteMultiplexerStoreConfig::default());
     let event_id = EventId::new();
     let k1 = MultiplexerKey::new(event_id, SubscriberId::new("a").unwrap());
@@ -47,6 +56,7 @@ async fn sqlite_multiplexer_store_scopes_by_subscriber() {
 #[tokio::test]
 async fn sqlite_dedupe_store_marks_and_finds_events() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteDedupeStore::new(db.conn(), SqliteDedupeStoreConfig::default());
     let event = ev("t1");
 
@@ -58,6 +68,7 @@ async fn sqlite_dedupe_store_marks_and_finds_events() {
 #[tokio::test]
 async fn sqlite_dedupe_store_mark_if_new_returns_false_on_duplicate() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteDedupeStore::new(db.conn(), SqliteDedupeStoreConfig::default());
     let event = ev("t1");
 
@@ -68,6 +79,7 @@ async fn sqlite_dedupe_store_mark_if_new_returns_false_on_duplicate() {
 #[tokio::test]
 async fn sqlite_buffer_store_round_trips_entry() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store: SqliteBufferStore<i64> =
         SqliteBufferStore::new(db.conn(), SqliteBufferStoreConfig::default());
     let event = ev("t1");
@@ -88,6 +100,7 @@ async fn sqlite_buffer_store_round_trips_entry() {
 #[tokio::test]
 async fn sqlite_buffer_store_nack_keeps_entry() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store: SqliteBufferStore<i64> =
         SqliteBufferStore::new(db.conn(), SqliteBufferStoreConfig::default());
     let id = store.push(&ev("t1"), &1_i64).await.unwrap();
@@ -99,6 +112,7 @@ async fn sqlite_buffer_store_nack_keeps_entry() {
 #[tokio::test]
 async fn sqlite_buffer_store_pending_orders_by_id() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store: SqliteBufferStore<i64> =
         SqliteBufferStore::new(db.conn(), SqliteBufferStoreConfig::default());
     let id1 = store.push(&ev("t1"), &1_i64).await.unwrap();
@@ -115,6 +129,7 @@ async fn sqlite_buffer_store_pending_orders_by_id() {
 #[tokio::test]
 async fn sqlite_watermark_store_save_and_load() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteWatermarkStore::new(db.conn(), SqliteWatermarkStoreConfig::default());
     assert!(store.load_watermark("k").await.unwrap().is_none());
 
@@ -127,6 +142,7 @@ async fn sqlite_watermark_store_save_and_load() {
 #[tokio::test]
 async fn sqlite_watermark_store_save_overwrites() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteWatermarkStore::new(db.conn(), SqliteWatermarkStoreConfig::default());
     let t1 = Utc::now();
     let t2 = t1 + chrono::Duration::seconds(60);
@@ -139,6 +155,7 @@ async fn sqlite_watermark_store_save_overwrites() {
 #[tokio::test]
 async fn sqlite_watermark_store_scopes_by_key() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
     let store = SqliteWatermarkStore::new(db.conn(), SqliteWatermarkStoreConfig::default());
     let now = Utc::now();
     store.save_watermark("a", now).await.unwrap();

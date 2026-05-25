@@ -475,9 +475,9 @@ use eventuary::sqlite::reader::{SqliteCursor, SqliteReader, SqliteReaderConfig, 
 
 async fn checkpointed_sqlite() -> Result<()> {
     let db = SqliteDatabase::open_in_memory()?;
-    let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+    let source = SqliteReader::connect(db.conn(), SqliteReaderConfig::default())?;
     let store: SqliteCheckpointStore<SqliteCursor> =
-        SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+        SqliteCheckpointStore::connect(db.conn(), SqliteCheckpointStoreConfig::default())?;
     let reader = CheckpointReader::new(source, store);
 
     let scope = CheckpointScope::new(
@@ -533,10 +533,10 @@ use eventuary::sqlite::reader::{SqliteCursor, SqliteReader, SqliteReaderConfig, 
 
 async fn partitioned_checkpointed_sqlite() -> Result<()> {
     let db = SqliteDatabase::open_in_memory()?;
-    let source = SqliteReader::new(db.conn(), SqliteReaderConfig::default());
+    let source = SqliteReader::connect(db.conn(), SqliteReaderConfig::default())?;
     let partitioned = PartitionedReader::source(source, PartitionedReaderConfig::default());
     let store: SqliteCheckpointStore<PartitionedCursor<SqliteCursor>> =
-        SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default());
+        SqliteCheckpointStore::connect(db.conn(), SqliteCheckpointStoreConfig::default())?;
     let reader = CheckpointReader::new(partitioned, store);
 
     let scope = CheckpointScope::new(
@@ -880,26 +880,40 @@ or one SQS queue per subscriber.
 
 ## SQL Relations and Migrations
 
-SQLite and PostgreSQL create an append-only events table and a consumer offsets
-table by default. Relation names are validated before being rendered into SQL.
+Relation names are validated before being rendered into SQL. PostgreSQL supports
+schema-qualified relation names (e.g. `PgRelationName::new("eventuary.events")?`).
 
-PostgreSQL supports schema-qualified relation names:
+Schema setup is component-owned. Use `connect` when Eventuary should create a
+component's schema. Use `new` / `new_with_config` when migrations are managed
+externally. `PgDatabase` and `SqliteDatabase` only open a pool/connection; they
+do not create Eventuary tables. Applications that use multiple SQL components
+should call each component's `connect` or `prepare_schema` explicitly.
+
+```rust
+// PostgreSQL
+let writer = PgWriter::connect(pool.clone(), PgWriterConfig::default()).await?;
+let dedupe = PgDedupeStore::connect(pool.clone(), PgDedupeStoreConfig::default()).await?;
+
+// SQLite
+let writer = SqliteWriter::connect(conn.clone(), SqliteWriterConfig::default())?;
+let dedupe = SqliteDedupeStore::connect(conn.clone(), SqliteDedupeStoreConfig::default())?;
+```
+
+To place tables in a non-default schema, pass a `PgRelationName` in the
+component config (e.g.
+`PgWriterConfig { events_relation: PgRelationName::new("eventuary.events")?, .. }`).
+Each component's `schema_sql(config)` method returns the rendered DDL for
+projects that manage migrations outside Eventuary.
+
+`PgDatabaseConfig` exposes only `{ max_connections: u32 }`:
 
 ```rust
 use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
-use eventuary::postgres::relation::PgRelationName;
 
-let config = PgDatabaseConfig {
-    events_relation: PgRelationName::new("eventuary.events")?,
-    offsets_relation: PgRelationName::new("eventuary.consumer_offsets")?,
-    ..PgDatabaseConfig::default()
-};
-
-let db = PgDatabase::connect_with_config(database_url, config).await?;
+let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
+    max_connections: 10,
+}).await?;
 ```
-
-The database modules also expose migration metadata and rendered schema SQL for
-projects that manage migrations outside Eventuary.
 
 ## Backend Notes
 
@@ -919,6 +933,8 @@ projects that manage migrations outside Eventuary.
 - `SqliteCheckpointStore<C>` persists full cursor JSON keyed by consumer group,
   stream id, and cursor id.
 - Relation names are validated through `SqliteRelationName`.
+- `SqliteDatabase::open` / `open_in_memory` only open a connection and do not
+  create Eventuary tables.
 
 ### postgres
 
@@ -927,7 +943,8 @@ projects that manage migrations outside Eventuary.
 - `PgCursorAcker` tracks active stream cursor progress in memory.
 - `PgCheckpointStore<C>` persists full cursor JSON keyed by consumer group,
   stream id, and cursor id.
-- `PgDatabaseConfig::with_schema` can place default tables in a schema.
+- `PgDatabaseConfig` is `{ max_connections: u32 }`. `PgDatabase::connect` only
+  opens a pool and does not create Eventuary tables.
 - Integration tests use `postgres:18-alpine` through `testcontainers`.
 
 ### sqs

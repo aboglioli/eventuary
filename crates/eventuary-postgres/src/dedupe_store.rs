@@ -12,6 +12,19 @@ use eventuary_core::io::reader::DedupeStore;
 use eventuary_core::{Error, Event, Result};
 
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const DEDUPE_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {dedupe_keys} (
+    event_id     UUID        NOT NULL PRIMARY KEY,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"#;
+
+const DEDUPE_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: DEDUPE_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgDedupeStoreConfig {
@@ -38,6 +51,33 @@ impl PgDedupeStore {
             pool,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgDedupeStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgDedupeStoreConfig) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            DEDUPE_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{dedupe_keys}",
+                relation: &config.relation,
+            }],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgDedupeStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            DEDUPE_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{dedupe_keys}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -84,5 +124,16 @@ impl DedupeStore for PgDedupeStore {
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(row.is_some())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = PgDedupeStore::schema_sql(&PgDedupeStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"dedupe_keys\""));
     }
 }

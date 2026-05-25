@@ -14,6 +14,31 @@ use eventuary_core::io::reader::claim_buffer::{ClaimedBufferEntry, ClaimedBuffer
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const CLAIMED_BUFFER_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {buffer_claims} (
+    id              BIGSERIAL    PRIMARY KEY,
+    event           JSONB        NOT NULL,
+    claimed_by      TEXT         NULL,
+    claimed_until   TIMESTAMPTZ  NULL,
+    attempts        INT          NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_buffer_claims_pending
+ON {buffer_claims} (claimed_until, id)
+WHERE claimed_by IS NULL OR claimed_until IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_buffer_claims_visibility
+ON {buffer_claims} (claimed_until)
+WHERE claimed_by IS NOT NULL;
+"#;
+
+const CLAIMED_BUFFER_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: CLAIMED_BUFFER_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgClaimedBufferStoreConfig {
@@ -49,6 +74,33 @@ impl PgClaimedBufferStore {
             pool,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgClaimedBufferStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgClaimedBufferStoreConfig) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            CLAIMED_BUFFER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{buffer_claims}",
+                relation: &config.relation,
+            }],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgClaimedBufferStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            CLAIMED_BUFFER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{buffer_claims}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -168,5 +220,16 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = PgClaimedBufferStore::schema_sql(&PgClaimedBufferStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"event_buffer_claims\""));
     }
 }

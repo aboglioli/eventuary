@@ -566,6 +566,10 @@ factory. Until that lands, per-backend integration tests
 - `NoopAcker`; subscription filter applied in `poll_next`.
 - Store implementations: `MemoryMultiplexerStore`, `MemoryBufferStore`, `MemoryDedupeStore`, `MemoryWatermarkStore`, and `MemoryCheckpointStore`.
 
+PostgreSQL and SQLite schemas are component-owned. Each implementation exposes a `connect` constructor that prepares only its required tables before returning the component. Existing `new` / `new_with_config` constructors assume schema already exists and are for externally managed schemas. `PgDatabase` and `SqliteDatabase` are connection-only wrappers; they do not create Eventuary tables and do not know component schemas.
+
+Migration SQL lives inline in the Rust module for the component that owns the table. Future schema changes add another idempotent migration constant to that component's migration slice. Applications that use multiple components compose them explicitly by calling each component's `connect` or `prepare_schema`. Eventuary does not provide a production `prepare_all` helper because that would couple the database wrapper to component implementations.
+
 ### sqlite
 
 - Bundled rusqlite (`features = ["bundled-full"]`). No external runtime.
@@ -579,8 +583,14 @@ factory. Until that lands, per-backend integration tests
   under a `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
   cursor_id)` where `cursor_id` is `TEXT` (the serialized `CursorId`:
   `"global"` or `"partition:{count}:{id}"`).
-- `SqliteDatabaseConfig`, `SqliteReaderConfig`, `SqliteWriterConfig`, and
+- `SqliteReaderConfig`, `SqliteWriterConfig`, and
   `SqliteCheckpointStoreConfig` all support validated relation names.
+- `SqliteDatabaseConfig` is a unit struct. `SqliteDatabase` only opens a
+  connection; it does not create Eventuary tables.
+- Each component exposes a `connect` constructor (e.g.
+  `SqliteWriter::connect(conn, config)`) that prepares only its required
+  table before returning. Use `new` / `new_with_config` when schema is
+  managed externally.
 - Store implementations: `SqliteMultiplexerStore`, `SqliteBufferStore`,
   `SqliteDedupeStore`, `SqliteWatermarkStore`, and `SqliteCheckpointStore`.
 - Polling reader: `batch_size` + `poll_interval`.
@@ -597,9 +607,14 @@ factory. Until that lands, per-backend integration tests
   `PartitionedReader`), keyed by `(consumer_group_id, stream_id,
   cursor_id)` where `cursor_id` is `JSONB` (the serialized `CursorId`:
   `"global"` or `"partition:{count}:{id}"`).
-- `PgDatabaseConfig`, `PgReaderConfig`, `PgWriterConfig`, and
-  `PgCheckpointStoreConfig` all support validated simple or
-  schema-qualified relation names.
+- `PgReaderConfig`, `PgWriterConfig`, and `PgCheckpointStoreConfig` all
+  support validated simple or schema-qualified relation names.
+- `PgDatabaseConfig` is `{ max_connections: u32 }` only. `PgDatabase`
+  only opens a pool; it does not create Eventuary tables.
+- Each component exposes a `connect` constructor (e.g.
+  `PgWriter::connect(pool, config).await`) that prepares only its
+  required table before returning. Use `new` / `new_with_config` when
+  schema is managed externally.
 - Store implementations: `PgMultiplexerStore`, `PgBufferStore`,
   `PgDedupeStore`, `PgWatermarkStore`, and `PgCheckpointStore`.
 - Integration tests use `testcontainers` with `postgres:18-alpine`.
@@ -747,7 +762,7 @@ Each crate exposes its base abstractions and cross-cutting value types at the to
 
 | Layer | Path | Examples |
 |---|---|---|
-| All implementation and auxiliary types | submodule path | `eventuary_postgres::reader::PgReader`, `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::database::SqliteDatabaseConfig` |
+| All implementation and auxiliary types | submodule path | `eventuary_postgres::reader::PgReader`, `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::writer::SqliteWriterConfig` |
 
 Backend `lib.rs` files declare role modules (`reader`, `writer`, `checkpoint_store`, `database`, `relation`, `flusher`, `reader_config`, and store modules). Module paths remain the canonical learning surface, even when a backend crate also re-exports selected public store types at its root for convenience. `eventuary-core` keeps flat re-exports for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
 

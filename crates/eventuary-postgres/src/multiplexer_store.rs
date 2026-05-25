@@ -13,6 +13,21 @@ use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore};
 use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const MULTIPLEXER_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {multiplexer_completions} (
+    event_id      UUID        NOT NULL,
+    subscriber_id TEXT        NOT NULL,
+    completed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (event_id, subscriber_id)
+);
+"#;
+
+const MULTIPLEXER_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: MULTIPLEXER_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgMultiplexerStoreConfig {
@@ -40,6 +55,33 @@ impl PgMultiplexerStore {
             pool,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgMultiplexerStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgMultiplexerStoreConfig) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            MULTIPLEXER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{multiplexer_completions}",
+                relation: &config.relation,
+            }],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgMultiplexerStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            MULTIPLEXER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{multiplexer_completions}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -75,5 +117,16 @@ impl MultiplexerStore for PgMultiplexerStore {
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = PgMultiplexerStore::schema_sql(&PgMultiplexerStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"multiplexer_completions\""));
     }
 }

@@ -37,7 +37,26 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
+    prepare_test_schema(&pool).await;
     (container, pool)
+}
+
+async fn prepare_test_schema(pool: &PgPool) {
+    PgMultiplexerStore::prepare_schema(pool, &PgMultiplexerStoreConfig::default())
+        .await
+        .unwrap();
+    PgDedupeStore::prepare_schema(pool, &PgDedupeStoreConfig::default())
+        .await
+        .unwrap();
+    PgBufferStore::<i64>::prepare_schema(pool, &PgBufferStoreConfig::default())
+        .await
+        .unwrap();
+    PgWatermarkStore::prepare_schema(pool, &PgWatermarkStoreConfig::default())
+        .await
+        .unwrap();
+    PgCheckpointStore::<SeqCursor>::prepare_schema(pool, &PgCheckpointStoreConfig::default())
+        .await
+        .unwrap();
 }
 
 fn ev(topic: &str) -> Event {

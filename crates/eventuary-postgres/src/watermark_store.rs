@@ -12,6 +12,20 @@ use eventuary_core::io::reader::WatermarkStore;
 use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const WATERMARK_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {watermarks} (
+    key        TEXT        NOT NULL PRIMARY KEY,
+    ts         TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"#;
+
+const WATERMARK_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: WATERMARK_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgWatermarkStoreConfig {
@@ -38,6 +52,33 @@ impl PgWatermarkStore {
             pool,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgWatermarkStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgWatermarkStoreConfig) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            WATERMARK_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{watermarks}",
+                relation: &config.relation,
+            }],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgWatermarkStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            WATERMARK_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{watermarks}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -78,5 +119,16 @@ impl WatermarkStore for PgWatermarkStore {
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = PgWatermarkStore::schema_sql(&PgWatermarkStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"watermarks\""));
     }
 }

@@ -28,6 +28,9 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
+    PgPartitionCoordinator::prepare_schema(&pool, &PgPartitionCoordinatorConfig::default())
+        .await
+        .unwrap();
     (container, pool)
 }
 

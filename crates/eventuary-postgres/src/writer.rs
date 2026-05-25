@@ -10,6 +10,7 @@ use eventuary_core::partition::{
 };
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
+use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
 #[derive(Clone, Default)]
@@ -75,6 +76,27 @@ pub struct PgWriter {
 impl PgWriter {
     pub fn new(pool: PgPool) -> Self {
         Self::new_with_config(pool, PgWriterConfig::default())
+    }
+
+    pub async fn connect(pool: PgPool, config: PgWriterConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new_with_config(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgWriterConfig) -> Result<()> {
+        PgEventLogSchema::prepare(
+            pool,
+            &PgEventLogSchemaConfig {
+                events_relation: config.events_relation.clone(),
+            },
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgWriterConfig) -> String {
+        PgEventLogSchema::schema_sql(&PgEventLogSchemaConfig {
+            events_relation: config.events_relation.clone(),
+        })
     }
 
     pub fn new_with_config(pool: PgPool, config: PgWriterConfig) -> Self {

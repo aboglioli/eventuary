@@ -8,6 +8,23 @@ use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const CHECKPOINT_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {offsets} (
+    consumer_group_id TEXT NOT NULL,
+    stream_id         TEXT NOT NULL DEFAULT 'default',
+    cursor_id         TEXT NOT NULL,
+    cursor            TEXT NOT NULL,
+    cursor_order      BLOB NOT NULL DEFAULT x'',
+    PRIMARY KEY (consumer_group_id, stream_id, cursor_id)
+);
+"#;
+
+const CHECKPOINT_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: CHECKPOINT_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct SqliteCheckpointStoreConfig {
@@ -46,6 +63,33 @@ impl<C> SqliteCheckpointStore<C> {
             relation: Arc::new(config.offsets_relation.render()),
             _cursor: std::marker::PhantomData,
         }
+    }
+
+    pub fn connect(conn: SqliteConn, config: SqliteCheckpointStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteCheckpointStoreConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        crate::schema::apply_schema(
+            &guard,
+            CHECKPOINT_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{offsets}",
+                relation: &config.offsets_relation,
+            }],
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteCheckpointStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            CHECKPOINT_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{offsets}",
+                relation: &config.offsets_relation,
+            }],
+        )
     }
 }
 
@@ -176,6 +220,14 @@ where
 mod tests {
     use super::*;
     use eventuary_core::Partition;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = SqliteCheckpointStore::<crate::reader::SqliteCursor>::schema_sql(
+            &SqliteCheckpointStoreConfig::default(),
+        );
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"consumer_offsets\""));
+    }
     use eventuary_core::io::cursor::CursorOrder;
     use eventuary_core::io::reader::CheckpointScope;
     use eventuary_core::io::{ConsumerGroupId, StreamId};
@@ -204,7 +256,13 @@ mod tests {
 
     fn make_store() -> SqliteCheckpointStore<SeqCursor> {
         let db = SqliteDatabase::open_in_memory().unwrap();
-        SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default())
+        let conn = db.conn();
+        SqliteCheckpointStore::<SeqCursor>::prepare_schema(
+            &conn,
+            &SqliteCheckpointStoreConfig::default(),
+        )
+        .unwrap();
+        SqliteCheckpointStore::new(conn, SqliteCheckpointStoreConfig::default())
     }
 
     #[tokio::test]

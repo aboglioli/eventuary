@@ -11,6 +11,43 @@ use eventuary_core::{Error, Partition, Result};
 
 use crate::reader::PgCursor;
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const PARTITION_COORDINATOR_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {consumers} (
+    consumer_group_id TEXT NOT NULL,
+    stream_id         TEXT NOT NULL,
+    owner_id          TEXT NOT NULL,
+    lease_until       TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (consumer_group_id, stream_id, owner_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_stream_consumers_group_stream_lease
+ON {consumers} (consumer_group_id, stream_id, lease_until);
+
+CREATE TABLE IF NOT EXISTS {partitions} (
+    consumer_group_id   TEXT        NOT NULL,
+    stream_id           TEXT        NOT NULL,
+    partition_id        INT         NOT NULL,
+    partition_count     INT         NULL,
+    owner_id            TEXT        NULL,
+    lease_until         TIMESTAMPTZ NULL,
+    checkpoint_sequence BIGINT      NOT NULL DEFAULT 0,
+    generation          BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (consumer_group_id, stream_id, partition_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_stream_partitions_group_stream_owner
+ON {partitions} (consumer_group_id, stream_id, owner_id);
+
+CREATE INDEX IF NOT EXISTS idx_event_stream_partitions_group_stream_count
+ON {partitions} (consumer_group_id, stream_id, partition_count, partition_id);
+"#;
+
+const PARTITION_COORDINATOR_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: PARTITION_COORDINATOR_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgPartitionCoordinatorConfig {
@@ -52,6 +89,48 @@ impl PgPartitionCoordinator {
             consumers_relation: Arc::new(config.consumers_relation.render()),
             partitions_relation: Arc::new(config.partitions_relation.render()),
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgPartitionCoordinatorConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(
+        pool: &PgPool,
+        config: &PgPartitionCoordinatorConfig,
+    ) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            PARTITION_COORDINATOR_MIGRATIONS,
+            &[
+                RelationReplacement {
+                    token: "{consumers}",
+                    relation: &config.consumers_relation,
+                },
+                RelationReplacement {
+                    token: "{partitions}",
+                    relation: &config.partitions_relation,
+                },
+            ],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgPartitionCoordinatorConfig) -> String {
+        crate::schema::render_schema_sql(
+            PARTITION_COORDINATOR_MIGRATIONS,
+            &[
+                RelationReplacement {
+                    token: "{consumers}",
+                    relation: &config.consumers_relation,
+                },
+                RelationReplacement {
+                    token: "{partitions}",
+                    relation: &config.partitions_relation,
+                },
+            ],
+        )
     }
 }
 
@@ -403,5 +482,17 @@ impl PgPartitionCoordinator {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_tables() {
+        let sql = PgPartitionCoordinator::schema_sql(&PgPartitionCoordinatorConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"event_stream_consumers\""));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"event_stream_partitions\""));
     }
 }

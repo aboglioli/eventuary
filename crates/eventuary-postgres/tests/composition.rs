@@ -18,7 +18,7 @@ use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
 use eventuary_postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
-use eventuary_postgres::writer::PgWriter;
+use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
@@ -36,7 +36,17 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
+    prepare_test_schema(&pool).await;
     (container, pool)
+}
+
+async fn prepare_test_schema(pool: &PgPool) {
+    PgWriter::prepare_schema(pool, &PgWriterConfig::default())
+        .await
+        .unwrap();
+    PgCheckpointStore::<PgCursor>::prepare_schema(pool, &PgCheckpointStoreConfig::default())
+        .await
+        .unwrap();
 }
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {

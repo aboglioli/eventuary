@@ -9,7 +9,7 @@ use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, Payload, StartFrom};
-use eventuary_sqlite::database::SqliteDatabase;
+use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
 use eventuary_sqlite::partition_coordinator::{
     SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig,
 };
@@ -18,6 +18,12 @@ use eventuary_sqlite::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWri
 use eventuary_sqlite::{
     SqliteCoordinatedReader, SqliteCoordinatedReaderConfig, SqliteCoordinatedSubscription,
 };
+
+fn prepare_test_schema(conn: &SqliteConn) {
+    SqliteWriter::prepare_schema(conn, &SqliteWriterConfig::default()).unwrap();
+    SqlitePartitionCoordinator::prepare_schema(conn, &SqlitePartitionCoordinatorConfig::default())
+        .unwrap();
+}
 
 fn event_with_key(key: &str) -> Event {
     Event::builder(
@@ -37,6 +43,7 @@ async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
     let partition_count = NonZeroU16::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
 
     let writer = SqliteWriter::new_with_config(
         db.conn(),
@@ -112,6 +119,7 @@ async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
 async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
     let partition_count = NonZeroU16::new(4).unwrap();
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
 
     let writer = SqliteWriter::new_with_config(
         db.conn(),
@@ -183,6 +191,7 @@ async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
 async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
     let partition_count = NonZeroU16::new(4).unwrap();
     let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
 
     let writer = SqliteWriter::new_with_config(
         db.conn(),

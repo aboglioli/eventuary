@@ -19,6 +19,7 @@ use eventuary_core::{
 };
 
 use crate::database::SqliteConn;
+use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 use crate::relation::SqliteRelationName;
 
 #[derive(
@@ -162,6 +163,27 @@ impl Clone for SqliteReader {
 }
 
 impl SqliteReader {
+    pub fn connect(conn: SqliteConn, config: SqliteReaderConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteReaderConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        SqliteEventLogSchema::prepare(
+            &guard,
+            &SqliteEventLogSchemaConfig {
+                events_relation: config.events_relation.clone(),
+            },
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteReaderConfig) -> String {
+        SqliteEventLogSchema::schema_sql(&SqliteEventLogSchemaConfig {
+            events_relation: config.events_relation.clone(),
+        })
+    }
+
     pub fn new(conn: SqliteConn, config: SqliteReaderConfig) -> Self {
         Self { conn, config }
     }
@@ -756,6 +778,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
 
         let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
@@ -791,6 +814,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
 
         let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
@@ -850,6 +874,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
 
         let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];

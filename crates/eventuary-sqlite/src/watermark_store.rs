@@ -14,6 +14,20 @@ use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const WATERMARK_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {watermarks} (
+    key        TEXT NOT NULL PRIMARY KEY,
+    ts         TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"#;
+
+const WATERMARK_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: WATERMARK_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct SqliteWatermarkStoreConfig {
@@ -40,6 +54,33 @@ impl SqliteWatermarkStore {
             conn,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub fn connect(conn: SqliteConn, config: SqliteWatermarkStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteWatermarkStoreConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        crate::schema::apply_schema(
+            &guard,
+            WATERMARK_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{watermarks}",
+                relation: &config.relation,
+            }],
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteWatermarkStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            WATERMARK_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{watermarks}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -91,5 +132,16 @@ impl WatermarkStore for SqliteWatermarkStore {
         })
         .await
         .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = SqliteWatermarkStore::schema_sql(&SqliteWatermarkStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"watermarks\""));
     }
 }
