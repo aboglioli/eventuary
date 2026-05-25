@@ -695,6 +695,12 @@ Use `Arc::clone(&x)` instead of `x.clone()` for ref-counted pointers (the
 - **No `Co-Authored-By`.** No agent metadata in commits.
 - **Never push.** Agents commit; the maintainer pushes.
 - **Never stage** without explicit permission.
+- **Never commit or stage `docs/`.** The `docs/` tree is reserved for
+  durable, human-authored documentation and agent-only artifacts that the
+  maintainer keeps untracked on disk. Do not add it to `.gitignore`
+  either — it must remain visible in `git status` so the maintainer can
+  curate it. If agent work produces a writeup worth keeping, propose
+  rewriting it into a concise human-facing doc and ask before committing.
 - **Do not change repo or global commit signing settings.** Agent-run
   signed commits often fail because GPG prompts. Use a one-off
   `git -c commit.gpgsign=false commit ...` only when the agent is
