@@ -42,10 +42,9 @@ fn event_with_key(key: &str) -> Event {
         "acme",
         "/orders",
         "order.placed",
+        key,
         Payload::from_string("{}"),
     )
-    .unwrap()
-    .key(key)
     .unwrap()
     .build()
     .unwrap()
@@ -66,7 +65,7 @@ async fn pg_partition_backfill_populates_partition_columns() {
     let config = PgPartitionBackfillConfig::new(
         PgRelationName::new("events").unwrap(),
         NonZeroU16::new(4).unwrap(),
-        EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+        EventKeyPartitionKeyResolver::new(),
         Fnv1a64PartitionHasher,
         3,
     )
@@ -124,7 +123,7 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
     let inline_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             NonZeroU16::new(4).unwrap(),
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -148,7 +147,7 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
     let config = PgPartitionBackfillConfig::new(
         PgRelationName::new("events").unwrap(),
         NonZeroU16::new(4).unwrap(),
-        EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+        EventKeyPartitionKeyResolver::new(),
         Fnv1a64PartitionHasher,
         10,
     )
@@ -171,7 +170,7 @@ fn pg_partition_backfill_config_rejects_zero_batch_size() {
     let err = PgPartitionBackfillConfig::new(
         PgRelationName::new("events").unwrap(),
         NonZeroU16::new(4).unwrap(),
-        EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+        EventKeyPartitionKeyResolver::new(),
         Fnv1a64PartitionHasher,
         0,
     )

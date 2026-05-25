@@ -47,10 +47,9 @@ fn event_with_key(key: &str) -> Event {
         "acme",
         "/orders",
         "order.placed",
+        key,
         Payload::from_string("{}"),
     )
-    .unwrap()
-    .key(key)
     .unwrap()
     .build()
     .unwrap()
@@ -77,7 +76,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             partition_count,
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -134,11 +133,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         let mut results: HashMap<u16, Vec<String>> = HashMap::new();
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(2), stream.next()).await {
             let partition_id = msg.cursor().partition.id();
-            let key = msg
-                .event()
-                .key()
-                .map(|k| k.as_str().to_owned())
-                .unwrap_or_default();
+            let key = msg.event().key().as_str().to_owned();
             msg.ack().await.unwrap();
             results.entry(partition_id).or_default().push(key);
         }
@@ -173,7 +168,7 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             partition_count,
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -309,7 +304,7 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             partition_count,
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -432,7 +427,7 @@ async fn pg_coordinated_reader_fresh_latest_skips_existing_events() {
         PgWriterConfig {
             partitioning: PgPartitioningConfig::inline(
                 partition_count,
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..PgWriterConfig::default()
@@ -484,7 +479,7 @@ async fn pg_coordinated_reader_fresh_latest_skips_existing_events() {
 
     let mut delivered = Vec::new();
     while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
-        let key = msg.event().key().map(|k| k.as_str().to_owned()).unwrap();
+        let key = msg.event().key().as_str().to_owned();
         msg.ack().await.unwrap();
         delivered.push(key);
         if delivered.len() == 1 {
@@ -505,7 +500,7 @@ async fn pg_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
         PgWriterConfig {
             partitioning: PgPartitioningConfig::inline(
                 partition_count,
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..PgWriterConfig::default()
@@ -563,7 +558,7 @@ async fn pg_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
 
     let mut delivered = Vec::new();
     while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(3), stream.next()).await {
-        let key = msg.event().key().map(|k| k.as_str().to_owned()).unwrap();
+        let key = msg.event().key().as_str().to_owned();
         msg.ack().await.unwrap();
         delivered.push(key);
         if delivered.len() == 1 {

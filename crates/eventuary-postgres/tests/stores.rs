@@ -41,9 +41,7 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
 }
 
 fn ev(topic: &str) -> Event {
-    Event::builder("acme", "/x", topic, Payload::from_string("p"))
-        .unwrap()
-        .key("k")
+    Event::builder("acme", "/x", topic, "k", Payload::from_string("p"))
         .unwrap()
         .build()
         .unwrap()

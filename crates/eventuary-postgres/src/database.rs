@@ -46,6 +46,10 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0007_partition_count_coordination.sql",
         template: include_str!("../migrations/0007_partition_count_coordination.sql"),
     },
+    Migration {
+        filename: "0008_required_event_key.sql",
+        template: include_str!("../migrations/0008_required_event_key.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {
@@ -278,7 +282,7 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"events\""));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"consumer_offsets\""));
         assert!(sql.contains("parent_id UUID"));
-        assert!(sql.contains("event_key TEXT"));
+        assert!(sql.contains("event_key TEXT NOT NULL"));
         assert!(sql.contains("stream_id"));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"events\""));
     }
@@ -290,5 +294,17 @@ mod tests {
         assert!(sql.contains("CREATE SCHEMA IF NOT EXISTS \"eventuary\""));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"eventuary\".\"events\""));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"eventuary\".\"consumer_offsets\""));
+    }
+
+    #[test]
+    fn required_event_key_migration_backfills_and_enforces_not_null() {
+        let config = PgDatabaseConfig::default();
+        let migration = migrations()
+            .iter()
+            .find(|m| m.filename == "0008_required_event_key.sql")
+            .expect("required event key migration exists");
+        let sql = render_migration_sql(migration, &config);
+        assert!(sql.contains("SET event_key = id::text"));
+        assert!(sql.contains("ALTER COLUMN event_key SET NOT NULL"));
     }
 }

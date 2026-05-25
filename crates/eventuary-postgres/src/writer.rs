@@ -204,7 +204,7 @@ struct EventRow {
     organization: String,
     namespace: String,
     topic: String,
-    key: Option<String>,
+    key: String,
     payload: String,
     content_type: String,
     metadata: String,
