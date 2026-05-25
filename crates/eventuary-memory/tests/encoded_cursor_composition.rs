@@ -59,12 +59,14 @@ impl Reader for SeqReader {
 }
 
 fn ev(key: &str) -> Event {
-    Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-        .unwrap()
-        .key(key)
-        .unwrap()
-        .build()
-        .unwrap()
+    Event::create(
+        "acme",
+        "/x",
+        "thing.happened",
+        key,
+        Payload::from_string("p"),
+    )
+    .unwrap()
 }
 
 #[tokio::test]

@@ -30,12 +30,14 @@ mod tests {
     use eventuary_core::io::{BoxWriter, Writer, WriterExt};
 
     fn ev() -> Event {
-        Event::builder("org", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .build()
-            .expect("valid event")
+        Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .expect("valid event")
     }
 
     #[tokio::test]
@@ -51,7 +53,7 @@ mod tests {
         assert_eq!(received.topic().as_str(), "thing.happened");
         assert_eq!(received.namespace().as_str(), "/x");
         assert_eq!(received.organization().as_str(), "org");
-        assert_eq!(received.key().expect("event has key").as_str(), "k");
+        assert_eq!(received.key().as_str(), "k");
     }
 
     #[tokio::test]

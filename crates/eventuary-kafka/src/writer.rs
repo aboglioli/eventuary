@@ -35,17 +35,9 @@ impl KafkaWriter {
 impl Writer for KafkaWriter {
     async fn write(&self, event: &Event) -> Result<()> {
         let body = Self::body(event)?;
-        if let Some(key) = event.key() {
-            let key = key.as_str().to_owned();
-            let record: FutureRecord<String, String> =
-                FutureRecord::to(&self.topic).payload(&body).key(&key);
-            self.producer
-                .send(record, SEND_TIMEOUT)
-                .await
-                .map_err(|(e, _)| Error::Store(e.to_string()))?;
-            return Ok(());
-        }
-        let record: FutureRecord<String, String> = FutureRecord::to(&self.topic).payload(&body);
+        let key = event.key().as_str().to_owned();
+        let record: FutureRecord<String, String> =
+            FutureRecord::to(&self.topic).payload(&body).key(&key);
         self.producer
             .send(record, SEND_TIMEOUT)
             .await
@@ -57,30 +49,18 @@ impl Writer for KafkaWriter {
         if events.is_empty() {
             return Ok(());
         }
-        let payloads: Vec<(String, Option<String>)> = events
+        let payloads: Vec<(String, String)> = events
             .iter()
-            .map(|e| Ok::<_, Error>((Self::body(e)?, e.key().map(|key| key.to_string()))))
+            .map(|e| Ok::<_, Error>((Self::body(e)?, e.key().to_string())))
             .collect::<Result<_>>()?;
 
         for (body, key) in &payloads {
-            match key {
-                Some(key) => {
-                    let record: FutureRecord<String, String> =
-                        FutureRecord::to(&self.topic).payload(body).key(key);
-                    self.producer
-                        .send(record, SEND_TIMEOUT)
-                        .await
-                        .map_err(|(e, _)| Error::Store(e.to_string()))?;
-                }
-                None => {
-                    let record: FutureRecord<String, String> =
-                        FutureRecord::to(&self.topic).payload(body);
-                    self.producer
-                        .send(record, SEND_TIMEOUT)
-                        .await
-                        .map_err(|(e, _)| Error::Store(e.to_string()))?;
-                }
-            }
+            let record: FutureRecord<String, String> =
+                FutureRecord::to(&self.topic).payload(body).key(key);
+            self.producer
+                .send(record, SEND_TIMEOUT)
+                .await
+                .map_err(|(e, _)| Error::Store(e.to_string()))?;
         }
         Ok(())
     }

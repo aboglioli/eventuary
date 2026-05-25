@@ -91,12 +91,14 @@ mod tests {
     }
 
     fn ev() -> Event {
-        Event::builder("org", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .build()
-            .expect("valid event")
+        Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .expect("valid event")
     }
 
     #[tokio::test]
@@ -151,18 +153,22 @@ mod tests {
 
         let mut stream = reader.read(subscription()).await.unwrap();
 
-        let a = Event::builder("org-a", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .build()
-            .expect("valid event");
-        let b = Event::builder("org-b", "/y", "other.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .build()
-            .expect("valid event");
+        let a = Event::create(
+            "org-a",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .expect("valid event");
+        let b = Event::create(
+            "org-b",
+            "/y",
+            "other.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .expect("valid event");
 
         tx.send(a).await.unwrap();
         tx.send(b).await.unwrap();
@@ -211,18 +217,15 @@ mod tests {
 
         writer
             .write(
-                &Event::builder(
+                &Event::create(
                     "org",
                     "/users",
                     "user.updated",
+                    "u-1",
                     UserUpdated {
                         user_id: "u-1".to_owned(),
                     },
                 )
-                .unwrap()
-                .key("u-1")
-                .unwrap()
-                .build()
                 .unwrap(),
             )
             .await
