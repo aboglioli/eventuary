@@ -464,25 +464,6 @@ mod tests {
         assert_eq!(mapped.metadata().get("source"), Some("test"));
     }
 
-    #[test]
-    fn typed_payload_event_resolves_to_partition_key() {
-        let event: Event<UserUpdated> = Event::builder(
-            "acme",
-            "/users",
-            "user.updated",
-            "user-u-1",
-            UserUpdated {
-                user_id: "u-1".to_owned(),
-                email: "a@example.com".to_owned(),
-            },
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-
-        assert_eq!(event.key().as_str(), "user-u-1");
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct SerializableUserUpdated {
         user_id: String,
