@@ -778,6 +778,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
 
         let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
@@ -813,6 +814,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
 
         let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
@@ -872,6 +874,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
 
         let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];

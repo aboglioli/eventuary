@@ -570,7 +570,13 @@ mod tests {
 
     fn make_coordinator() -> SqlitePartitionCoordinator {
         let db = SqliteDatabase::open_in_memory().unwrap();
-        SqlitePartitionCoordinator::new(db.conn(), SqlitePartitionCoordinatorConfig::default())
+        let conn = db.conn();
+        SqlitePartitionCoordinator::prepare_schema(
+            &conn,
+            &SqlitePartitionCoordinatorConfig::default(),
+        )
+        .unwrap();
+        SqlitePartitionCoordinator::new(conn, SqlitePartitionCoordinatorConfig::default())
     }
 
     fn scope() -> CheckpointScope {

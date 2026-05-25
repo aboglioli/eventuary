@@ -271,6 +271,7 @@ mod tests {
     #[tokio::test]
     async fn writer_off_partitioning_leaves_columns_null() {
         let db = SqliteDatabase::open_in_memory().unwrap();
+        SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
         let writer = SqliteWriter::new(db.conn());
         let event = keyed_event("order-123");
         writer.write(&event).await.unwrap();
@@ -297,6 +298,7 @@ mod tests {
             ),
             ..SqliteWriterConfig::default()
         };
+        SqliteWriter::prepare_schema(&db.conn(), &config).unwrap();
         let writer = SqliteWriter::new_with_config(db.conn(), config);
         let event = keyed_event("order-123");
         writer.write(&event).await.unwrap();

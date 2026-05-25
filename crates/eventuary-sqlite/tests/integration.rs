@@ -12,7 +12,7 @@ use eventuary_core::{
 };
 use eventuary_sqlite::database::SqliteDatabase;
 use eventuary_sqlite::reader::{SqliteReader, SqliteReaderConfig, SqliteSubscription};
-use eventuary_sqlite::writer::SqliteWriter;
+use eventuary_sqlite::writer::{SqliteWriter, SqliteWriterConfig};
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
     Event::builder(org, ns, topic, key, Payload::from_string("payload"))
@@ -42,6 +42,7 @@ fn fast_config() -> SqliteReaderConfig {
 #[tokio::test]
 async fn write_read_roundtrip() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
@@ -61,6 +62,7 @@ async fn write_read_roundtrip() {
 #[tokio::test]
 async fn reader_roundtrips_lineage_fields() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     let parent_id = EventId::new();
     let event = Event::builder(
@@ -96,6 +98,7 @@ async fn reader_roundtrips_lineage_fields() {
 #[tokio::test]
 async fn sqlite_reader_advances_after_ack() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
@@ -128,6 +131,7 @@ async fn sqlite_reader_advances_after_ack() {
 #[tokio::test]
 async fn sqlite_reader_redelivers_after_nack() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
@@ -156,6 +160,7 @@ async fn sqlite_reader_redelivers_after_nack() {
 #[tokio::test]
 async fn start_from_after_cursor_resumes() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     for i in 0..3 {
         writer
@@ -191,6 +196,7 @@ async fn start_from_after_cursor_resumes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_from_latest_skips_existing_events() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     for i in 0..3 {
         writer
@@ -220,6 +226,7 @@ async fn start_from_latest_skips_existing_events() {
 #[tokio::test]
 async fn start_from_timestamp_filters_old_events() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/x", "thing.happened", "before"))
@@ -250,6 +257,7 @@ async fn start_from_timestamp_filters_old_events() {
 #[tokio::test]
 async fn topic_filter() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/x", "task.created", "t1"))
@@ -294,6 +302,7 @@ async fn topic_filter() {
 #[tokio::test]
 async fn namespace_filter() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     writer
         .write(&ev("acme", "/backend", "thing.happened", "b1"))
@@ -340,6 +349,7 @@ async fn namespace_filter() {
 #[tokio::test]
 async fn stop_at_current_end_finishes_after_existing_events() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     for i in 0..3 {
         writer
@@ -374,6 +384,7 @@ async fn stop_at_current_end_finishes_after_existing_events() {
 #[tokio::test]
 async fn stop_at_cursor_finishes_at_inclusive_cursor() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     for i in 0..4 {
         writer
@@ -439,6 +450,7 @@ async fn stop_at_cursor_finishes_at_inclusive_cursor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_at_never_waits_for_future_events() {
     let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
     let writer = SqliteWriter::new(db.conn());
     let reader = SqliteReader::new(db.conn(), fast_config());
     let mut stream = reader

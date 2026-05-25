@@ -256,7 +256,13 @@ mod tests {
 
     fn make_store() -> SqliteCheckpointStore<SeqCursor> {
         let db = SqliteDatabase::open_in_memory().unwrap();
-        SqliteCheckpointStore::new(db.conn(), SqliteCheckpointStoreConfig::default())
+        let conn = db.conn();
+        SqliteCheckpointStore::<SeqCursor>::prepare_schema(
+            &conn,
+            &SqliteCheckpointStoreConfig::default(),
+        )
+        .unwrap();
+        SqliteCheckpointStore::new(conn, SqliteCheckpointStoreConfig::default())
     }
 
     #[tokio::test]
