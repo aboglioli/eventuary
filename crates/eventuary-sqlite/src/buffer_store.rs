@@ -15,6 +15,23 @@ use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const BUFFER_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {buffer_entries} (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    event     TEXT    NOT NULL,
+    cursor    TEXT    NOT NULL,
+    pushed_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_buffer_entries_pushed_at ON {buffer_entries} (pushed_at);
+"#;
+
+const BUFFER_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: BUFFER_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct SqliteBufferStoreConfig {
@@ -61,6 +78,33 @@ impl<C> SqliteBufferStore<C> {
             relation: Arc::new(config.relation.render()),
             _cursor: PhantomData,
         }
+    }
+
+    pub fn connect(conn: SqliteConn, config: SqliteBufferStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteBufferStoreConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        crate::schema::apply_schema(
+            &guard,
+            BUFFER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{buffer_entries}",
+                relation: &config.relation,
+            }],
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteBufferStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            BUFFER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{buffer_entries}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -162,5 +206,18 @@ where
 
     async fn nack(&self, _id: &Self::Id) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = SqliteBufferStore::<crate::reader::SqliteCursor>::schema_sql(
+            &SqliteBufferStoreConfig::default(),
+        );
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"buffer_entries\""));
     }
 }

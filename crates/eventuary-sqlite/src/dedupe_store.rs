@@ -13,6 +13,19 @@ use eventuary_core::{Error, Event, Result};
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const DEDUPE_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {dedupe_keys} (
+    event_id     TEXT NOT NULL PRIMARY KEY,
+    processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"#;
+
+const DEDUPE_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: DEDUPE_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct SqliteDedupeStoreConfig {
@@ -39,6 +52,33 @@ impl SqliteDedupeStore {
             conn,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub fn connect(conn: SqliteConn, config: SqliteDedupeStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteDedupeStoreConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        crate::schema::apply_schema(
+            &guard,
+            DEDUPE_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{dedupe_keys}",
+                relation: &config.relation,
+            }],
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteDedupeStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            DEDUPE_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{dedupe_keys}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -106,5 +146,16 @@ impl DedupeStore for SqliteDedupeStore {
         })
         .await
         .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = SqliteDedupeStore::schema_sql(&SqliteDedupeStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"dedupe_keys\""));
     }
 }

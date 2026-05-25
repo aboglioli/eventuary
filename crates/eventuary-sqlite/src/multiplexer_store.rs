@@ -13,6 +13,21 @@ use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
 use crate::relation::SqliteRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const MULTIPLEXER_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {multiplexer_completions} (
+    event_id      TEXT NOT NULL,
+    subscriber_id TEXT NOT NULL,
+    completed_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (event_id, subscriber_id)
+);
+"#;
+
+const MULTIPLEXER_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: MULTIPLEXER_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct SqliteMultiplexerStoreConfig {
@@ -40,6 +55,33 @@ impl SqliteMultiplexerStore {
             conn,
             relation: Arc::new(config.relation.render()),
         }
+    }
+
+    pub fn connect(conn: SqliteConn, config: SqliteMultiplexerStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(conn: &SqliteConn, config: &SqliteMultiplexerStoreConfig) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        crate::schema::apply_schema(
+            &guard,
+            MULTIPLEXER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{multiplexer_completions}",
+                relation: &config.relation,
+            }],
+        )
+    }
+
+    pub fn schema_sql(config: &SqliteMultiplexerStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            MULTIPLEXER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{multiplexer_completions}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -88,5 +130,16 @@ impl MultiplexerStore for SqliteMultiplexerStore {
         })
         .await
         .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = SqliteMultiplexerStore::schema_sql(&SqliteMultiplexerStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"multiplexer_completions\""));
     }
 }

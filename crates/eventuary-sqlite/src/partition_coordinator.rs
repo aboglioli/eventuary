@@ -11,6 +11,43 @@ use eventuary_core::{Error, Partition, Result};
 use crate::database::SqliteConn;
 use crate::reader::SqliteCursor;
 use crate::relation::SqliteRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const PARTITION_COORDINATOR_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {consumers} (
+    consumer_group_id TEXT NOT NULL,
+    stream_id         TEXT NOT NULL,
+    owner_id          TEXT NOT NULL,
+    lease_until       TEXT NOT NULL,
+    PRIMARY KEY (consumer_group_id, stream_id, owner_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_stream_consumers_group_stream_lease
+ON {consumers} (consumer_group_id, stream_id, lease_until);
+
+CREATE TABLE IF NOT EXISTS {partitions} (
+    consumer_group_id   TEXT    NOT NULL,
+    stream_id           TEXT    NOT NULL,
+    partition_id        INTEGER NOT NULL,
+    partition_count     INTEGER NULL,
+    owner_id            TEXT    NULL,
+    lease_until         TEXT    NULL,
+    checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
+    generation          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (consumer_group_id, stream_id, partition_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_stream_partitions_group_stream_owner
+ON {partitions} (consumer_group_id, stream_id, owner_id);
+
+CREATE INDEX IF NOT EXISTS idx_event_stream_partitions_group_stream_count
+ON {partitions} (consumer_group_id, stream_id, partition_count, partition_id);
+"#;
+
+const PARTITION_COORDINATOR_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: PARTITION_COORDINATOR_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct SqlitePartitionCoordinatorConfig {
@@ -52,6 +89,48 @@ impl SqlitePartitionCoordinator {
             consumers_relation: Arc::new(config.consumers_relation.render()),
             partitions_relation: Arc::new(config.partitions_relation.render()),
         }
+    }
+
+    pub fn connect(conn: SqliteConn, config: SqlitePartitionCoordinatorConfig) -> Result<Self> {
+        Self::prepare_schema(&conn, &config)?;
+        Ok(Self::new(conn, config))
+    }
+
+    pub fn prepare_schema(
+        conn: &SqliteConn,
+        config: &SqlitePartitionCoordinatorConfig,
+    ) -> Result<()> {
+        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        crate::schema::apply_schema(
+            &guard,
+            PARTITION_COORDINATOR_MIGRATIONS,
+            &[
+                RelationReplacement {
+                    token: "{consumers}",
+                    relation: &config.consumers_relation,
+                },
+                RelationReplacement {
+                    token: "{partitions}",
+                    relation: &config.partitions_relation,
+                },
+            ],
+        )
+    }
+
+    pub fn schema_sql(config: &SqlitePartitionCoordinatorConfig) -> String {
+        crate::schema::render_schema_sql(
+            PARTITION_COORDINATOR_MIGRATIONS,
+            &[
+                RelationReplacement {
+                    token: "{consumers}",
+                    relation: &config.consumers_relation,
+                },
+                RelationReplacement {
+                    token: "{partitions}",
+                    relation: &config.partitions_relation,
+                },
+            ],
+        )
     }
 }
 
@@ -480,6 +559,14 @@ mod tests {
     use eventuary_core::io::{ConsumerGroupId, OwnerId, StreamId};
 
     use crate::database::SqliteDatabase;
+
+    #[test]
+    fn schema_sql_contains_expected_tables() {
+        let sql =
+            SqlitePartitionCoordinator::schema_sql(&SqlitePartitionCoordinatorConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"event_stream_consumers\""));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"event_stream_partitions\""));
+    }
 
     fn make_coordinator() -> SqlitePartitionCoordinator {
         let db = SqliteDatabase::open_in_memory().unwrap();
