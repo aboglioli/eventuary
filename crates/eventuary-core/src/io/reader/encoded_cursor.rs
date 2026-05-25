@@ -3,8 +3,9 @@ use std::pin::Pin;
 use futures::{Stream, StreamExt};
 
 use crate::error::Result;
+use crate::io::cursor::{CursorCodec, EncodedCursor};
 use crate::io::position::{StartFrom, StartableSubscription};
-use crate::io::{Cursor, CursorCodec, EncodedCursor, Message, Reader};
+use crate::io::{Cursor, Message, Reader};
 
 pub struct EncodedCursorReader<R, Codec> {
     inner: R,
@@ -119,8 +120,9 @@ mod tests {
     use futures::stream;
 
     use crate::event::Event;
+    use crate::io::CursorId;
     use crate::io::acker::NoopAcker;
-    use crate::io::{CursorId, CursorOrder, JsonCursorCodec};
+    use crate::io::cursor::{CursorOrder, JsonCursorCodec};
     use crate::payload::Payload;
 
     #[derive(

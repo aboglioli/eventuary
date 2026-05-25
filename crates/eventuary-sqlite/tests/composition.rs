@@ -4,14 +4,13 @@ use futures::StreamExt;
 use tokio::time::timeout;
 
 use eventuary_core::io::ConsumerGroupId;
+use eventuary_core::io::cursor::{CursorKind, CursorOrder, EncodedCursor};
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::reader::{
     CheckpointKey, CheckpointReader, CheckpointScope, CheckpointStore, CheckpointSubscription,
     PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
-use eventuary_core::io::{
-    CursorId, CursorKind, CursorOrder, EncodedCursor, Reader, StreamId, Writer,
-};
+use eventuary_core::io::{CursorId, Reader, StreamId, Writer};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
 use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::SqliteDatabase;

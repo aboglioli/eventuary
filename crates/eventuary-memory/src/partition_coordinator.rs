@@ -258,7 +258,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use tokio::time::sleep;
 
-    use eventuary_core::io::CursorOrder;
+    use eventuary_core::io::cursor::CursorOrder;
     use eventuary_core::io::{ConsumerGroupId, StreamId};
 
     #[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]

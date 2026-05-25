@@ -6,8 +6,9 @@ use futures::{Stream, StreamExt};
 
 use crate::error::Result;
 use crate::io::acker::NackContext;
+use crate::io::cursor::CursorOrder;
 use crate::io::position::{StartFrom, StartableSubscription};
-use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum MergeStrategy {

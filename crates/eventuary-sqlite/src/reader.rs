@@ -8,9 +8,10 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
+use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::stream::SpawnedStream;
-use eventuary_core::io::{Acker, Cursor, CursorOrder, Filter, JsonCursorCodec, Message, Reader};
+use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
     Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
@@ -646,7 +647,8 @@ mod tests {
     use super::*;
     use crate::database::SqliteDatabase;
     use crate::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
-    use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder, Reader, Writer};
+    use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
+    use eventuary_core::io::{Cursor, CursorId, Reader, Writer};
     use eventuary_core::partition::{
         EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionGroup,
         PartitionHasher, PartitionKey,

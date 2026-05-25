@@ -176,8 +176,9 @@ where
 mod tests {
     use super::*;
     use eventuary_core::Partition;
+    use eventuary_core::io::cursor::CursorOrder;
     use eventuary_core::io::reader::CheckpointScope;
-    use eventuary_core::io::{ConsumerGroupId, CursorOrder, StreamId};
+    use eventuary_core::io::{ConsumerGroupId, StreamId};
     use std::num::NonZeroU16;
 
     use crate::database::SqliteDatabase;

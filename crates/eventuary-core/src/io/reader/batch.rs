@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::acker::NackContext;
+use crate::io::cursor::CursorOrder;
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
 pub struct BatchReader<R> {
     inner: R,

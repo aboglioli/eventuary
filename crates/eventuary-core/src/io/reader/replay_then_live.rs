@@ -7,9 +7,10 @@ use tokio::sync::mpsc;
 use crate::error::Result;
 use crate::event::EventId;
 use crate::io::acker::NackContext;
+use crate::io::cursor::CursorOrder;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, Reader};
+use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
 pub type ReplayThenLiveStream<RA, LA, RC, LC, P = crate::payload::Payload> =
     SpawnedStream<ReplayLiveAcker<RA, LA>, ReplayLiveCursor<RC, LC>, P>;
@@ -309,8 +310,8 @@ mod tests {
 
     use super::*;
     use crate::event::Event;
-    use crate::io::CursorOrder;
     use crate::io::acker::NoopAcker;
+    use crate::io::cursor::CursorOrder;
     use crate::payload::Payload;
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
