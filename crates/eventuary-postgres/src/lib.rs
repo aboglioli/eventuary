@@ -22,6 +22,7 @@ pub mod claim_buffer_store;
 pub mod coordinated_reader;
 pub mod database;
 pub mod dedupe_store;
+pub mod event_log;
 pub mod multiplexer_store;
 pub mod partition_backfill;
 pub mod partition_coordinator;
@@ -39,6 +40,7 @@ pub use coordinated_reader::{
     PgCoordinatedStream, PgCoordinatedSubscription,
 };
 pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
+pub use event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
 pub use partition_backfill::{BackfillReport, PgPartitionBackfill, PgPartitionBackfillConfig};
 pub use partition_coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
