@@ -26,6 +26,7 @@ pub mod multiplexer_store;
 pub mod partition_coordinator;
 pub mod reader;
 pub mod relation;
+pub mod schema;
 pub mod watermark_store;
 pub mod writer;
 
