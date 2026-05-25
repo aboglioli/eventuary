@@ -121,7 +121,7 @@ crates/
 │           │   └── spawned.rs # SpawnedStream
 │           ├── duplex.rs   # Duplex<W, R> delegating Reader + Writer pair
 │           ├── position.rs # StartFrom<C> + StopAt<C> + StartableSubscription
-│           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter + Filter impls for TopicPattern/NamespacePattern
+│           ├── filter.rs   # Filter trait + TopicPattern/NamespacePattern + EventFilter + All/And/Or/Not filters
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId

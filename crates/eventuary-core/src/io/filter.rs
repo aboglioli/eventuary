@@ -6,10 +6,10 @@ use chrono::{DateTime, Utc};
 use crate::event::Event;
 use crate::event_key::EventKey;
 use crate::metadata::Metadata;
-use crate::namespace_pattern::NamespacePattern;
+use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
 use crate::payload::Payload;
-use crate::topic_pattern::TopicPattern;
+use crate::topic::Topic;
 
 pub trait Filter<P = Payload>: Send + Sync {
     fn matches(&self, event: &Event<P>) -> bool;
@@ -107,6 +107,40 @@ impl<P: Send + Sync> Filter<P> for AllFilter {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum TopicPattern {
+    Exact(Topic),
+}
+
+impl TopicPattern {
+    pub fn exact(topic: Topic) -> Self {
+        Self::Exact(topic)
+    }
+
+    pub fn matches_topic(&self, topic: &Topic) -> bool {
+        match self {
+            Self::Exact(expected) => expected == topic,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum NamespacePattern {
+    Prefix(Namespace),
+}
+
+impl NamespacePattern {
+    pub fn prefix(namespace: Namespace) -> Self {
+        Self::Prefix(namespace)
+    }
+
+    pub fn matches_namespace(&self, namespace: &Namespace) -> bool {
+        match self {
+            Self::Prefix(prefix) => namespace.starts_with(prefix),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EventFilter {
     pub organization: Option<OrganizationId>,
@@ -171,13 +205,13 @@ impl<P: Send + Sync> Filter<P> for EventFilter {
     }
 }
 
-impl<P: Send + Sync> Filter<P> for crate::TopicPattern {
+impl<P: Send + Sync> Filter<P> for TopicPattern {
     fn matches(&self, event: &Event<P>) -> bool {
         self.matches_topic(event.topic())
     }
 }
 
-impl<P: Send + Sync> Filter<P> for crate::NamespacePattern {
+impl<P: Send + Sync> Filter<P> for NamespacePattern {
     fn matches(&self, event: &Event<P>) -> bool {
         self.matches_namespace(event.namespace())
     }
@@ -349,6 +383,21 @@ mod tests {
         assert!(filter.matches(&ev("a", "/x")));
         assert!(filter.matches(&ev("b", "/x")));
         assert!(!filter.matches(&ev("c", "/x")));
+    }
+
+    #[test]
+    fn topic_pattern_exact_matches_identical_topic() {
+        let pattern = TopicPattern::exact(Topic::new("invoice.created").unwrap());
+        assert!(pattern.matches_topic(&Topic::new("invoice.created").unwrap()));
+        assert!(!pattern.matches_topic(&Topic::new("invoice.paid").unwrap()));
+    }
+
+    #[test]
+    fn namespace_pattern_prefix_matches_descendants() {
+        let pattern = NamespacePattern::prefix(Namespace::new("/billing").unwrap());
+        assert!(pattern.matches_namespace(&Namespace::new("/billing").unwrap()));
+        assert!(pattern.matches_namespace(&Namespace::new("/billing/invoices").unwrap()));
+        assert!(!pattern.matches_namespace(&Namespace::new("/orders").unwrap()));
     }
 
     #[test]

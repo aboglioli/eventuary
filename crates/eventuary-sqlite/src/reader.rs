@@ -9,13 +9,13 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
-use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
-    Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
-    SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
+    Error, Partition, PartitionableSubscription, Result, SerializedEvent, SerializedPayload,
+    StartFrom, StartableSubscription, StopAt,
 };
 
 use crate::database::SqliteConn;
