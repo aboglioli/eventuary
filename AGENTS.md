@@ -1039,8 +1039,12 @@ Worth knowing when changing the codebase:
   `Payload` because they own the wire boundary.
 - **Codec bridge sits at the boundary, not inside wrappers.**
   `DecodeReader<R, C, P>` and `EncodeWriter<W, C, P>` adapt
-  `Reader<Payload>` ↔ `Reader<P>` and `Writer<P>` → `Writer<Payload>` via
-  a `PayloadCodec<P>` / `EventCodec<P>`. Built-in codecs:
+  `Reader<Payload>` ↔ `Reader<P>` and `Writer<P>` → `Writer<Payload>` at
+  durable boundaries. Use `ReaderTypedExt::decode` and
+  `WriterTypedExt::encode` with `PayloadCodec<P>` implementations when only
+  the payload is transformed. Use `ReaderTypedExt::decode_event` and
+  `WriterTypedExt::encode_event` with `EventCodec<P>` implementations when
+  the codec needs full event-envelope context. Built-in codecs:
   `JsonPayloadCodec` (serde-based), `PayloadPassthroughCodec` (identity),
   and `PayloadEventCodec<C>` (lifts a payload codec to a full event
   codec). `DecodeErrorDisposition::{AckInner, NackInner, Surface}`
