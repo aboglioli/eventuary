@@ -7,7 +7,7 @@ Eventuary started life as `orchy-events` inside the [orchy](https://github.com/a
 project and was extracted as a standalone library so other Rust projects can
 reuse the same event-sourcing primitives and reader/writer abstractions.
 
-> **Status:** Alpha (`0.1.0-alpha.1`). API may change before `0.1.0`.
+> **Status:** Stable (`0.1.0`).
 
 ## What Eventuary Provides
 
@@ -35,7 +35,7 @@ The top-level `eventuary` crate is an **umbrella facade**: it re-exports
 feature flag. Typical consumers add a single line to their `Cargo.toml`:
 
 ```toml
-eventuary = { version = "0.1.0-alpha.1", features = ["postgres"] }
+eventuary = { version = "0.1.0", features = ["postgres"] }
 ```
 
 …and import `eventuary::Event`, `eventuary::postgres::PgReader`, etc.
@@ -245,14 +245,16 @@ lives in `EventFilter` (organization, topic patterns, namespace pattern,
 key set, metadata subset, `end_at`); positional/cursor concerns live on
 the subscription itself.
 
-- `MemorySubscription { filter, limit }`
+- `MemorySubscription { limit }`
 - `SqliteSubscription { start: StartFrom<SqliteCursor>, stop_at: StopAt<SqliteCursor>, filter, partitions: PartitionSelection, batch_size, limit }`
 - `PgSubscription { start: StartFrom<PgCursor>, stop_at: StopAt<PgCursor>, filter, partitions: PartitionSelection, batch_size, limit }`
-- `KafkaSubscription { topics, consumer_group_id, start_from, event_filter, limit }`
-- `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, event_filter, limit }`
+- `KafkaSubscription { topics, consumer_group_id, start_from, limit }`
+- `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, limit }`
 
 SQL backends push the org / topic / namespace / start-from filters into the
-SQL query to prune at the DB; Kafka/SQS apply them in the consumer loop.
+SQL query to prune at the DB. Memory, Kafka, and SQS readers do not carry
+`EventFilter` in their subscription shape; compose them with `FilteredReader`
+when predicate filtering should happen after delivery.
 
 `PartitionSelection` controls which partitions a SQL subscription fetches:
 
@@ -598,7 +600,8 @@ factory. Until that lands, per-backend integration tests
 - `aws-sdk-sqs` long-polling (`wait_time_seconds`). Max 10 messages per
   receive (SQS limit, enforced in `validate()`).
 - `SqsSubscription` carries queue URL, wait time, visibility timeout, max
-  message count, `EventFilter`, and optional limit.
+  message count, and optional limit. Compose with `FilteredReader` if
+  predicate filtering is needed after delivery.
 - `BatchedAcker<String>` token = receipt handle. `SqsFlusher` -> batch
   `DeleteMessageBatch` (10 per call).
 - Queue semantics: no seek/replay cursor; delivered cursor is `NoCursor`.
@@ -692,6 +695,12 @@ Use `Arc::clone(&x)` instead of `x.clone()` for ref-counted pointers (the
 - **No `Co-Authored-By`.** No agent metadata in commits.
 - **Never push.** Agents commit; the maintainer pushes.
 - **Never stage** without explicit permission.
+- **Never commit or stage `docs/`.** The `docs/` tree is reserved for
+  durable, human-authored documentation and agent-only artifacts that the
+  maintainer keeps untracked on disk. Do not add it to `.gitignore`
+  either — it must remain visible in `git status` so the maintainer can
+  curate it. If agent work produces a writeup worth keeping, propose
+  rewriting it into a concise human-facing doc and ask before committing.
 - **Do not change repo or global commit signing settings.** Agent-run
   signed commits often fail because GPG prompts. Use a one-off
   `git -c commit.gpgsign=false commit ...` only when the agent is
@@ -1039,8 +1048,12 @@ Worth knowing when changing the codebase:
   `Payload` because they own the wire boundary.
 - **Codec bridge sits at the boundary, not inside wrappers.**
   `DecodeReader<R, C, P>` and `EncodeWriter<W, C, P>` adapt
-  `Reader<Payload>` ↔ `Reader<P>` and `Writer<P>` → `Writer<Payload>` via
-  a `PayloadCodec<P>` / `EventCodec<P>`. Built-in codecs:
+  `Reader<Payload>` ↔ `Reader<P>` and `Writer<P>` → `Writer<Payload>` at
+  durable boundaries. Use `ReaderTypedExt::decode` and
+  `WriterTypedExt::encode` with `PayloadCodec<P>` implementations when only
+  the payload is transformed. Use `ReaderTypedExt::decode_event` and
+  `WriterTypedExt::encode_event` with `EventCodec<P>` implementations when
+  the codec needs full event-envelope context. Built-in codecs:
   `JsonPayloadCodec` (serde-based), `PayloadPassthroughCodec` (identity),
   and `PayloadEventCodec<C>` (lifts a payload codec to a full event
   codec). `DecodeErrorDisposition::{AckInner, NackInner, Surface}`
@@ -1099,7 +1112,7 @@ to [trusted publishing] is a future improvement.
 # 1. Bump workspace.package.version in the root Cargo.toml
 # 2. Commit + push (maintainer)
 # 3. Create and publish a GitHub Release targeting main.
-#    Use tag v0.1.0-alpha.1 and title v0.1.0-alpha.1.
+#    Use tag v0.1.0 and title v0.1.0.
 # 4. Publish workflow runs automatically from the release event.
 ```
 

@@ -1,12 +1,13 @@
 //! PostgreSQL event log backend for [eventuary](https://crates.io/crates/eventuary).
 //!
-//! `BIGSERIAL` sequence on an append-only events table, `(organization, sequence)`,
-//! `(organization, topic, sequence)` and `(organization, namespace, sequence)`
-//! indexes. Consumer offsets keyed by `(consumer_group_id, stream_id,
-//! partition, partition_count)`.
+//! Provides an append-only events table backed by `sqlx::PgPool` with source
+//! cursors (`PgCursor`) ordered by `BIGSERIAL` sequence. `PgReader` is a source
+//! reader: its acker advances only the active in-memory stream cursor, and nack
+//! leaves the row eligible for redelivery by that stream.
 //!
-//! Polling reader (no LISTEN/NOTIFY in this version). ack advances the
-//! checkpoint with a backwards-move guard, nack leaves it unchanged.
+//! Durable consumer progress is owned by `PgCheckpointStore` and composed with
+//! `eventuary_core::io::reader::CheckpointReader`. Checkpoints are keyed by
+//! `(consumer_group_id, stream_id, cursor_id)` and store the full cursor as JSON.
 //!
 //! Also ships postgres-backed implementations of the IO store traits:
 //! - [`PgMultiplexerStore`]

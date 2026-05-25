@@ -1,12 +1,14 @@
 //! SQLite event log backend for [eventuary](https://crates.io/crates/eventuary).
 //!
-//! Append-only events table with auto-incrementing sequence. Reader streams
-//! events in sequence order and supports consumer groups via a
-//! `consumer_offsets` table scoped by `(consumer_group_id, stream_id,
-//! partition, partition_count)`.
+//! Provides an append-only events table with auto-incrementing sequence cursors
+//! (`SqliteCursor`). `SqliteReader` is a source reader: its acker advances only
+//! the active in-memory stream cursor, and nack leaves the row eligible for
+//! redelivery by that stream. SQLite work runs in `tokio::task::spawn_blocking`
+//! to avoid blocking the async runtime.
 //!
-//! ack advances the checkpoint, nack leaves it unchanged. SQLite work runs in
-//! `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+//! Durable consumer progress is owned by `SqliteCheckpointStore` and composed
+//! with `eventuary_core::io::reader::CheckpointReader`. Checkpoints are keyed by
+//! `(consumer_group_id, stream_id, cursor_id)` and store the full cursor as JSON.
 //!
 //! Also ships sqlite-backed implementations of the IO store traits:
 //! - [`SqliteMultiplexerStore`]

@@ -1,13 +1,13 @@
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures::Stream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use eventuary_core::io::acker::NoopAcker;
 use eventuary_core::io::{Message, NoCursor, Reader};
-use eventuary_core::{Event, Payload, Result, StartFrom, StartableSubscription};
+use eventuary_core::{Error, Event, Payload, Result, StartFrom, StartableSubscription};
 
 #[derive(Debug, Clone, Default)]
 pub struct MemorySubscription {
@@ -48,7 +48,11 @@ impl<P: Send + 'static> Stream for InmemStream<P> {
         {
             return Poll::Ready(None);
         }
-        let mut rx = this.rx.try_lock().expect("inmem stream lock");
+        let Ok(mut rx) = this.rx.lock() else {
+            return Poll::Ready(Some(Err(Error::Store(
+                "memory reader lock poisoned".to_owned(),
+            ))));
+        };
         match rx.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
                 this.delivered += 1;

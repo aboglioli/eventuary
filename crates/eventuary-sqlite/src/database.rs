@@ -165,29 +165,31 @@ impl SqliteDatabase {
 }
 
 fn apply_migrations(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<()> {
-    // Every statement in the rendered migration is `CREATE TABLE IF NOT
-    // EXISTS` / `CREATE INDEX IF NOT EXISTS`, so applying every migration
-    // on every open is safe and avoids skipping configured-relation
-    // creation when the previous opener wrote `PRAGMA user_version`
-    // against a different relation pair.
-    //
-    // Exception: `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS`
-    // equivalent in SQLite, so we tolerate "duplicate column name" errors
-    // to achieve idempotency on re-open.
     for migration in migrations() {
         let sql = render_migration_sql(migration, config);
-        let result = conn.execute_batch(&sql);
-        match result {
-            Ok(()) => {}
-            Err(ref e) if is_duplicate_column_error(e) => {}
-            Err(e) => return Err(Error::Store(e.to_string())),
+        for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            let result = conn.execute(statement, []);
+            match result {
+                Ok(_) => {}
+                Err(ref e) if is_duplicate_add_column_error(statement, e) => {}
+                Err(e) => return Err(Error::Store(e.to_string())),
+            }
         }
     }
     Ok(())
 }
 
-fn is_duplicate_column_error(e: &rusqlite::Error) -> bool {
-    e.to_string().contains("duplicate column name")
+fn is_duplicate_add_column_error(statement: &str, e: &rusqlite::Error) -> bool {
+    is_add_column_statement(statement) && e.to_string().contains("duplicate column name")
+}
+
+fn is_add_column_statement(statement: &str) -> bool {
+    let normalized = statement
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    normalized.starts_with("ALTER TABLE ") && normalized.contains(" ADD COLUMN ")
 }
 
 fn migration_version(filename: &str) -> i64 {
@@ -202,6 +204,48 @@ fn migration_version(filename: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use rusqlite::Connection;
+
+    fn sqlite_master_count(conn: &Connection, object_type: &str, name: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            rusqlite::params![object_type, name],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn migrations_continue_after_duplicate_add_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        let config = SqliteDatabaseConfig::default();
+
+        for migration in &migrations()[..5] {
+            let sql = render_migration_sql(migration, &config);
+            conn.execute_batch(&sql).unwrap();
+        }
+
+        assert_eq!(
+            sqlite_master_count(
+                &conn,
+                "index",
+                "idx_event_stream_partitions_group_stream_count"
+            ),
+            0
+        );
+
+        apply_migrations(&conn, &config).unwrap();
+
+        assert_eq!(
+            sqlite_master_count(
+                &conn,
+                "index",
+                "idx_event_stream_partitions_group_stream_count"
+            ),
+            1
+        );
+    }
 
     #[test]
     fn open_in_memory_creates_schema() {
