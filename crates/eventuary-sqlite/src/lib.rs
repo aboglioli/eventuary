@@ -10,6 +10,12 @@
 //! with `eventuary_core::io::reader::CheckpointReader`. Checkpoints are keyed by
 //! `(consumer_group_id, stream_id, cursor_id)` and store the full cursor as JSON.
 //!
+//! Schema setup is component-owned. `SqliteWriter::connect(conn, config)`
+//! prepares only the event-log table, while
+//! `SqliteDedupeStore::connect(conn, config)` prepares only the dedupe table.
+//! `SqliteDatabase::open(...)` only opens a connection and does not create
+//! Eventuary tables.
+//!
 //! Also ships sqlite-backed implementations of the IO store traits:
 //! - [`SqliteMultiplexerStore`]
 //! - [`SqliteBufferStore`]

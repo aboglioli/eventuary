@@ -9,6 +9,12 @@
 //! `eventuary_core::io::reader::CheckpointReader`. Checkpoints are keyed by
 //! `(consumer_group_id, stream_id, cursor_id)` and store the full cursor as JSON.
 //!
+//! Schema setup is component-owned. `PgWriter::connect(pool, config).await`
+//! prepares only the event-log table, while
+//! `PgDedupeStore::connect(pool, config).await` prepares only the dedupe table.
+//! `PgDatabase::connect(...)` only opens a pool and does not create Eventuary
+//! tables.
+//!
 //! Also ships postgres-backed implementations of the IO store traits:
 //! - [`PgMultiplexerStore`]
 //! - [`PgBufferStore`]
