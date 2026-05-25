@@ -170,6 +170,12 @@ impl SqliteDatabase {
 
 fn apply_migrations(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<()> {
     for migration in migrations() {
+        if migration.filename == "0008_required_event_key.sql"
+            && event_key_already_not_null(conn, config)?
+        {
+            continue;
+        }
+
         let sql = render_migration_sql(migration, config);
         for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             let result = conn.execute(statement, []);
@@ -181,6 +187,25 @@ fn apply_migrations(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<
         }
     }
     Ok(())
+}
+
+fn event_key_already_not_null(conn: &Connection, config: &SqliteDatabaseConfig) -> Result<bool> {
+    let events_table = config.events_relation.table();
+    let pragma_sql = format!("PRAGMA table_info(\"{}\")", events_table);
+    let mut stmt = conn
+        .prepare(&pragma_sql)
+        .map_err(|e| Error::Store(e.to_string()))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| Error::Store(e.to_string()))?;
+    while let Some(row) = rows.next().map_err(|e| Error::Store(e.to_string()))? {
+        let name: String = row.get(1).map_err(|e| Error::Store(e.to_string()))?;
+        if name == "event_key" {
+            let notnull: i64 = row.get(3).map_err(|e| Error::Store(e.to_string()))?;
+            return Ok(notnull == 1);
+        }
+    }
+    Ok(false)
 }
 
 fn is_duplicate_add_column_error(statement: &str, e: &rusqlite::Error) -> bool {
@@ -322,5 +347,45 @@ mod tests {
         let sql = render_schema_sql(&config);
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"custom_events\""));
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"custom_offsets\""));
+    }
+
+    #[test]
+    fn apply_migrations_can_run_twice() {
+        let conn = Connection::open_in_memory().unwrap();
+        let config = SqliteDatabaseConfig::default();
+
+        apply_migrations(&conn, &config).unwrap();
+
+        conn.execute(
+            "INSERT INTO events (id, organization, namespace, topic, event_key, payload, content_type, metadata, timestamp, version) \
+             VALUES ('id-1', 'org', 'ns', 'topic', 'key-1', '{}', 'application/json', '{}', '2024-01-01T00:00:00Z', 1)",
+            [],
+        )
+        .unwrap();
+
+        apply_migrations(&conn, &config).unwrap();
+
+        let row_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "event row must survive second apply_migrations");
+
+        let temp_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'eventuary_required_key_migration_events'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            temp_table_count, 0,
+            "migration temp table must not exist after second apply_migrations (guard skipped rebuild)"
+        );
+
+        let is_not_null = {
+            let config = SqliteDatabaseConfig::default();
+            event_key_already_not_null(&conn, &config).unwrap()
+        };
+        assert!(is_not_null, "event_key must be NOT NULL after second apply_migrations");
     }
 }
