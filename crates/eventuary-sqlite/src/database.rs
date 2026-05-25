@@ -184,7 +184,11 @@ fn is_duplicate_add_column_error(statement: &str, e: &rusqlite::Error) -> bool {
 }
 
 fn is_add_column_statement(statement: &str) -> bool {
-    let normalized = statement.to_ascii_uppercase();
+    let normalized = statement
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
     normalized.starts_with("ALTER TABLE ") && normalized.contains(" ADD COLUMN ")
 }
 
