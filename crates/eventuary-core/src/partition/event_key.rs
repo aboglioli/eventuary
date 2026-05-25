@@ -18,6 +18,7 @@ impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for EventKeyPartitionKeyR
 }
 
 #[cfg(test)]
+#[allow(clippy::default_constructed_unit_structs)]
 mod tests {
     use super::*;
     use crate::event::Event;
