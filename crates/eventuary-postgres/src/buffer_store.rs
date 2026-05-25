@@ -15,6 +15,23 @@ use eventuary_core::io::reader::{BufferEntry, BufferStore};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const BUFFER_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {buffer_entries} (
+    id        BIGSERIAL    PRIMARY KEY,
+    event     JSONB        NOT NULL,
+    cursor    JSONB        NOT NULL,
+    pushed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_buffer_entries_pushed_at ON {buffer_entries} (pushed_at);
+"#;
+
+const BUFFER_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: BUFFER_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgBufferStoreConfig {
@@ -61,6 +78,33 @@ impl<C> PgBufferStore<C> {
             relation: Arc::new(config.relation.render()),
             _cursor: PhantomData,
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgBufferStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgBufferStoreConfig) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            BUFFER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{buffer_entries}",
+                relation: &config.relation,
+            }],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgBufferStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            BUFFER_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{buffer_entries}",
+                relation: &config.relation,
+            }],
+        )
     }
 }
 
@@ -143,5 +187,17 @@ where
 
     async fn nack(&self, _id: &Self::Id) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql =
+            PgBufferStore::<crate::reader::PgCursor>::schema_sql(&PgBufferStoreConfig::default());
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"buffer_entries\""));
     }
 }

@@ -8,6 +8,23 @@ use eventuary_core::io::{Cursor, CursorId};
 use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
+use crate::schema::{Migration, RelationReplacement};
+
+const CHECKPOINT_STORE_0001_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS {offsets} (
+    consumer_group_id TEXT  NOT NULL,
+    stream_id         TEXT  NOT NULL DEFAULT 'default',
+    cursor_id         TEXT  NOT NULL,
+    cursor            JSONB NOT NULL,
+    cursor_order      BYTEA NOT NULL DEFAULT ''::bytea,
+    PRIMARY KEY (consumer_group_id, stream_id, cursor_id)
+);
+"#;
+
+const CHECKPOINT_STORE_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: CHECKPOINT_STORE_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub struct PgCheckpointStoreConfig {
@@ -46,6 +63,33 @@ impl<C> PgCheckpointStore<C> {
             relation: Arc::new(config.offsets_relation.render()),
             _cursor: std::marker::PhantomData,
         }
+    }
+
+    pub async fn connect(pool: PgPool, config: PgCheckpointStoreConfig) -> Result<Self> {
+        Self::prepare_schema(&pool, &config).await?;
+        Ok(Self::new(pool, config))
+    }
+
+    pub async fn prepare_schema(pool: &PgPool, config: &PgCheckpointStoreConfig) -> Result<()> {
+        crate::schema::apply_schema(
+            pool,
+            CHECKPOINT_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{offsets}",
+                relation: &config.offsets_relation,
+            }],
+        )
+        .await
+    }
+
+    pub fn schema_sql(config: &PgCheckpointStoreConfig) -> String {
+        crate::schema::render_schema_sql(
+            CHECKPOINT_STORE_MIGRATIONS,
+            &[RelationReplacement {
+                token: "{offsets}",
+                relation: &config.offsets_relation,
+            }],
+        )
     }
 }
 
@@ -179,5 +223,13 @@ mod tests {
         let encoded = encode_cursor_id(&id).to_owned();
         assert_eq!(encoded, "partition:100:17");
         assert_eq!(decode_cursor_id(encoded), id);
+    }
+
+    #[test]
+    fn schema_sql_contains_expected_table() {
+        let sql = PgCheckpointStore::<crate::reader::PgCursor>::schema_sql(
+            &PgCheckpointStoreConfig::default(),
+        );
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"consumer_offsets\""));
     }
 }
