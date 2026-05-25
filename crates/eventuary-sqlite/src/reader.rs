@@ -549,7 +549,7 @@ async fn fetch_batch(
                 let organization: String = row.get(2)?;
                 let namespace: String = row.get(3)?;
                 let topic: String = row.get(4)?;
-                let key: Option<String> = row.get(5)?;
+                let key: String = row.get(5)?;
                 let payload_str: String = row.get(6)?;
                 let content_type: String = row.get(7)?;
                 let metadata_str: String = row.get(8)?;
@@ -720,17 +720,10 @@ mod tests {
     const PARTITION_COUNT: u16 = 4;
 
     fn event_with_key(key: &str) -> Event {
-        Event::builder(
-            "acme",
-            "/orders",
-            "order.placed",
-            Payload::from_string("{}"),
-        )
-        .unwrap()
-        .key(key)
-        .unwrap()
-        .build()
-        .unwrap()
+        Event::builder("acme", "/orders", "order.placed", key, Payload::from_string("{}"))
+            .unwrap()
+            .build()
+            .unwrap()
     }
 
     fn partition_for_key(key: &str) -> u16 {
@@ -752,7 +745,7 @@ mod tests {
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 NonZeroU16::new(PARTITION_COUNT).unwrap(),
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()
@@ -787,7 +780,7 @@ mod tests {
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 NonZeroU16::new(PARTITION_COUNT).unwrap(),
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()
@@ -828,8 +821,8 @@ mod tests {
             let key = msg
                 .event()
                 .key()
-                .map(|k| k.as_str().to_owned())
-                .unwrap_or_default();
+                .as_str()
+                .to_owned();
             msg.acker().ack().await.unwrap();
             received_keys.push(key);
         }
@@ -850,7 +843,7 @@ mod tests {
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 NonZeroU16::new(PARTITION_COUNT).unwrap(),
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()
@@ -904,8 +897,8 @@ mod tests {
             let key = msg
                 .event()
                 .key()
-                .map(|k| k.as_str().to_owned())
-                .unwrap_or_default();
+                .as_str()
+                .to_owned();
             msg.acker().ack().await.unwrap();
             received.push(key);
         }

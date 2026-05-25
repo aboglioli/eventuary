@@ -20,9 +20,7 @@ use eventuary_sqlite::reader::{
 use eventuary_sqlite::writer::SqliteWriter;
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
-    Event::builder(org, ns, topic, Payload::from_string("p"))
-        .unwrap()
-        .key(key)
+    Event::builder(org, ns, topic, key, Payload::from_string("p"))
         .unwrap()
         .build()
         .expect("valid event")
@@ -80,14 +78,14 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m0.event().key().unwrap().as_str(), "k0");
+    assert_eq!(m0.event().key().as_str(), "k0");
     m0.ack().await.unwrap();
     let m1 = timeout(Duration::from_secs(5), stream.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m1.event().key().unwrap().as_str(), "k1");
+    assert_eq!(m1.event().key().as_str(), "k1");
     m1.ack().await.unwrap();
     drop(stream);
 
@@ -106,7 +104,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(next.event().key().unwrap().as_str(), "k2");
+    assert_eq!(next.event().key().as_str(), "k2");
 }
 
 #[tokio::test]

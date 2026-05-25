@@ -20,17 +20,10 @@ use eventuary_sqlite::{
 };
 
 fn event_with_key(key: &str) -> Event {
-    Event::builder(
-        "acme",
-        "/orders",
-        "order.placed",
-        Payload::from_string("{}"),
-    )
-    .unwrap()
-    .key(key)
-    .unwrap()
-    .build()
-    .unwrap()
+    Event::builder("acme", "/orders", "order.placed", key, Payload::from_string("{}"))
+        .unwrap()
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -44,7 +37,7 @@ async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
         SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 partition_count,
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()
@@ -119,7 +112,7 @@ async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
         SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 partition_count,
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()
@@ -169,7 +162,7 @@ async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
 
     let mut delivered = Vec::new();
     while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(3), stream.next()).await {
-        let key = msg.event().key().map(|k| k.as_str().to_owned()).unwrap();
+        let key = msg.event().key().as_str().to_owned();
         msg.ack().await.unwrap();
         delivered.push(key);
         if delivered.len() == 1 {
@@ -190,7 +183,7 @@ async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
         SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 partition_count,
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()
@@ -246,7 +239,7 @@ async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
 
     let mut delivered = Vec::new();
     while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(3), stream.next()).await {
-        let key = msg.event().key().map(|k| k.as_str().to_owned()).unwrap();
+        let key = msg.event().key().as_str().to_owned();
         msg.ack().await.unwrap();
         delivered.push(key);
         if delivered.len() == 1 {

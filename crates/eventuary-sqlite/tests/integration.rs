@@ -15,9 +15,7 @@ use eventuary_sqlite::reader::{SqliteReader, SqliteReaderConfig, SqliteSubscript
 use eventuary_sqlite::writer::SqliteWriter;
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
-    Event::builder(org, ns, topic, Payload::from_string("payload"))
-        .unwrap()
-        .key(key)
+    Event::builder(org, ns, topic, key, Payload::from_string("payload"))
         .unwrap()
         .build()
         .expect("valid event")
@@ -57,7 +55,7 @@ async fn write_read_roundtrip() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().unwrap().as_str(), "k0");
+    assert_eq!(msg.event().key().as_str(), "k0");
 }
 
 #[tokio::test]
@@ -65,9 +63,7 @@ async fn reader_roundtrips_lineage_fields() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     let writer = SqliteWriter::new(db.conn());
     let parent_id = EventId::new();
-    let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-        .unwrap()
-        .key("k")
+    let event = Event::builder("acme", "/x", "thing.happened", "k", Payload::from_string("p"))
         .unwrap()
         .parent_id(parent_id)
         .correlation_id("corr")
@@ -112,7 +108,7 @@ async fn sqlite_reader_advances_after_ack() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(first.event().key().unwrap().as_str(), "k0");
+    assert_eq!(first.event().key().as_str(), "k0");
     first.ack().await.unwrap();
 
     let second = timeout(Duration::from_secs(5), stream.next())
@@ -120,7 +116,7 @@ async fn sqlite_reader_advances_after_ack() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second.event().key().unwrap().as_str(), "k1");
+    assert_eq!(second.event().key().as_str(), "k1");
 }
 
 #[tokio::test]
@@ -183,7 +179,7 @@ async fn start_from_after_cursor_resumes() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().unwrap().as_str(), "k1");
+    assert_eq!(msg.event().key().as_str(), "k1");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -212,7 +208,7 @@ async fn start_from_latest_skips_existing_events() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().unwrap().as_str(), "new");
+    assert_eq!(msg.event().key().as_str(), "new");
 }
 
 #[tokio::test]
@@ -242,7 +238,7 @@ async fn start_from_timestamp_filters_old_events() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().unwrap().as_str(), "after");
+    assert_eq!(msg.event().key().as_str(), "after");
 }
 
 #[tokio::test]
@@ -279,14 +275,14 @@ async fn topic_filter() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m1.event().key().unwrap().as_str(), "t1");
+    assert_eq!(m1.event().key().as_str(), "t1");
     m1.ack().await.unwrap();
     let m2 = timeout(Duration::from_secs(5), stream.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m2.event().key().unwrap().as_str(), "t3");
+    assert_eq!(m2.event().key().as_str(), "t3");
 }
 
 #[tokio::test]
@@ -325,14 +321,14 @@ async fn namespace_filter() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m1.event().key().unwrap().as_str(), "b1");
+    assert_eq!(m1.event().key().as_str(), "b1");
     m1.ack().await.unwrap();
     let m2 = timeout(Duration::from_secs(5), stream.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(m2.event().key().unwrap().as_str(), "b2");
+    assert_eq!(m2.event().key().as_str(), "b2");
 }
 
 #[tokio::test]
@@ -359,7 +355,7 @@ async fn stop_at_current_end_finishes_after_existing_events() {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), format!("k{i}"));
+        assert_eq!(msg.event().key().as_str(), format!("k{i}"));
         msg.ack().await.unwrap();
     }
 
@@ -417,7 +413,7 @@ async fn stop_at_cursor_finishes_at_inclusive_cursor() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(first.event().key().unwrap().as_str(), "k0");
+    assert_eq!(first.event().key().as_str(), "k0");
     first.ack().await.unwrap();
 
     let second = timeout(Duration::from_secs(5), stream.next())
@@ -425,7 +421,7 @@ async fn stop_at_cursor_finishes_at_inclusive_cursor() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second.event().key().unwrap().as_str(), "k1");
+    assert_eq!(second.event().key().as_str(), "k1");
     second.ack().await.unwrap();
 
     let done = timeout(Duration::from_secs(5), stream.next())
@@ -458,5 +454,5 @@ async fn stop_at_never_waits_for_future_events() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(msg.event().key().unwrap().as_str(), "future");
+    assert_eq!(msg.event().key().as_str(), "future");
 }

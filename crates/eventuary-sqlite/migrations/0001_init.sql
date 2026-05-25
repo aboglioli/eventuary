@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS {events} (
     organization TEXT NOT NULL,
     namespace TEXT NOT NULL,
     topic TEXT NOT NULL,
-    event_key TEXT,
+    event_key TEXT NOT NULL,
     payload TEXT NOT NULL,
     content_type TEXT NOT NULL,
     metadata TEXT NOT NULL,
