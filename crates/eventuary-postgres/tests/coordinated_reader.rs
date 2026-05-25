@@ -422,6 +422,158 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_fresh_latest_skips_existing_events() {
+    let (_c, pool) = start_postgres().await;
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer = PgWriter::new_with_config(
+        pool.clone(),
+        PgWriterConfig {
+            partitioning: PgPartitioningConfig::inline(
+                partition_count,
+                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..PgWriterConfig::default()
+        },
+    );
+
+    writer.write(&event_with_key("old-1")).await.unwrap();
+    writer.write(&event_with_key("old-2")).await.unwrap();
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let reader = PgCoordinatedReader::new(
+        PgReader::new(
+            pool.clone(),
+            PgReaderConfig {
+                poll_interval: Duration::from_millis(20),
+                ..PgReaderConfig::default()
+            },
+        ),
+        Arc::clone(&coordinator),
+        OwnerId::new("fresh-latest-owner").unwrap(),
+        PgCoordinatedReaderConfig {
+            rebalance_interval: Duration::from_millis(50),
+            partition_lease_duration: Duration::from_secs(10),
+            partition_slack: 0,
+            ..PgCoordinatedReaderConfig::default()
+        },
+    );
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("fresh-latest-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let subscription = PgCoordinatedSubscription {
+        inner: PgSubscription::default(),
+        scope,
+        partition_count,
+        start: StartFrom::Latest,
+    };
+
+    let mut stream = reader.read(subscription).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    writer.write(&event_with_key("new-1")).await.unwrap();
+
+    let mut delivered = Vec::new();
+    while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream.next()).await {
+        let key = msg.event().key().map(|k| k.as_str().to_owned()).unwrap();
+        msg.ack().await.unwrap();
+        delivered.push(key);
+        if delivered.len() == 1 {
+            break;
+        }
+    }
+
+    assert_eq!(delivered, vec!["new-1".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
+    let (_c, pool) = start_postgres().await;
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer = PgWriter::new_with_config(
+        pool.clone(),
+        PgWriterConfig {
+            partitioning: PgPartitioningConfig::inline(
+                partition_count,
+                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..PgWriterConfig::default()
+        },
+    );
+
+    writer
+        .write(&event_with_key("old-before-cutoff"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let cutoff = chrono::Utc::now();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    writer
+        .write(&event_with_key("new-after-cutoff"))
+        .await
+        .unwrap();
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let reader = PgCoordinatedReader::new(
+        PgReader::new(
+            pool.clone(),
+            PgReaderConfig {
+                poll_interval: Duration::from_millis(20),
+                ..PgReaderConfig::default()
+            },
+        ),
+        Arc::clone(&coordinator),
+        OwnerId::new("fresh-timestamp-owner").unwrap(),
+        PgCoordinatedReaderConfig {
+            rebalance_interval: Duration::from_millis(50),
+            partition_lease_duration: Duration::from_secs(10),
+            partition_slack: 0,
+            ..PgCoordinatedReaderConfig::default()
+        },
+    );
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("fresh-timestamp-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let subscription = PgCoordinatedSubscription {
+        inner: PgSubscription::default(),
+        scope,
+        partition_count,
+        start: StartFrom::Timestamp(cutoff),
+    };
+
+    let mut stream = reader.read(subscription).await.unwrap();
+
+    let mut delivered = Vec::new();
+    while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(3), stream.next()).await {
+        let key = msg.event().key().map(|k| k.as_str().to_owned()).unwrap();
+        msg.ack().await.unwrap();
+        delivered.push(key);
+        if delivered.len() == 1 {
+            break;
+        }
+    }
+
+    assert_eq!(delivered, vec!["new-after-cutoff".to_owned()]);
+}
+
 async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashMap<i32, String> {
     let rows = sqlx::query(
         "SELECT partition_id, owner_id FROM event_stream_partitions \

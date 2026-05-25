@@ -42,6 +42,10 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0005_partition_coordination.sql",
         template: include_str!("../migrations/0005_partition_coordination.sql"),
     },
+    Migration {
+        filename: "0006_partition_count_coordination.sql",
+        template: include_str!("../migrations/0006_partition_count_coordination.sql"),
+    },
 ];
 
 pub fn migrations() -> &'static [Migration] {

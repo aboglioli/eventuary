@@ -29,6 +29,23 @@ struct PartitionState<C> {
     lease_until: Option<DateTime<Utc>>,
     generation: Generation,
     checkpoint_cursor: Option<C>,
+    partition_count: u16,
+}
+
+fn partition_count_mismatch_error(
+    scope: &CheckpointScope,
+    partition_id: u16,
+    stored: u16,
+    requested: u16,
+) -> Error {
+    Error::Config(format!(
+        "partition count mismatch for scope {} stream {} partition {}: stored {}, requested {}",
+        scope.consumer_group_id.as_str(),
+        scope.stream_id.as_str(),
+        partition_id,
+        stored,
+        requested,
+    ))
 }
 
 #[derive(Debug)]
@@ -126,6 +143,7 @@ where
                     lease_until: Some(lease_until),
                     generation,
                     checkpoint_cursor: None,
+                    partition_count: partition.count(),
                 };
                 let lease = PartitionLease {
                     scope: scope.clone(),
@@ -139,6 +157,14 @@ where
                 Ok(Some(lease))
             }
             Some(entry) => {
+                if entry.partition_count != partition.count() {
+                    return Err(partition_count_mismatch_error(
+                        scope,
+                        partition.id(),
+                        entry.partition_count,
+                        partition.count(),
+                    ));
+                }
                 let is_expired = entry.lease_until.map(|t| t <= now).unwrap_or(true);
                 let is_unowned = entry.owner_id.is_none();
                 let is_self = entry.owner_id.as_ref() == Some(owner_id);
@@ -173,6 +199,16 @@ where
             partition_id: lease.partition.id(),
         };
         let mut state = self.state.lock().await;
+        if let Some(entry) = state.partitions.get(&key)
+            && entry.partition_count != lease.partition.count()
+        {
+            return Err(partition_count_mismatch_error(
+                &lease.scope,
+                lease.partition.id(),
+                entry.partition_count,
+                lease.partition.count(),
+            ));
+        }
         match state.partitions.get_mut(&key) {
             Some(entry)
                 if entry.owner_id.as_ref() == Some(&lease.owner_id)
@@ -196,6 +232,16 @@ where
             partition_id: lease.partition.id(),
         };
         let mut state = self.state.lock().await;
+        if let Some(entry) = state.partitions.get(&key)
+            && entry.partition_count != lease.partition.count()
+        {
+            return Err(partition_count_mismatch_error(
+                &lease.scope,
+                lease.partition.id(),
+                entry.partition_count,
+                lease.partition.count(),
+            ));
+        }
         match state.partitions.get_mut(&key) {
             Some(entry)
                 if entry.owner_id.as_ref() == Some(&lease.owner_id)
@@ -225,6 +271,16 @@ where
             partition_id: lease.partition.id(),
         };
         let mut state = self.state.lock().await;
+        if let Some(entry) = state.partitions.get(&key)
+            && entry.partition_count != lease.partition.count()
+        {
+            return Err(partition_count_mismatch_error(
+                &lease.scope,
+                lease.partition.id(),
+                entry.partition_count,
+                lease.partition.count(),
+            ));
+        }
         match state.partitions.get_mut(&key) {
             Some(entry)
                 if entry.owner_id.as_ref() == Some(&lease.owner_id)
@@ -457,6 +513,35 @@ mod tests {
             .unwrap();
         let result = coord.checkpoint(&lease_a, TestCursor(100)).await;
         assert!(matches!(result, Err(Error::OwnershipLost(_))));
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_partition_count_mismatch() {
+        let coord: MemoryPartitionCoordinator<TestCursor> = MemoryPartitionCoordinator::new();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+
+        let count_four = NonZeroU16::new(4).unwrap();
+        let count_eight = NonZeroU16::new(8).unwrap();
+        let p_four = Partition::new(0, count_four).unwrap();
+        let p_eight = Partition::new(0, count_eight).unwrap();
+
+        coord
+            .claim(&s, &owner_a, p_four, Duration::from_millis(1))
+            .await
+            .unwrap()
+            .unwrap();
+        sleep(Duration::from_millis(5)).await;
+
+        let err = coord
+            .claim(&s, &owner_b, p_eight, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Config(message) if message.contains("partition count mismatch"))
+        );
     }
 
     #[tokio::test]

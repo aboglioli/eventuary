@@ -88,7 +88,7 @@ async fn pg_coordinator_claim_free_partition_succeeds() {
     let lease = result.expect("should get lease");
 
     assert_eq!(lease.generation.get(), 1);
-    assert_eq!(lease.checkpoint_cursor.unwrap().sequence, 0);
+    assert!(lease.checkpoint_cursor.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -330,6 +330,33 @@ async fn pg_coordinator_checkpoint_after_release_returns_ownership_lost() {
         .await
         .unwrap_err();
     assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_coordinator_rejects_partition_count_mismatch() {
+    let (_c, pool) = start_postgres().await;
+    let coord = coordinator(pool);
+    let s = scope();
+    let owner_a = OwnerId::new("worker-a").unwrap();
+    let owner_b = OwnerId::new("worker-b").unwrap();
+    let p_four = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
+    let p_eight = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+
+    coord
+        .claim(&s, &owner_a, p_four, std::time::Duration::from_millis(1))
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let err = coord
+        .claim(&s, &owner_b, p_eight, std::time::Duration::from_secs(10))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, eventuary_core::Error::Config(ref message) if message.contains("partition count mismatch")),
+        "expected partition count mismatch error, got {err:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

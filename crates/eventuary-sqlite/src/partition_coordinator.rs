@@ -129,6 +129,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = scope.stream_id.as_str().to_owned();
         let owner = owner_id.as_str().to_owned();
         let partition_id_i64 = partition.id() as i64;
+        let partition_count_i64 = partition.count() as i64;
         let now = Utc::now().to_rfc3339();
         let scope = scope.clone();
         let owner_id = owner_id.clone();
@@ -136,22 +137,32 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
             let sql = format!(
                 "INSERT INTO {partitions} \
-                   (consumer_group_id, stream_id, partition_id, owner_id, lease_until, generation, checkpoint_sequence) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 0) \
+                   (consumer_group_id, stream_id, partition_id, partition_count, owner_id, lease_until, generation, checkpoint_sequence) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 0) \
                  ON CONFLICT (consumer_group_id, stream_id, partition_id) DO UPDATE \
                  SET owner_id = excluded.owner_id, \
                      lease_until = excluded.lease_until, \
+                     partition_count = COALESCE({partitions}.partition_count, excluded.partition_count), \
                      generation = {partitions}.generation + 1 \
-                 WHERE {partitions}.owner_id IS NULL \
-                    OR {partitions}.lease_until IS NULL \
-                    OR {partitions}.lease_until < ?6 \
-                    OR {partitions}.owner_id = excluded.owner_id \
+                 WHERE ({partitions}.partition_count IS NULL OR {partitions}.partition_count = excluded.partition_count) \
+                   AND ({partitions}.owner_id IS NULL \
+                        OR {partitions}.lease_until IS NULL \
+                        OR {partitions}.lease_until < ?7 \
+                        OR {partitions}.owner_id = excluded.owner_id) \
                  RETURNING owner_id, lease_until, generation, checkpoint_sequence"
             );
             let row = guard
                 .query_row(
                     &sql,
-                    rusqlite::params![group, stream, partition_id_i64, owner, lease_until, now],
+                    rusqlite::params![
+                        group,
+                        stream,
+                        partition_id_i64,
+                        partition_count_i64,
+                        owner,
+                        lease_until,
+                        now
+                    ],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,
@@ -168,7 +179,34 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                 })
                 .map_err(|e| Error::Store(e.to_string()))?;
             match row {
-                None => Ok(None),
+                None => {
+                    let check_sql = format!(
+                        "SELECT partition_count FROM {partitions} \
+                         WHERE consumer_group_id = ?1 AND stream_id = ?2 AND partition_id = ?3"
+                    );
+                    let stored: Option<i64> = guard
+                        .query_row(
+                            &check_sql,
+                            rusqlite::params![group, stream, partition_id_i64],
+                            |r| r.get::<_, Option<i64>>(0),
+                        )
+                        .map(Some)
+                        .or_else(|e| match e {
+                            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                            other => Err(other),
+                        })
+                        .map_err(|e| Error::Store(e.to_string()))?
+                        .flatten();
+                    if let Some(stored) = stored
+                        && stored != partition_count_i64
+                    {
+                        return Err(Error::Config(format!(
+                            "partition count mismatch for scope {} stream {} partition {}: stored {}, requested {}",
+                            group, stream, partition_id_i64, stored, partition_count_i64,
+                        )));
+                    }
+                    Ok(None)
+                }
                 Some((_returned_owner, lease_until_text, generation, checkpoint_sequence)) => {
                     let lease_until = chrono::DateTime::parse_from_rfc3339(&lease_until_text)
                         .map(|dt| dt.with_timezone(&Utc))
@@ -180,7 +218,8 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         owner_id,
                         partition,
                         generation: Generation::from_i64(generation),
-                        checkpoint_cursor: Some(SqliteCursor::new(checkpoint_sequence)),
+                        checkpoint_cursor: (checkpoint_sequence > 0)
+                            .then_some(SqliteCursor::new(checkpoint_sequence)),
                         lease_until,
                     }))
                 }
@@ -202,6 +241,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = lease.scope.stream_id.as_str().to_owned();
         let owner = lease.owner_id.as_str().to_owned();
         let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
@@ -212,7 +252,8 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                    AND stream_id = ?2 \
                    AND partition_id = ?3 \
                    AND owner_id = ?4 \
-                   AND generation = ?6"
+                   AND generation = ?6 \
+                   AND partition_count = ?7"
             );
             let affected = guard
                 .execute(
@@ -223,11 +264,20 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         partition_id_i64,
                         owner,
                         lease_until,
-                        generation
+                        generation,
+                        partition_count_i64
                     ],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             if affected == 0 {
+                check_partition_count_mismatch(
+                    &guard,
+                    &partitions,
+                    &group,
+                    &stream,
+                    partition_id_i64,
+                    partition_count_i64,
+                )?;
                 return Err(Error::OwnershipLost(format!(
                     "partition {partition_id_i64} generation {generation}"
                 )));
@@ -245,6 +295,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = lease.scope.stream_id.as_str().to_owned();
         let owner = lease.owner_id.as_str().to_owned();
         let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         tokio::task::spawn_blocking(move || {
             let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
@@ -257,15 +308,31 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                    AND stream_id = ?2 \
                    AND partition_id = ?3 \
                    AND owner_id = ?4 \
-                   AND generation = ?5"
+                   AND generation = ?5 \
+                   AND partition_count = ?6"
             );
             let affected = guard
                 .execute(
                     &sql,
-                    rusqlite::params![group, stream, partition_id_i64, owner, generation],
+                    rusqlite::params![
+                        group,
+                        stream,
+                        partition_id_i64,
+                        owner,
+                        generation,
+                        partition_count_i64
+                    ],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             if affected == 0 {
+                check_partition_count_mismatch(
+                    &guard,
+                    &partitions,
+                    &group,
+                    &stream,
+                    partition_id_i64,
+                    partition_count_i64,
+                )?;
                 return Err(Error::OwnershipLost(format!(
                     "partition {partition_id_i64} generation {generation}"
                 )));
@@ -287,6 +354,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = lease.scope.stream_id.as_str().to_owned();
         let owner = lease.owner_id.as_str().to_owned();
         let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         let sequence = cursor.sequence;
         tokio::task::spawn_blocking(move || {
@@ -299,17 +367,26 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                    AND partition_id = ?3 \
                    AND owner_id = ?4 \
                    AND generation = ?5 \
+                   AND partition_count = ?7 \
                    AND ?6 > {partitions}.checkpoint_sequence"
             );
             let affected = guard
                 .execute(
                     &sql,
-                    rusqlite::params![group, stream, partition_id_i64, owner, generation, sequence],
+                    rusqlite::params![
+                        group,
+                        stream,
+                        partition_id_i64,
+                        owner,
+                        generation,
+                        sequence,
+                        partition_count_i64
+                    ],
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             if affected == 0 {
                 let check_sql = format!(
-                    "SELECT owner_id, generation FROM {partitions} \
+                    "SELECT owner_id, generation, partition_count FROM {partitions} \
                      WHERE consumer_group_id = ?1 AND stream_id = ?2 AND partition_id = ?3"
                 );
                 let check_row = guard
@@ -320,6 +397,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                             Ok((
                                 r.get::<_, Option<String>>(0)?,
                                 r.get::<_, i64>(1)?,
+                                r.get::<_, Option<i64>>(2)?,
                             ))
                         },
                     )
@@ -330,7 +408,14 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                     })
                     .map_err(|e| Error::Store(e.to_string()))?;
                 match check_row {
-                    Some((current_owner, current_generation)) => {
+                    Some((current_owner, current_generation, current_count)) => {
+                        if let Some(stored) = current_count
+                            && stored != partition_count_i64
+                        {
+                            return Err(Error::Config(format!(
+                                "partition count mismatch for scope {group} stream {stream} partition {partition_id_i64}: stored {stored}, requested {partition_count_i64}"
+                            )));
+                        }
                         if current_generation == generation
                             && current_owner.as_deref() == Some(owner.as_str())
                         {
@@ -351,6 +436,39 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         .await
         .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
     }
+}
+
+fn check_partition_count_mismatch(
+    guard: &rusqlite::Connection,
+    partitions: &str,
+    group: &str,
+    stream: &str,
+    partition_id: i64,
+    requested_count: i64,
+) -> Result<()> {
+    let sql = format!(
+        "SELECT partition_count FROM {partitions} \
+         WHERE consumer_group_id = ?1 AND stream_id = ?2 AND partition_id = ?3"
+    );
+    let stored: Option<i64> = guard
+        .query_row(&sql, rusqlite::params![group, stream, partition_id], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| Error::Store(e.to_string()))?
+        .flatten();
+    if let Some(stored) = stored
+        && stored != requested_count
+    {
+        return Err(Error::Config(format!(
+            "partition count mismatch for scope {group} stream {stream} partition {partition_id}: stored {stored}, requested {requested_count}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -426,7 +544,7 @@ mod tests {
             .expect("should get lease");
 
         assert_eq!(lease.generation.get(), 1);
-        assert_eq!(lease.checkpoint_cursor.unwrap().sequence, 0);
+        assert!(lease.checkpoint_cursor.is_none());
     }
 
     #[tokio::test]
@@ -661,6 +779,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_partition_count_mismatch() {
+        let coord = make_coordinator();
+        let s = scope();
+        let owner_a = OwnerId::new("worker-a").unwrap();
+        let owner_b = OwnerId::new("worker-b").unwrap();
+        let p_four = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
+        let p_eight = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+
+        coord
+            .claim(&s, &owner_a, p_four, std::time::Duration::from_millis(1))
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let err = coord
+            .claim(&s, &owner_b, p_eight, std::time::Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, eventuary_core::Error::Config(ref message) if message.contains("partition count mismatch")),
+            "expected partition count mismatch error, got {err:?}"
+        );
     }
 
     #[tokio::test]
