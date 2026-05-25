@@ -125,6 +125,7 @@ mod tests {
             "acme",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
                 email: "a@example.com".to_owned(),

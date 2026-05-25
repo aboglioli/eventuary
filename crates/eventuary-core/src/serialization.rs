@@ -222,10 +222,16 @@ mod tests {
 
     #[test]
     fn field_order_matches_event() {
-        let event = Event::builder("acme", "/x", "thing.happened", "k", Payload::from_string("p"))
-            .unwrap()
-            .build()
-            .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let json = serialized.to_json_string().unwrap();
         let id_pos = json.find("\"id\"").unwrap();
@@ -381,15 +387,21 @@ mod tests {
     #[test]
     fn lineage_fields_roundtrip() {
         let parent_id = EventId::new();
-        let event = Event::builder("acme", "/x", "thing.happened", "k", Payload::from_string("p"))
-            .unwrap()
-            .parent_id(parent_id)
-            .correlation_id("corr")
-            .unwrap()
-            .causation_id("cause")
-            .unwrap()
-            .build()
-            .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .parent_id(parent_id)
+        .correlation_id("corr")
+        .unwrap()
+        .causation_id("cause")
+        .unwrap()
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
         assert_eq!(serialized.key.as_str(), "k");

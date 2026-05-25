@@ -175,10 +175,16 @@ mod tests {
 
         async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
             *self.seen_starts.lock().unwrap() = Some(subscription.starts);
-            let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-                .unwrap()
-                .build()
-                .unwrap();
+            let event = Event::builder(
+                "acme",
+                "/x",
+                "thing.happened",
+                "thing-1",
+                Payload::from_string("p"),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
             Ok(Box::pin(stream::once(async move {
                 Ok(Message::new(event, NoopAcker, TestCursor(42)))
             })))
@@ -273,6 +279,7 @@ mod tests {
                 "acme",
                 "/typed",
                 "typed.encoded_cursor",
+                "thing-1",
                 TypedEventPayload {
                     value: "typed-cursor".to_owned(),
                 },

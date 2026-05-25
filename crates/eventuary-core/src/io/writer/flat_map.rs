@@ -117,7 +117,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", Payload::from_string("p")).unwrap()
     }
 
     #[tokio::test]
@@ -130,6 +130,7 @@ mod tests {
                     event.organization().as_str(),
                     event.namespace().as_str(),
                     format!("{}.first", event.topic().as_str()),
+                    event.key().as_str(),
                     Payload::from_string("p"),
                 )
                 .unwrap(),
@@ -137,6 +138,7 @@ mod tests {
                     event.organization().as_str(),
                     event.namespace().as_str(),
                     format!("{}.second", event.topic().as_str()),
+                    event.key().as_str(),
                     Payload::from_string("p"),
                 )
                 .unwrap(),
@@ -190,12 +192,14 @@ mod tests {
                     event.organization().as_str(),
                     event.namespace().as_str(),
                     format!("{}.a", event.topic().as_str()),
+                    event.key().as_str(),
                     Payload::from_string("p"),
                 )?,
                 Event::create(
                     event.organization().as_str(),
                     event.namespace().as_str(),
                     format!("{}.b", event.topic().as_str()),
+                    event.key().as_str(),
                     Payload::from_string("p"),
                 )?,
             ])

@@ -101,12 +101,16 @@ mod tests {
     use crate::payload::Payload;
 
     fn ev(key: &str) -> Event {
-        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key(key)
-            .unwrap()
-            .build()
-            .unwrap()
+        Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            key,
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .build()
+        .unwrap()
     }
 
     struct CountingFlusher {

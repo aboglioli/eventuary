@@ -562,12 +562,16 @@ mod tests {
     }
 
     fn ev(key: &str) -> Event {
-        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key(key)
-            .unwrap()
-            .build()
-            .expect("valid event")
+        Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            key,
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .build()
+        .expect("valid event")
     }
 
     #[tokio::test]
@@ -768,7 +772,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k0");
+        assert_eq!(msg.event().key().as_str(), "k0");
     }
 
     #[tokio::test]
@@ -818,7 +822,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg.event().key().unwrap().as_str(), "k0");
+        assert_eq!(msg.event().key().as_str(), "k0");
     }
 
     #[tokio::test]

@@ -758,6 +758,7 @@ mod tests {
                 "acme",
                 "/typed",
                 "typed.delivered",
+                "thing-1",
                 TestPayload {
                     value: "typed-value".to_owned(),
                 },

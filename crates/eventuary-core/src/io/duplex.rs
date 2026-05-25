@@ -100,7 +100,13 @@ mod tests {
         type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor>>> + Send>>;
 
         async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
-            let event = Event::create("org", "/x", "thing.happened", Payload::from_string("p"))?;
+            let event = Event::create(
+                "org",
+                "/x",
+                "thing.happened",
+                "thing-1",
+                Payload::from_string("p"),
+            )?;
             Ok(Box::pin(stream::once(async move {
                 Ok(Message::new(event, NoopAcker, NoCursor))
             })))
@@ -116,8 +122,14 @@ mod tests {
             },
             SingleEventReader,
         );
-        let event =
-            Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+        let event = Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            "thing-1",
+            Payload::from_string("p"),
+        )
+        .unwrap();
 
         duplex.write(&event).await.unwrap();
         duplex.write_all(&[event.clone(), event]).await.unwrap();

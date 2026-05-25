@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", Payload::from_string("p")).unwrap()
     }
 
     fn config(max_events: usize, max_wait: Duration) -> BatchWriterConfig {

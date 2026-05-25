@@ -363,20 +363,37 @@ mod tests {
     #[test]
     fn builder_rejects_empty_required_key() {
         assert!(
-            Event::builder("acme", "/x", "thing.happened", "", Payload::from_string("p")).is_err()
+            Event::builder(
+                "acme",
+                "/x",
+                "thing.happened",
+                "",
+                Payload::from_string("p")
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn builder_rejects_empty_optional_ids() {
-        let builder =
-            Event::builder("acme", "/x", "thing.happened", "k", Payload::from_string("p"))
-                .unwrap();
+        let builder = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap();
         assert!(builder.correlation_id("").is_err());
 
-        let builder =
-            Event::builder("acme", "/x", "thing.happened", "k", Payload::from_string("p"))
-                .unwrap();
+        let builder = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap();
         assert!(builder.causation_id("").is_err());
     }
 

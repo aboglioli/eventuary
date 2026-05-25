@@ -230,6 +230,7 @@ mod tests {
             "acme",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
             },
@@ -255,6 +256,7 @@ mod tests {
             "acme",
             "/users",
             "user.deleted",
+            "thing-1",
             DomainEvent::UserDeleted(UserDeleted {
                 user_id: "u-1".to_owned(),
             }),
@@ -308,6 +310,7 @@ mod tests {
                 "acme",
                 "/users",
                 "user.updated",
+                "thing-1",
                 WirePayload::from_json(&UserUpdated {
                     user_id: "u-1".to_owned(),
                 })
@@ -373,6 +376,7 @@ mod tests {
                         "acme",
                         "/users",
                         "user.updated",
+                        "thing-1",
                         WirePayload::from_string("bad"),
                     )
                     .unwrap(),
@@ -428,6 +432,7 @@ mod tests {
                         "acme",
                         "/users",
                         "user.updated",
+                        "thing-1",
                         WirePayload::from_string("bad"),
                     )
                     .unwrap(),
@@ -461,6 +466,7 @@ mod tests {
                 "acme",
                 "/users",
                 "user.deleted",
+                "thing-1",
                 WirePayload::from_json(&UserDeleted {
                     user_id: "u-1".to_owned(),
                 })
@@ -493,6 +499,7 @@ mod tests {
                     "acme",
                     "/users",
                     "user.updated",
+                    "thing-1",
                     UserUpdated {
                         user_id: "u-1".to_owned(),
                     },
@@ -514,6 +521,7 @@ mod tests {
                 "acme",
                 "/users",
                 "user.updated",
+                "thing-1",
                 WirePayload::from_json(&UserUpdated {
                     user_id: "u-1".to_owned(),
                 })
@@ -541,6 +549,7 @@ mod tests {
                     "acme",
                     "/users",
                     "user.updated",
+                    "thing-1",
                     UserUpdated {
                         user_id: "u-1".to_owned(),
                     },

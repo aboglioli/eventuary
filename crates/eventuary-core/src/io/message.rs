@@ -136,6 +136,7 @@ mod tests {
             "org",
             "/x",
             "thing.happened",
+            "thing-1",
             super::Payload::from_string("p"),
         )
         .unwrap()
@@ -157,6 +158,7 @@ mod tests {
                 "org",
                 "/y",
                 e.topic().as_str(),
+                "thing-1",
                 super::Payload::from_string("p2"),
             )
             .unwrap()
@@ -206,6 +208,7 @@ mod tests {
             "org",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
             },
@@ -228,6 +231,7 @@ mod tests {
             "org",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
             },
