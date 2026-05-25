@@ -245,14 +245,16 @@ lives in `EventFilter` (organization, topic patterns, namespace pattern,
 key set, metadata subset, `end_at`); positional/cursor concerns live on
 the subscription itself.
 
-- `MemorySubscription { filter, limit }`
+- `MemorySubscription { limit }`
 - `SqliteSubscription { start: StartFrom<SqliteCursor>, stop_at: StopAt<SqliteCursor>, filter, partitions: PartitionSelection, batch_size, limit }`
 - `PgSubscription { start: StartFrom<PgCursor>, stop_at: StopAt<PgCursor>, filter, partitions: PartitionSelection, batch_size, limit }`
-- `KafkaSubscription { topics, consumer_group_id, start_from, event_filter, limit }`
-- `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, event_filter, limit }`
+- `KafkaSubscription { topics, consumer_group_id, start_from, limit }`
+- `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, limit }`
 
 SQL backends push the org / topic / namespace / start-from filters into the
-SQL query to prune at the DB; Kafka/SQS apply them in the consumer loop.
+SQL query to prune at the DB. Memory, Kafka, and SQS readers do not carry
+`EventFilter` in their subscription shape; compose them with `FilteredReader`
+when predicate filtering should happen after delivery.
 
 `PartitionSelection` controls which partitions a SQL subscription fetches:
 
@@ -598,7 +600,8 @@ factory. Until that lands, per-backend integration tests
 - `aws-sdk-sqs` long-polling (`wait_time_seconds`). Max 10 messages per
   receive (SQS limit, enforced in `validate()`).
 - `SqsSubscription` carries queue URL, wait time, visibility timeout, max
-  message count, `EventFilter`, and optional limit.
+  message count, and optional limit. Compose with `FilteredReader` if
+  predicate filtering is needed after delivery.
 - `BatchedAcker<String>` token = receipt handle. `SqsFlusher` -> batch
   `DeleteMessageBatch` (10 per call).
 - Queue semantics: no seek/replay cursor; delivered cursor is `NoCursor`.
