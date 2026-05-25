@@ -16,36 +16,47 @@ pub mod stream_id;
 pub mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
-pub use consumer_group_id::ConsumerGroupId;
-pub use cursor::{
-    Cursor, CursorCodec, CursorId, CursorKind, CursorOrder, EncodedCursor, JsonCursorCodec,
-    NoCursor,
-};
-pub use duplex::Duplex;
 pub use filter::{ArcFilter, BoxFilter, Filter, FilterExt};
-pub use handler::{
-    ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt, HandlerRateLimit, InspectHandler,
-    InspectHandlerHooks, RateLimitHandler, TimeoutHandler,
-};
+pub use handler::{ArcHandler, BoxHandler, DynHandler, Handler, HandlerExt};
+pub use reader::{ArcReader, BoxReader, BoxStream, DynReader, Reader, ReaderExt};
+pub use writer::{ArcWriter, BoxWriter, DynWriter, Writer, WriterExt};
+
+pub use cursor::{Cursor, CursorId, NoCursor};
+
+pub use consumer_group_id::ConsumerGroupId;
+pub use duplex::Duplex;
 pub use message::Message;
 pub use owner_id::OwnerId;
 pub use position::{PartitionableSubscription, StartFrom, StartableSubscription, StopAt};
-pub use reader::{
-    ArcReader, BoxReader, BoxStream, DecodeErrorDisposition, DecodeReader, DynReader, Reader,
-    ReaderExt, ReaderTypedExt,
-};
 pub use stream_id::StreamId;
-pub use writer::{
-    ArcWriter, BatchWriter, BatchWriterConfig, BoxWriter, DynWriter, EncodeWriter, FanoutWriter,
-    FilteredWriter, FlatMapWriter, InspectWriter, InspectWriterHooks, MapWriter, RetryWriter,
-    RetryWriterConfig, TimeoutWriter, TryFlatMapWriter, TryMapWriter, Writer, WriterExt,
-    WriterTypedExt,
-};
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn flow_wrapper_reexports_are_available() {
+    fn base_trait_companions_are_available_at_io_level() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct UserUpdated {
+            user_id: String,
+        }
+
+        fn assert_type<T>() {}
+
+        assert_type::<crate::io::BoxWriter>();
+        assert_type::<crate::io::ArcWriter>();
+        assert_type::<crate::io::BoxWriter<UserUpdated>>();
+        assert_type::<crate::io::ArcWriter<UserUpdated>>();
+        assert_type::<crate::io::BoxHandler>();
+        assert_type::<crate::io::ArcHandler>();
+        assert_type::<crate::io::BoxHandler<UserUpdated>>();
+        assert_type::<crate::io::ArcHandler<UserUpdated>>();
+        assert_type::<crate::io::BoxFilter>();
+        assert_type::<crate::io::ArcFilter>();
+        assert_type::<crate::io::BoxFilter<UserUpdated>>();
+        assert_type::<crate::io::ArcFilter<UserUpdated>>();
+    }
+
+    #[test]
+    fn wrapper_types_are_available_at_submodule_paths() {
         fn assert_type<T>() {}
 
         assert_type::<crate::io::writer::MapWriter<(), fn(&crate::Event) -> crate::Event>>();
@@ -60,48 +71,36 @@ mod tests {
             >,
         >();
         assert_type::<crate::io::writer::FanoutWriter>();
-        assert_type::<crate::io::reader::OutcomeRouterReader<()>>();
-        assert_type::<crate::io::reader::NackDisposition>();
-        assert_type::<crate::io::MapWriter<(), fn(&crate::Event) -> crate::Event>>();
-        assert_type::<crate::io::TryMapWriter<(), fn(&crate::Event) -> crate::Result<crate::Event>>>(
+        assert_type::<crate::io::writer::FilteredWriter<(), crate::io::filter::AllFilter>>();
+        assert_type::<crate::io::writer::RetryWriter<()>>();
+        assert_type::<crate::io::writer::TimeoutWriter<()>>();
+        assert_type::<crate::io::writer::InspectWriter<(), ()>>();
+        assert_type::<crate::io::writer::BatchWriter>();
+        assert_type::<crate::io::writer::FlatMapWriter<(), fn(&crate::Event) -> Vec<crate::Event>>>(
         );
         assert_type::<
-            crate::io::EncodeWriter<
+            crate::io::writer::TryFlatMapWriter<
+                (),
+                fn(&crate::Event) -> crate::Result<Vec<crate::Event>>,
+            >,
+        >();
+        assert_type::<
+            crate::io::reader::DecodeReader<
                 (),
                 crate::PayloadEventCodec<crate::JsonPayloadCodec>,
                 crate::Payload,
             >,
         >();
-        assert_type::<
-            crate::io::DecodeReader<
-                (),
-                crate::PayloadEventCodec<crate::JsonPayloadCodec>,
-                crate::Payload,
-            >,
-        >();
-        assert_type::<crate::io::FanoutWriter>();
+        assert_type::<crate::io::reader::OutcomeRouterReader<()>>();
+        assert_type::<crate::io::reader::NackDisposition>();
+        assert_type::<crate::io::handler::TimeoutHandler<()>>();
+        assert_type::<crate::io::handler::InspectHandler<(), ()>>();
+        assert_type::<crate::io::handler::RateLimitHandler<()>>();
+        assert_type::<crate::io::handler::FilteredHandler<(), crate::io::filter::AllFilter>>();
     }
 
     #[test]
-    fn writer_and_handler_wrapper_reexports_are_available() {
-        fn assert_type<T>() {}
-
-        assert_type::<crate::io::FilteredWriter<(), crate::io::filter::AllFilter>>();
-        assert_type::<crate::io::RetryWriter<()>>();
-        assert_type::<crate::io::TimeoutWriter<()>>();
-        assert_type::<crate::io::InspectWriter<(), ()>>();
-        assert_type::<crate::io::BatchWriter>();
-        assert_type::<crate::io::FlatMapWriter<(), fn(&crate::Event) -> Vec<crate::Event>>>();
-        assert_type::<
-            crate::io::TryFlatMapWriter<(), fn(&crate::Event) -> crate::Result<Vec<crate::Event>>>,
-        >();
-        assert_type::<crate::io::TimeoutHandler<()>>();
-        assert_type::<crate::io::InspectHandler<(), ()>>();
-        assert_type::<crate::io::RateLimitHandler<()>>();
-    }
-
-    #[test]
-    fn typed_payload_wrapper_reexports_are_available() {
+    fn typed_payload_wrappers_are_available_at_submodule_paths() {
         #[derive(Debug, Clone, PartialEq, Eq)]
         struct UserUpdated {
             user_id: String,
@@ -109,31 +108,23 @@ mod tests {
 
         fn assert_type<T>() {}
 
-        assert_type::<crate::io::BoxWriter<UserUpdated>>();
-        assert_type::<crate::io::ArcWriter<UserUpdated>>();
-        assert_type::<crate::io::BoxHandler<UserUpdated>>();
-        assert_type::<crate::io::ArcHandler<UserUpdated>>();
-        assert_type::<crate::io::BoxFilter<UserUpdated>>();
-        assert_type::<crate::io::ArcFilter<UserUpdated>>();
-
-        assert_type::<crate::io::FilteredWriter<(), crate::io::filter::AllFilter>>();
-        assert_type::<crate::io::RetryWriter<()>>();
-        assert_type::<crate::io::TimeoutWriter<()>>();
-        assert_type::<crate::io::InspectWriter<(), (), UserUpdated>>();
-        assert_type::<crate::io::BatchWriter<UserUpdated>>();
-        assert_type::<crate::io::FanoutWriter<UserUpdated>>();
+        assert_type::<crate::io::writer::FilteredWriter<(), crate::io::filter::AllFilter>>();
+        assert_type::<crate::io::writer::RetryWriter<()>>();
+        assert_type::<crate::io::writer::TimeoutWriter<()>>();
+        assert_type::<crate::io::writer::InspectWriter<(), (), UserUpdated>>();
+        assert_type::<crate::io::writer::BatchWriter<UserUpdated>>();
+        assert_type::<crate::io::writer::FanoutWriter<UserUpdated>>();
         assert_type::<
-            crate::io::MapWriter<
+            crate::io::writer::MapWriter<
                 (),
                 fn(&crate::Event<UserUpdated>) -> crate::Event<UserUpdated>,
                 UserUpdated,
                 UserUpdated,
             >,
         >();
-
-        assert_type::<crate::io::TimeoutHandler<()>>();
-        assert_type::<crate::io::InspectHandler<(), (), UserUpdated>>();
-        assert_type::<crate::io::RateLimitHandler<()>>();
+        assert_type::<crate::io::handler::TimeoutHandler<()>>();
+        assert_type::<crate::io::handler::InspectHandler<(), (), UserUpdated>>();
+        assert_type::<crate::io::handler::RateLimitHandler<()>>();
         assert_type::<crate::io::handler::FilteredHandler<(), crate::io::filter::AllFilter>>();
     }
 }

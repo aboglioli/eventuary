@@ -52,9 +52,10 @@ use tokio::sync::mpsc;
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::io::acker::NackContext;
+use crate::io::cursor::CursorOrder;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
-use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, NoCursor, Reader};
+use crate::io::{Acker, Cursor, CursorId, Message, NoCursor, Reader};
 use crate::partition::{Partition, PartitionHasher, PartitionKeyResolver, fnv1a_u64};
 use crate::payload::Payload;
 

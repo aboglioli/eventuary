@@ -37,7 +37,6 @@ mod field_map;
 pub mod io;
 mod metadata;
 mod namespace;
-mod namespace_pattern;
 mod organization;
 pub mod partition;
 mod payload;
@@ -45,7 +44,6 @@ mod payload_codec;
 mod serialization;
 mod snapshot;
 mod topic;
-mod topic_pattern;
 
 pub use collector::EventCollector;
 pub use context::{Context, ContextError, ContextValue};
@@ -55,17 +53,29 @@ pub use event_key::EventKey;
 pub use field_map::FieldMap;
 pub use metadata::Metadata;
 pub use namespace::Namespace;
-pub use namespace_pattern::NamespacePattern;
 pub use organization::OrganizationId;
 pub use partition::Partition;
 pub use payload_codec::{
     EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
 };
 
+pub use io::filter::{NamespacePattern, TopicPattern};
 pub use io::position::PartitionableSubscription;
 pub use io::position::{StartFrom, StartableSubscription, StopAt};
 pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};
 pub use snapshot::{Snapshot, SnapshotEventId};
 pub use topic::Topic;
-pub use topic_pattern::TopicPattern;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_reexports_filter_patterns() {
+        let topic = TopicPattern::exact(Topic::new("invoice.created").unwrap());
+        let namespace = NamespacePattern::prefix(Namespace::new("/billing").unwrap());
+        assert!(topic.matches_topic(&Topic::new("invoice.created").unwrap()));
+        assert!(namespace.matches_namespace(&Namespace::new("/billing/invoices").unwrap()));
+    }
+}

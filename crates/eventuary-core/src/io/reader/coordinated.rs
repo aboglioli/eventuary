@@ -30,9 +30,10 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::Result;
 use crate::error::Error;
+use crate::io::cursor::CursorOrder;
 use crate::io::position::{PartitionableSubscription, StartFrom};
 use crate::io::reader::CheckpointScope;
-use crate::io::{Acker, Cursor, CursorId, CursorOrder, Message, OwnerId, Reader};
+use crate::io::{Acker, Cursor, CursorId, Message, OwnerId, Reader};
 use crate::partition::Partition;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]

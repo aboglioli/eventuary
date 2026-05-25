@@ -148,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn stores_encoded_cursor() {
-        use eventuary_core::io::{CursorKind, CursorOrder, EncodedCursor};
+        use eventuary_core::io::cursor::{CursorKind, CursorOrder, EncodedCursor};
 
         let store: MemoryCheckpointStore<EncodedCursor> = MemoryCheckpointStore::new();
         let k = key(CursorId::global());

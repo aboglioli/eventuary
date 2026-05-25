@@ -8,13 +8,14 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
-use eventuary_core::io::filter::EventFilter;
+use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
+use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
 use eventuary_core::io::stream::SpawnedStream;
-use eventuary_core::io::{Acker, Cursor, CursorOrder, Filter, JsonCursorCodec, Message, Reader};
+use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
-    Error, NamespacePattern, Partition, PartitionableSubscription, Result, SerializedEvent,
-    SerializedPayload, StartFrom, StartableSubscription, StopAt, TopicPattern,
+    Error, Partition, PartitionableSubscription, Result, SerializedEvent, SerializedPayload,
+    StartFrom, StartableSubscription, StopAt,
 };
 
 use crate::relation::PgRelationName;
@@ -564,7 +565,8 @@ mod tests {
     use std::num::NonZeroU16;
 
     use super::*;
-    use eventuary_core::io::{Cursor, CursorCodec, CursorId, CursorOrder};
+    use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
+    use eventuary_core::io::{Cursor, CursorId};
 
     #[test]
     fn pg_subscription_with_partition_sets_partition_selection_one() {

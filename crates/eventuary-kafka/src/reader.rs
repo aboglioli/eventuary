@@ -8,10 +8,9 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
+use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::stream::BatchedStream;
-use eventuary_core::io::{
-    ConsumerGroupId, Cursor, CursorId, CursorOrder, JsonCursorCodec, Message, Reader,
-};
+use eventuary_core::io::{ConsumerGroupId, Cursor, CursorId, Message, Reader};
 use eventuary_core::{Error, Event, Result, SerializedEvent, StartFrom, StartableSubscription};
 
 use crate::flusher::KafkaFlusher;
@@ -262,7 +261,8 @@ impl Reader for KafkaReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eventuary_core::io::{Cursor, CursorCodec, CursorOrder};
+    use eventuary_core::io::Cursor;
+    use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
 
     fn cursor(topic: &str, partition: i32, offset: i64) -> KafkaCursor {
         KafkaCursor {

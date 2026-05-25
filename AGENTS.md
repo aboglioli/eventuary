@@ -121,7 +121,7 @@ crates/
 │           │   └── spawned.rs # SpawnedStream
 │           ├── duplex.rs   # Duplex<W, R> delegating Reader + Writer pair
 │           ├── position.rs # StartFrom<C> + StopAt<C> + StartableSubscription
-│           ├── filter.rs   # Filter trait + AllFilter/AndFilter/NotFilter/OrFilter/EventFilter + Filter impls for TopicPattern/NamespacePattern
+│           ├── filter.rs   # Filter trait + TopicPattern/NamespacePattern + EventFilter + All/And/Or/Not filters
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
@@ -840,6 +840,21 @@ Worth knowing when changing the codebase:
   umbrella crate, where they map 1:1 to optional sub-crate dependencies.
   This keeps the core dep graph minimal for crates that only need the
   model (custom backends, in-process testing helpers, etc.).
+- **Core root vs `io` module boundary.** Keep root/core modules for
+  concepts that define durable event identity, routing, storage, wire
+  format, or backend-interoperable semantics. Keep `io` modules for
+  concepts that define how readers, writers, handlers, and consumers
+  process events: consumption position, filters, wrappers, acks, and
+  runtime flow composition. `partition` stays at the core root because
+  partition ids, keys, hashes, strategies, resolver/hasher routing,
+  writer-persisted partition columns, backfills, coordinated ownership,
+  and Kafka-compatible routing are durable cross-backend semantics.
+  `io::filter` owns `Filter`, `EventFilter`, `TopicPattern`, and
+  `NamespacePattern` because those are consumption predicates over core
+  values (`Topic`, `Namespace`), not standalone event identity or storage
+  concepts. `io::position` owns `StartFrom`, `StopAt`, and subscription
+  capability traits because they describe consumption start/stop/resume
+  behavior.
 - **Umbrella facade over flat single crate.** Eventuary uses the
   bevy/wgpu pattern: a thin top-level `eventuary` crate re-exports
   `eventuary-core` and feature-gated `eventuary-<backend>` crates.

@@ -6,10 +6,11 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use chrono::Utc;
 
 use eventuary_core::io::StreamId;
+use eventuary_core::io::cursor::CursorOrder;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore, SubscriberId};
 use eventuary_core::io::reader::{BufferStore, CheckpointStore, DedupeStore, WatermarkStore};
 use eventuary_core::io::{
-    ConsumerGroupId, Cursor, CursorOrder,
+    ConsumerGroupId, Cursor,
     reader::{CheckpointKey, CheckpointScope},
 };
 use eventuary_core::{Event, EventId, Payload};

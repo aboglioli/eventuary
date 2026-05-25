@@ -5,14 +5,14 @@ use std::sync::Mutex;
 use futures::{Stream, StreamExt};
 
 use eventuary_core::io::acker::NoopAcker;
+use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::reader::{
     CheckpointReader, CheckpointScope, CheckpointSubscription, EncodedCursorReader,
     EncodedCursorSubscription, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
     PartitionedSubscription,
 };
 use eventuary_core::io::{
-    ConsumerGroupId, Cursor, CursorOrder, JsonCursorCodec, Message, Reader, StartFrom,
-    StartableSubscription, StreamId,
+    ConsumerGroupId, Cursor, Message, Reader, StartFrom, StartableSubscription, StreamId,
 };
 use eventuary_core::{Event, Payload, Result};
 use eventuary_memory::checkpoint_store::MemoryCheckpointStore;

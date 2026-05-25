@@ -266,8 +266,8 @@ mod tests {
 
     #[tokio::test]
     async fn works_with_topic_pattern_filter() {
+        use crate::io::filter::TopicPattern;
         use crate::topic::Topic;
-        use crate::topic_pattern::TopicPattern;
 
         let acker = CountingAcker::default();
         let reader = VecReader::new(vec![Ok(msg(ev("acme", "k0"), acker.clone(), 1))]);
@@ -284,8 +284,8 @@ mod tests {
     #[tokio::test]
     async fn works_with_combined_filters() {
         use crate::io::FilterExt;
+        use crate::io::filter::TopicPattern;
         use crate::topic::Topic;
-        use crate::topic_pattern::TopicPattern;
 
         #[derive(Clone)]
         struct OrgAcme;
