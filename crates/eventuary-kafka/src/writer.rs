@@ -51,7 +51,7 @@ impl Writer for KafkaWriter {
         }
         let payloads: Vec<(String, String)> = events
             .iter()
-            .map(|e| Ok::<_, Error>((Self::body(e)?, e.key().to_string())))
+            .map(|e| Ok::<_, Error>((Self::body(e)?, e.key().as_str().to_owned())))
             .collect::<Result<_>>()?;
 
         for (body, key) in &payloads {
