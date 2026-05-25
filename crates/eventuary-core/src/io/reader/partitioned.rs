@@ -691,10 +691,7 @@ fn compute_partition<P: 'static>(
 ) -> Result<Partition> {
     match strategy {
         PartitionRouteStrategy::EventCompatibility => {
-            let hash = match event.key() {
-                Some(key) => fnv1a_u64(key.as_str().as_bytes()),
-                None => fnv1a_u64(event.id().as_uuid().as_bytes()),
-            };
+            let hash = fnv1a_u64(event.key().as_str().as_bytes());
             let id = (hash % count.get() as u64) as u16;
             Ok(Partition::new(id, count).expect("id < count by modulo"))
         }
@@ -856,12 +853,16 @@ mod tests {
     }
 
     fn ev(key: &str) -> Event {
-        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key(key)
-            .unwrap()
-            .build()
-            .expect("valid event")
+        Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            key,
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .build()
+        .expect("valid event")
     }
 
     fn rr_config(n: u16, cap: usize) -> PartitionedReaderConfig {
@@ -1084,16 +1085,13 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            order.push(msg.event().key().unwrap().as_str().to_owned());
+            order.push(msg.event().key().as_str().to_owned());
             msg.ack().await.unwrap();
         }
         let cold_pos = order
             .iter()
             .position(|k| k == "cold")
             .expect("cold delivered");
-        // cold lane has 1 event, must be served within max_burst_per_lane
-        // (8) deliveries from when both lanes are ready — at the latest
-        // within the first 16 deliveries (one hot burst + cold).
         assert!(
             cold_pos < 16,
             "cold lane starved: cold delivered at position {cold_pos}, order={order:?}"
@@ -1277,10 +1275,7 @@ mod tests {
         let expected_lanes: Vec<u16> = events
             .iter()
             .map(|e| {
-                let hash = match e.key() {
-                    Some(k) => fnv1a_u64(k.as_str().as_bytes()),
-                    None => fnv1a_u64(e.id().as_uuid().as_bytes()),
-                };
+                let hash = fnv1a_u64(e.key().as_str().as_bytes());
                 (hash % count_nz.get() as u64) as u16
             })
             .collect();
@@ -1327,7 +1322,7 @@ mod tests {
         let expected_lanes: Vec<u16> = events
             .iter()
             .map(|e| {
-                let key = PartitionKey::new(e.key().unwrap().as_str()).unwrap();
+                let key = PartitionKey::new(e.key().as_str()).unwrap();
                 hasher.partition_for(&key, count_nz).id()
             })
             .collect();
@@ -1340,7 +1335,7 @@ mod tests {
             lane_capacity: NonZeroUsize::new(64).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
             route_strategy: PartitionRouteStrategy::resolver_hasher(
-                EventKeyPartitionKeyResolver::error_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
         };
@@ -1363,36 +1358,5 @@ mod tests {
             delivered += 1;
         }
         assert_eq!(delivered, 8);
-    }
-
-    #[test]
-    fn resolver_hasher_unkeyed_event_uses_uuid_string_not_bytes() {
-        use crate::partition::{
-            EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionKey,
-        };
-
-        let count_nz = NonZeroU16::new(64).unwrap();
-        let unkeyed = Event::create(
-            "acme",
-            "/x",
-            "thing.happened",
-            crate::payload::Payload::from_string("p"),
-        )
-        .unwrap();
-
-        let resolver = EventKeyPartitionKeyResolver::event_id_on_unkeyed();
-        let hasher = Fnv1a64PartitionHasher;
-        let resolver_key = resolver.partition_key(&unkeyed).unwrap();
-        let uuid_str = unkeyed.id().as_uuid().to_string();
-        let manual_key = PartitionKey::new(&uuid_str).unwrap();
-
-        assert_eq!(
-            resolver_key, manual_key,
-            "EventKeyPartitionKeyResolver::event_id_on_unkeyed must use the UUID string representation"
-        );
-        assert_eq!(
-            hasher.partition_for(&resolver_key, count_nz).id(),
-            hasher.partition_for(&manual_key, count_nz).id(),
-        );
     }
 }

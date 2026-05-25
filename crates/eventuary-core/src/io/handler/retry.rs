@@ -118,11 +118,9 @@ where
             encoded.organization().as_str(),
             encoded.namespace().as_str(),
             dead_letter_topic.as_str(),
+            encoded.key().as_str(),
             Payload::from_json(&dead_letter_payload)?,
         )?;
-        if let Some(key) = encoded.key() {
-            builder = builder.key(key.as_str())?;
-        }
         if let Some(correlation_id) = encoded.correlation_id() {
             builder = builder.correlation_id(correlation_id.as_str())?;
         }
@@ -234,10 +232,9 @@ mod tests {
             "acme",
             "/x",
             "thing.happened",
+            "k",
             super::Payload::from_string("p"),
         )
-        .unwrap()
-        .key("k")
         .unwrap()
         .build()
         .expect("valid event")

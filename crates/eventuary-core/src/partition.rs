@@ -221,15 +221,6 @@ pub enum PartitionSelection {
     Many(PartitionGroup),
 }
 
-// FixedPartition variant is intentionally deferred: it requires bypassing the hasher,
-// which lives outside this trait. Reintroduce when writer-side partitioning gains a
-// dedicated path for explicit partition ids.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum UnkeyedPartitionMode {
-    Error,
-    EventId,
-}
-
 pub trait PartitionKeyResolver<P = Payload>: Send + Sync + 'static {
     fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey>;
 }
