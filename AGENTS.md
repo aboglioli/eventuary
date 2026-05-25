@@ -180,6 +180,13 @@ Aggregate.mutate() -> EventCollector.collect(event)
 reconstructed via `Event::new(...)`.
 UUID v7 is used for `EventId` so events are time-ordered.
 
+Every event has two identities:
+
+- `id`: unique occurrence id, generated as UUID v7.
+- `key`: required routing/stream identity, shared by related events such as all events for `order-123`.
+
+`key` is not unique. Use it for partitioning, Kafka record keys, aggregate/entity routing, and deterministic lane assignment. Use `id` for dedupe and event occurrence identity.
+
 ### Constructor Convention
 
 | Pattern | Purpose | Validates? |
@@ -349,6 +356,8 @@ audit, and side-channel flows are not hardcoded into handlers.
   and `PartitionedReader` routes lanes either via the resolver/hasher
   pipeline or the equivalent inline default (`EventCompatibility`).
 
+  Default partitioning hashes `Event::key()` with FNV-1a. Because `key` is required, all default reader and writer partitioning paths are deterministic by stream/entity identity. Use custom `PartitionKeyResolver` implementations when partitioning by organization, topic, namespace, metadata, or a composite key.
+
 ### Reader Composition (Wrappers)
 
 Backend readers (`PgReader`, `SqliteReader`, etc.) deliver events from a
@@ -361,8 +370,8 @@ single source. Cross-cutting concerns live in generic core wrappers in
 
 - `PartitionedReader<R, P>` is an in-process lane scheduler. It routes
   inner messages into `Partition`s derived from `PartitionRouteStrategy<P>`
-  (default `EventCompatibility`: FNV-1a over `event.key()` when present,
-  else over `event.id()` bytes), buffers each lane up to `lane_capacity`,
+  (default `EventCompatibility`: FNV-1a over `event.key()` bytes),
+  buffers each lane up to `lane_capacity`,
   and exposes one merged stream. Two constructors pick the inner-ack
   semantics:
   - `PartitionedReader::source(inner, config)` — acks inner on lane
@@ -1067,11 +1076,10 @@ Worth knowing when changing the codebase:
   metadata, never the payload. `PartitionedReaderConfig<P>` and
   `PartitionRouteStrategy<P>` thread `P` through; the default
   `EventCompatibility` route inlines the same FNV-1a routing
-  (`event.key()` bytes else `event.id()` bytes) and is available for
-  every `P`. The legacy inherent partitioning helpers on `Event` and
-  `EventKey` were intentionally removed during the typed-payload
-  follow-ups; callers go through the resolver/hasher pipeline directly
-  or rely on `EventCompatibility`.
+  (`event.key()` bytes) and is available for every `P`. The legacy inherent
+  partitioning helpers on `Event` and `EventKey` were intentionally removed
+  during the typed-payload follow-ups; callers go through the resolver/hasher
+  pipeline directly or rely on `EventCompatibility`.
 - **`MultiplexerStore` is intentionally NOT generic over `P`.** The
   store keys on `(event_id, subscriber_id)` only — the value stored is
   completion state, never the payload. Keeping the trait monomorphic

@@ -121,10 +121,7 @@ mod tests {
     use super::*;
 
     fn ev(topic: &str) -> Event {
-        Event::builder("acme", "/x", topic, Payload::from_string("p"))
-            .unwrap()
-            .build()
-            .unwrap()
+        Event::create("acme", "/x", topic, "entity-1", Payload::from_string("p")).unwrap()
     }
 
     fn sub(s: &str) -> SubscriberId {

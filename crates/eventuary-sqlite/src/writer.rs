@@ -229,10 +229,9 @@ mod tests {
             "acme",
             "/orders",
             "order.created",
+            key,
             Payload::from_string("{}"),
         )
-        .unwrap()
-        .key(key)
         .unwrap()
         .build()
         .unwrap()
@@ -271,7 +270,7 @@ mod tests {
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
                 NonZeroU16::new(64).unwrap(),
-                EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+                EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
             ..SqliteWriterConfig::default()

@@ -138,6 +138,7 @@ mod tests {
             "org",
             "/x",
             "thing.happened",
+            "thing-1",
             crate::payload::Payload::from_string("p"),
         )
         .unwrap()
@@ -206,6 +207,7 @@ mod tests {
             "org",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
             },

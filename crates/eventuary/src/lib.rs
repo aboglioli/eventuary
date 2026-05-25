@@ -30,9 +30,9 @@
 //!     "acme",
 //!     "/billing",
 //!     "invoice.created",
+//!     "invoice-123",
 //!     Payload::from_json(&serde_json::json!({"amount": 100})).unwrap(),
 //! ).unwrap()
-//! .key("invoice-123").unwrap()
 //! .build().unwrap();
 //! assert_eq!(event.topic().as_str(), "invoice.created");
 //! ```
@@ -55,6 +55,7 @@
 //!     "acme",
 //!     "/orders",
 //!     "order.placed",
+//!     "order-1",
 //!     OrderPlaced { order_id: "o-1".to_owned(), total: 42 },
 //! ).unwrap();
 //! assert_eq!(event.payload().order_id, "o-1");

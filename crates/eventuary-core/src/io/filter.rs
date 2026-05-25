@@ -182,9 +182,7 @@ impl<P: Send + Sync> Filter<P> for EventFilter {
             return false;
         }
         if let Some(keys) = self.keys.as_ref()
-            && !event
-                .key()
-                .is_some_and(|event_key| keys.iter().any(|key| key == event_key))
+            && !keys.iter().any(|key| key == event.key())
         {
             return false;
         }
@@ -229,6 +227,7 @@ mod tests {
             "org",
             namespace,
             topic,
+            "entity-1",
             crate::payload::Payload::from_string("p"),
         )
         .unwrap()
@@ -407,6 +406,7 @@ mod tests {
             "org",
             "/x",
             "invoice.created",
+            "thing-1",
             crate::payload::Payload::from_string("p"),
         )
         .unwrap();
@@ -420,6 +420,7 @@ mod tests {
             "org",
             "/billing/invoices",
             "invoice.created",
+            "thing-1",
             crate::payload::Payload::from_string("p"),
         )
         .unwrap();

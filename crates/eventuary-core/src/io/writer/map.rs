@@ -117,7 +117,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", Payload::from_string("p")).unwrap()
     }
 
     #[tokio::test]
@@ -129,6 +129,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 "mapped.topic",
+                event.key().as_str(),
                 Payload::from_string("mapped"),
             )
             .unwrap()
@@ -151,6 +152,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 format!("mapped.{}", event.topic().as_str().replace('.', "_")),
+                event.key().as_str(),
                 Payload::from_string("mapped"),
             )
             .unwrap()
@@ -173,6 +175,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 "try.mapped",
+                event.key().as_str(),
                 Payload::from_string("mapped"),
             )
         });
@@ -210,6 +213,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 "ok.topic",
+                event.key().as_str(),
                 Payload::from_string("p"),
             )
         });
@@ -233,6 +237,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 format!("prefix.{}", event.topic().as_str()),
+                event.key().as_str(),
                 Payload::from_string("p"),
             )
             .unwrap()
@@ -242,6 +247,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 format!("{}.suffix", event.topic().as_str()),
+                event.key().as_str(),
                 Payload::from_string("p"),
             )
         });

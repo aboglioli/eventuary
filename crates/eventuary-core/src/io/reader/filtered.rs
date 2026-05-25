@@ -137,10 +137,9 @@ mod tests {
             org,
             "/x",
             "thing.happened",
+            key,
             crate::payload::Payload::from_string("p"),
         )
-        .unwrap()
-        .key(key)
         .unwrap()
         .build()
         .unwrap()
@@ -192,7 +191,7 @@ mod tests {
         let mut stream = filtered.read(TestSubscription).await.unwrap();
         let item = stream.next().await.unwrap().unwrap();
 
-        assert_eq!(item.event().key().unwrap().as_str(), "k0");
+        assert_eq!(item.event().key().as_str(), "k0");
         assert_eq!(*item.cursor(), TestCursor(42));
         assert_eq!(acker.ack_count.load(Ordering::SeqCst), 0);
         assert_eq!(acker.nack_count.load(Ordering::SeqCst), 0);
@@ -214,7 +213,7 @@ mod tests {
         let mut stream = filtered.read(TestSubscription).await.unwrap();
         let item = stream.next().await.unwrap().unwrap();
 
-        assert_eq!(item.event().key().unwrap().as_str(), "keep");
+        assert_eq!(item.event().key().as_str(), "keep");
         assert_eq!(*item.cursor(), TestCursor(2));
         assert_eq!(skipped.ack_count.load(Ordering::SeqCst), 1);
         assert_eq!(skipped.nack_count.load(Ordering::SeqCst), 0);
@@ -278,7 +277,7 @@ mod tests {
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();
         let item = stream.next().await.unwrap().unwrap();
-        assert_eq!(item.event().key().unwrap().as_str(), "k0");
+        assert_eq!(item.event().key().as_str(), "k0");
     }
 
     #[tokio::test]
@@ -302,7 +301,7 @@ mod tests {
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();
         let item = stream.next().await.unwrap().unwrap();
-        assert_eq!(item.event().key().unwrap().as_str(), "k0");
+        assert_eq!(item.event().key().as_str(), "k0");
     }
 
     #[tokio::test]
@@ -325,6 +324,6 @@ mod tests {
 
         let mut stream = filtered.read(TestSubscription).await.unwrap();
         let item = stream.next().await.unwrap().unwrap();
-        assert_eq!(item.event().key().unwrap().as_str(), "k0");
+        assert_eq!(item.event().key().as_str(), "k0");
     }
 }

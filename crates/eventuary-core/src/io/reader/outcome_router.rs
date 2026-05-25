@@ -375,7 +375,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", Payload::from_string("p")).unwrap()
     }
 
     #[tokio::test]
@@ -764,6 +764,7 @@ mod tests {
                 event.organization().as_str(),
                 event.namespace().as_str(),
                 "dead.letter",
+                event.key().as_str(),
                 Payload::from_string(format!("failed:{}", event.id())),
             )?
             .parent_id(event.id())

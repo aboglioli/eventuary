@@ -172,7 +172,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", Payload::from_string("p")).unwrap()
     }
 
     use std::collections::HashSet;
@@ -201,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn nack_before_mark_allows_redelivery() {
-        let e = Event::create("org", "/x", "t", Payload::from_string("p")).unwrap();
+        let e = Event::create("org", "/x", "t", "thing-1", Payload::from_string("p")).unwrap();
         let store = TestDedupeStore::default();
         let reader = VecReader {
             events: Mutex::new(Some(vec![e.clone()])),

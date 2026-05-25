@@ -73,12 +73,7 @@ async fn create_topic(brokers: &str, topic: &str, partitions: i32) {
 }
 
 fn make_event(org: &str, namespace: &str, topic: &str, key: &str) -> Event {
-    Event::builder(org, namespace, topic, Payload::from_string("v"))
-        .unwrap()
-        .key(key)
-        .unwrap()
-        .build()
-        .expect("valid event")
+    Event::create(org, namespace, topic, key, Payload::from_string("v")).expect("valid event")
 }
 
 #[tokio::test]
@@ -106,7 +101,7 @@ async fn write_read_roundtrip() {
         .expect("stream next")
         .expect("some")
         .expect("ok");
-    assert_eq!(msg.event().key().expect("event has key").as_str(), "k1");
+    assert_eq!(msg.event().key().as_str(), "k1");
     assert_eq!(msg.event().topic().as_str(), "thing.happened");
     msg.ack().await.unwrap();
 }
@@ -168,13 +163,7 @@ async fn ack_commits_offset() {
         if let Ok(Some(Ok(msg))) =
             tokio::time::timeout(Duration::from_secs(5), stream2.next()).await
         {
-            keys.push(
-                msg.event()
-                    .key()
-                    .expect("event has key")
-                    .as_str()
-                    .to_owned(),
-            );
+            keys.push(msg.event().key().as_str().to_owned());
             msg.ack().await.unwrap();
         }
     }
@@ -229,13 +218,7 @@ async fn consumer_group_resume() {
             .expect("stream next")
             .expect("some")
             .expect("ok");
-        first.push(
-            msg.event()
-                .key()
-                .expect("event has key")
-                .as_str()
-                .to_owned(),
-        );
+        first.push(msg.event().key().as_str().to_owned());
         msg.ack().await.unwrap();
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -250,13 +233,7 @@ async fn consumer_group_resume() {
         if let Ok(Some(Ok(msg))) =
             tokio::time::timeout(Duration::from_secs(5), stream2.next()).await
         {
-            second.push(
-                msg.event()
-                    .key()
-                    .expect("event has key")
-                    .as_str()
-                    .to_owned(),
-            );
+            second.push(msg.event().key().as_str().to_owned());
             msg.ack().await.unwrap();
         }
     }

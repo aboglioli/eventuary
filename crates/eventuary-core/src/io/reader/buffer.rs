@@ -284,12 +284,16 @@ mod tests {
     use crate::payload::Payload;
 
     fn ev(key: &str) -> Event {
-        Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key(key)
-            .unwrap()
-            .build()
-            .expect("valid event")
+        Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            key,
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .build()
+        .expect("valid event")
     }
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -395,7 +399,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            assert_eq!(msg.event().key().unwrap().as_str(), &format!("k{i}"));
+            assert_eq!(msg.event().key().as_str(), &format!("k{i}"));
             msg.ack().await.unwrap();
         }
 
@@ -447,7 +451,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(replayed1.event().key().unwrap().as_str(), "k1");
+        assert_eq!(replayed1.event().key().as_str(), "k1");
         replayed1.ack().await.unwrap();
 
         let replayed2 = tokio::time::timeout(Duration::from_secs(2), stream2.next())
@@ -455,7 +459,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(replayed2.event().key().unwrap().as_str(), "k2");
+        assert_eq!(replayed2.event().key().as_str(), "k2");
         replayed2.ack().await.unwrap();
 
         assert_eq!(store.pending_count(), 0);
@@ -581,6 +585,6 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(msg2.event().key().unwrap().as_str(), "k2");
+        assert_eq!(msg2.event().key().as_str(), "k2");
     }
 }

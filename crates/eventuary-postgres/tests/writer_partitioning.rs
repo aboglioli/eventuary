@@ -40,6 +40,7 @@ async fn pg_writer_off_partitioning_leaves_columns_null() {
         "acme",
         "/orders",
         "order.placed",
+        "no-partition",
         Payload::from_string("{}"),
     )
     .unwrap()
@@ -75,7 +76,7 @@ async fn pg_writer_inline_partitioning_persists_all_columns() {
     let config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             NonZeroU16::new(64).unwrap(),
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -86,10 +87,9 @@ async fn pg_writer_inline_partitioning_persists_all_columns() {
         "acme",
         "/orders",
         "order.placed",
+        "order-123",
         Payload::from_string("{}"),
     )
-    .unwrap()
-    .key("order-123")
     .unwrap()
     .build()
     .unwrap();

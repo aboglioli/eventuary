@@ -158,7 +158,8 @@ mod tests {
                 vec![Err(crate::Error::Store("transient".into()))]
             } else {
                 vec![Ok(Message::new(
-                    Event::create("org", "/x", "test", Payload::from_string("p")).unwrap(),
+                    Event::create("org", "/x", "test", "thing-1", Payload::from_string("p"))
+                        .unwrap(),
                     NoopAcker,
                     TestCursor(0),
                 ))]
@@ -227,7 +228,7 @@ mod tests {
         }
 
         let event = Message::new(
-            Event::create("org", "/x", "test", Payload::from_string("p")).unwrap(),
+            Event::create("org", "/x", "test", "thing-1", Payload::from_string("p")).unwrap(),
             NoopAcker,
             TestCursor(0),
         );

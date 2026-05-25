@@ -44,10 +44,9 @@ fn event_with_key(key: &str) -> Event {
         "acme",
         "/orders",
         "order.placed",
+        key,
         Payload::from_string("{}"),
     )
-    .unwrap()
-    .key(key)
     .unwrap()
     .build()
     .unwrap()
@@ -66,7 +65,7 @@ async fn pg_reader_default_all_returns_every_event() {
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             NonZeroU16::new(PARTITION_COUNT).unwrap(),
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -104,7 +103,7 @@ async fn pg_reader_one_filters_to_single_partition() {
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             NonZeroU16::new(PARTITION_COUNT).unwrap(),
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -144,11 +143,7 @@ async fn pg_reader_one_filters_to_single_partition() {
 
     let mut received_keys: Vec<String> = Vec::new();
     while let Ok(Some(Ok(msg))) = timeout(std::time::Duration::from_secs(5), stream.next()).await {
-        let key = msg
-            .event()
-            .key()
-            .map(|k| k.as_str().to_owned())
-            .unwrap_or_default();
+        let key = msg.event().key().as_str().to_owned();
         msg.acker().ack().await.unwrap();
         received_keys.push(key);
     }

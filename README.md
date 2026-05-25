@@ -87,6 +87,13 @@ Layering rules:
 
 ## Core Event Model
 
+Every event has two identities:
+
+- `id`: unique occurrence id, generated as UUID v7.
+- `key`: required routing/stream identity, shared by related events such as all events for `invoice-123`.
+
+`key` is not unique. Use it for partitioning, Kafka record keys, aggregate/entity routing, and deterministic lane assignment. Use `id` for dedupe and event occurrence identity.
+
 ```rust
 use eventuary::{Event, Payload};
 
@@ -94,9 +101,9 @@ let event = Event::builder(
     "acme",
     "/billing",
     "invoice.created",
+    "invoice-123",
     Payload::from_json(&serde_json::json!({ "amount": 100 }))?,
 )?
-.key("invoice-123")?
 .correlation_id("billing-run-7")?
 .build()?;
 ```
@@ -104,8 +111,8 @@ let event = Event::builder(
 Important model types:
 
 - `Event` — immutable event record with UUID v7 `id`, tenant organization,
-  namespace, topic, payload, metadata, timestamp, version, optional key, and
-  optional lineage fields.
+  namespace, topic, key, payload, metadata, timestamp, version, and optional
+  lineage fields.
 - `Payload` — JSON, plain text, or binary content. Internally it uses
   `bytes::Bytes`, so cloning a payload is cheap and does not copy the byte
   buffer.
@@ -114,7 +121,7 @@ Important model types:
   `/billing/invoices`.
 - `OrganizationId` — tenant scope; `_platform` is reserved for platform-wide
   events.
-- `EventKey` — flexible non-empty key used for event keys, correlation IDs, and
+- `EventKey` — required non-empty key used for event keys, correlation IDs, and
   causation IDs. `EventKey` is the stable entity key commonly used by the
   partition resolver pipeline. Use
   `eventuary::partition::EventKeyPartitionKeyResolver` with
@@ -274,6 +281,7 @@ let event = Event::create(
     "acme",
     "/orders",
     "order.placed",
+    "order-1",
     OrderPlaced { order_id: "o-1".into(), total: 42 },
 ).unwrap();
 writer.write(&event).await.unwrap();
@@ -344,9 +352,9 @@ async fn example() -> Result<()> {
         "acme",
         "/orders",
         "order.placed",
+        "order-1",
         Payload::from_json(&serde_json::json!({ "total": 42 }))?,
     )?
-    .key("order-1")?
     .build()?;
 
     writer.write(&event).await?;
@@ -500,11 +508,13 @@ leaves the checkpoint untouched.
 
 ## Partitioned Readers
 
+Default partitioning hashes `Event::key()` with FNV-1a. Because `key` is required, all default reader and writer partitioning paths are deterministic by stream/entity identity. Use custom `PartitionKeyResolver` implementations when partitioning by organization, topic, namespace, metadata, or a composite key.
+
 `PartitionedReader` is an in-process lane scheduler over any reader. It routes
 events into logical lanes using `PartitionRouteStrategy<P>`: the default
-`EventCompatibility` strategy hashes the event key (or event id when no key
-is set) with FNV-1a; the `ResolverHasher` strategy plugs in a custom
-`PartitionKeyResolver<P>` + `PartitionHasher`.
+`EventCompatibility` strategy hashes `Event::key()` with FNV-1a; the
+`ResolverHasher` strategy plugs in a custom `PartitionKeyResolver<P>` +
+`PartitionHasher`.
 
 Use source mode for source-cursor readers such as PostgreSQL and SQLite:
 
@@ -582,7 +592,7 @@ let writer = PgWriter::new_with_config(
     PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
             partition_count,
-            EventKeyPartitionKeyResolver::event_id_on_unkeyed(),
+            EventKeyPartitionKeyResolver,
             Fnv1a64PartitionHasher,
         ),
         ..PgWriterConfig::default()
@@ -815,8 +825,8 @@ use eventuary::io::handler::{DeadLetterWriter, DefaultRetryPolicy, RetryConfig, 
 let handler = RetryHandler::new(
     LogHandler,
     DefaultRetryPolicy,
-    DeadLetterWriter::new(dead_letter_writer),
     RetryConfig::default(),
+    DeadLetterWriter::new(dead_letter_writer),
 );
 ```
 

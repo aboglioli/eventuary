@@ -114,7 +114,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", Payload::from_string("p")).unwrap()
     }
 
     #[tokio::test]
@@ -127,7 +127,14 @@ mod tests {
             ))])),
         };
         let mapped = MapReader::new(reader, |_event: Event| {
-            Event::create("org", "/x", "mapped.topic", Payload::from_string("mapped")).unwrap()
+            Event::create(
+                "org",
+                "/x",
+                "mapped.topic",
+                "thing-1",
+                Payload::from_string("mapped"),
+            )
+            .unwrap()
         });
         let mut stream = mapped.read(()).await.unwrap();
         let msg = stream.next().await.unwrap().unwrap();

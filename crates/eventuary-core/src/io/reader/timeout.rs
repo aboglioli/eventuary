@@ -203,7 +203,14 @@ mod tests {
     }
 
     fn ev() -> Event {
-        Event::create("org", "/x", "thing.happened", Payload::from_string("p")).unwrap()
+        Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            "thing-1",
+            Payload::from_string("p"),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -372,6 +379,7 @@ mod tests {
             "org",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
             },

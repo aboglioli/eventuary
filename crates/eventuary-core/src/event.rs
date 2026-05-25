@@ -56,12 +56,11 @@ pub struct Event<P = Payload> {
     organization: OrganizationId,
     namespace: Namespace,
     topic: Topic,
+    key: EventKey,
     payload: P,
     metadata: Metadata,
     timestamp: DateTime<Utc>,
     version: u64,
-
-    key: Option<EventKey>,
     parent_id: Option<EventId>,
     correlation_id: Option<EventKey>,
     causation_id: Option<EventKey>,
@@ -71,32 +70,33 @@ pub struct EventBuilder<P = Payload> {
     organization: OrganizationId,
     namespace: Namespace,
     topic: Topic,
+    key: EventKey,
     payload: P,
     metadata: Metadata,
-    key: Option<EventKey>,
     parent_id: Option<EventId>,
     correlation_id: Option<EventKey>,
     causation_id: Option<EventKey>,
 }
 
 impl<P> EventBuilder<P> {
-    fn new(organization: OrganizationId, namespace: Namespace, topic: Topic, payload: P) -> Self {
+    fn new(
+        organization: OrganizationId,
+        namespace: Namespace,
+        topic: Topic,
+        key: EventKey,
+        payload: P,
+    ) -> Self {
         Self {
             organization,
             namespace,
             topic,
+            key,
             payload,
             metadata: Metadata::new(),
-            key: None,
             parent_id: None,
             correlation_id: None,
             causation_id: None,
         }
-    }
-
-    pub fn key(mut self, key: impl Into<String>) -> Result<Self> {
-        self.key = Some(EventKey::new(key)?);
-        Ok(self)
     }
 
     pub fn parent_id(mut self, parent_id: EventId) -> Self {
@@ -125,11 +125,11 @@ impl<P> EventBuilder<P> {
             self.organization,
             self.namespace,
             self.topic,
+            self.key,
             self.payload,
             self.metadata,
             Utc::now(),
             1,
-            self.key,
             self.parent_id,
             self.correlation_id,
             self.causation_id,
@@ -144,11 +144,11 @@ impl<P> Event<P> {
         organization: OrganizationId,
         namespace: Namespace,
         topic: Topic,
+        key: EventKey,
         payload: P,
         metadata: Metadata,
         timestamp: DateTime<Utc>,
         version: u64,
-        key: Option<EventKey>,
         parent_id: Option<EventId>,
         correlation_id: Option<EventKey>,
         causation_id: Option<EventKey>,
@@ -158,11 +158,11 @@ impl<P> Event<P> {
             organization,
             namespace,
             topic,
+            key,
             payload,
             metadata,
             timestamp,
             version,
-            key,
             parent_id,
             correlation_id,
             causation_id,
@@ -173,12 +173,14 @@ impl<P> Event<P> {
         organization: impl Into<String>,
         namespace: impl Into<String>,
         topic: impl Into<String>,
+        key: impl Into<String>,
         payload: P,
     ) -> Result<EventBuilder<P>> {
         Ok(EventBuilder::new(
             OrganizationId::new(organization)?,
             Namespace::new(namespace)?,
             Topic::new(topic)?,
+            EventKey::new(key)?,
             payload,
         ))
     }
@@ -187,9 +189,10 @@ impl<P> Event<P> {
         organization: impl Into<String>,
         namespace: impl Into<String>,
         topic: impl Into<String>,
+        key: impl Into<String>,
         payload: P,
     ) -> Result<Self> {
-        Self::builder(organization, namespace, topic, payload)?.build()
+        Self::builder(organization, namespace, topic, key, payload)?.build()
     }
 
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
@@ -224,8 +227,8 @@ impl<P> Event<P> {
     pub fn version(&self) -> u64 {
         self.version
     }
-    pub fn key(&self) -> Option<&EventKey> {
-        self.key.as_ref()
+    pub fn key(&self) -> &EventKey {
+        &self.key
     }
 
     pub fn parent_id(&self) -> Option<EventId> {
@@ -247,11 +250,11 @@ impl<P> Event<P> {
             organization: self.organization,
             namespace: self.namespace,
             topic: self.topic,
+            key: self.key,
             payload: f(self.payload),
             metadata: self.metadata,
             timestamp: self.timestamp,
             version: self.version,
-            key: self.key,
             parent_id: self.parent_id,
             correlation_id: self.correlation_id,
             causation_id: self.causation_id,
@@ -267,11 +270,11 @@ impl<P> Event<P> {
             organization: self.organization,
             namespace: self.namespace,
             topic: self.topic,
+            key: self.key,
             payload: f(self.payload)?,
             metadata: self.metadata,
             timestamp: self.timestamp,
             version: self.version,
-            key: self.key,
             parent_id: self.parent_id,
             correlation_id: self.correlation_id,
             causation_id: self.causation_id,
@@ -287,11 +290,11 @@ impl<P> Event<P> {
             self.organization.clone(),
             self.namespace.clone(),
             self.topic.clone(),
+            self.key.clone(),
             codec.encode(&self.payload)?,
             self.metadata.clone(),
             self.timestamp,
             self.version,
-            self.key.clone(),
             self.parent_id,
             self.correlation_id.clone(),
             self.causation_id.clone(),
@@ -313,13 +316,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_event_without_optional_key() {
+    fn create_event_requires_key() {
         let payload = Payload::from_json(&serde_json::json!({"task_id": "123"})).unwrap();
-        let event = Event::create("acme", "/task", "task.created", payload).unwrap();
+        let event = Event::create("acme", "/task", "task.created", "task-123", payload).unwrap();
         assert_eq!(event.organization().as_str(), "acme");
         assert_eq!(event.namespace().as_str(), "/task");
         assert_eq!(event.topic().as_str(), "task.created");
-        assert_eq!(event.key(), None);
+        assert_eq!(event.key().as_str(), "task-123");
         assert_eq!(event.parent_id(), None);
         assert_eq!(event.correlation_id(), None);
         assert_eq!(event.causation_id(), None);
@@ -329,19 +332,23 @@ mod tests {
     #[test]
     fn builder_sets_optional_lineage_fields() {
         let parent_id = EventId::new();
-        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("entity-1")
-            .unwrap()
-            .parent_id(parent_id)
-            .correlation_id("workflow-7")
-            .unwrap()
-            .causation_id("command-9")
-            .unwrap()
-            .build()
-            .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "entity-1",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .parent_id(parent_id)
+        .correlation_id("workflow-7")
+        .unwrap()
+        .causation_id("command-9")
+        .unwrap()
+        .build()
+        .unwrap();
 
-        assert_eq!(event.key().map(EventKey::as_str), Some("entity-1"));
+        assert_eq!(event.key().as_str(), "entity-1");
         assert_eq!(event.parent_id(), Some(parent_id));
         assert_eq!(
             event.correlation_id().map(EventKey::as_str),
@@ -354,17 +361,39 @@ mod tests {
     }
 
     #[test]
-    fn builder_rejects_empty_optional_ids() {
-        let builder =
-            Event::builder("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap();
-        assert!(builder.key("").is_err());
+    fn builder_rejects_empty_required_key() {
+        assert!(
+            Event::builder(
+                "acme",
+                "/x",
+                "thing.happened",
+                "",
+                Payload::from_string("p")
+            )
+            .is_err()
+        );
+    }
 
-        let builder =
-            Event::builder("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+    #[test]
+    fn builder_rejects_empty_optional_ids() {
+        let builder = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap();
         assert!(builder.correlation_id("").is_err());
 
-        let builder =
-            Event::builder("acme", "/x", "thing.happened", Payload::from_string("p")).unwrap();
+        let builder = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap();
         assert!(builder.causation_id("").is_err());
     }
 
@@ -376,7 +405,7 @@ mod tests {
             .unwrap()
             .with("project", "acme")
             .unwrap();
-        let event = Event::builder("acme", "/agent", "agent.registered", payload)
+        let event = Event::builder("acme", "/agent", "agent.registered", "agent-1", payload)
             .unwrap()
             .metadata(metadata)
             .build()
@@ -387,14 +416,20 @@ mod tests {
 
     #[test]
     fn correlation_and_causation_are_first_class_fields() {
-        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("test"))
-            .unwrap()
-            .correlation_id("corr-1")
-            .unwrap()
-            .causation_id("cause-1")
-            .unwrap()
-            .build()
-            .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("test"),
+        )
+        .unwrap()
+        .correlation_id("corr-1")
+        .unwrap()
+        .causation_id("cause-1")
+        .unwrap()
+        .build()
+        .unwrap();
         assert_eq!(event.correlation_id().map(EventKey::as_str), Some("corr-1"));
         assert_eq!(event.causation_id().map(EventKey::as_str), Some("cause-1"));
         assert!(event.metadata().is_empty());
@@ -414,12 +449,13 @@ mod tests {
         };
 
         let event: Event<UserUpdated> =
-            Event::create("acme", "/users", "user.updated", payload).unwrap();
+            Event::create("acme", "/users", "user.updated", "user-u-1", payload).unwrap();
 
         assert_eq!(event.payload().user_id, "u-1");
         assert_eq!(event.organization().as_str(), "acme");
         assert_eq!(event.namespace().as_str(), "/users");
         assert_eq!(event.topic().as_str(), "user.updated");
+        assert_eq!(event.key().as_str(), "user-u-1");
     }
 
     #[test]
@@ -428,6 +464,7 @@ mod tests {
             "acme",
             "/users",
             "user.updated",
+            "user-u-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
                 email: "a@example.com".to_owned(),
@@ -444,30 +481,6 @@ mod tests {
         assert_eq!(mapped.metadata().get("source"), Some("test"));
     }
 
-    #[test]
-    fn typed_payload_event_resolves_to_partition_key() {
-        use crate::partition::{EventKeyPartitionKeyResolver, PartitionKeyResolver};
-
-        let event: Event<UserUpdated> = Event::builder(
-            "acme",
-            "/users",
-            "user.updated",
-            UserUpdated {
-                user_id: "u-1".to_owned(),
-                email: "a@example.com".to_owned(),
-            },
-        )
-        .unwrap()
-        .key("user-u-1")
-        .unwrap()
-        .build()
-        .unwrap();
-
-        let resolver = EventKeyPartitionKeyResolver::event_id_on_unkeyed();
-        let key = resolver.partition_key(&event).unwrap();
-        assert_eq!(key.as_str(), "user-u-1");
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct SerializableUserUpdated {
         user_id: String,
@@ -482,6 +495,7 @@ mod tests {
             "acme",
             "/users",
             "user.updated",
+            "user-u-1",
             SerializableUserUpdated {
                 user_id: "u-1".to_owned(),
                 email: "a@example.com".to_owned(),

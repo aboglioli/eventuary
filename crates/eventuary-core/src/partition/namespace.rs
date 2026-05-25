@@ -24,6 +24,7 @@ mod tests {
             "acme",
             "/billing",
             "invoice.created",
+            "invoice-123",
             Payload::from_string("{}"),
         )
         .unwrap();
@@ -37,6 +38,7 @@ mod tests {
             "acme",
             "/billing/invoices",
             "invoice.created",
+            "invoice-123",
             Payload::from_string("{}"),
         )
         .unwrap();

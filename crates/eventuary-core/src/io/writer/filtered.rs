@@ -87,7 +87,7 @@ mod tests {
     }
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, WirePayload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "thing-1", WirePayload::from_string("p")).unwrap()
     }
 
     #[tokio::test]

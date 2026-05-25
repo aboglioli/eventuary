@@ -156,6 +156,7 @@ mod tests {
             "acme",
             "/users",
             "user.updated",
+            "thing-1",
             UserUpdated {
                 user_id: "u-1".to_owned(),
             },
@@ -181,6 +182,7 @@ mod tests {
             "acme",
             "/users",
             "user.deleted",
+            "thing-1",
             DomainEvent::UserDeleted(UserDeleted {
                 user_id: "u-1".to_owned(),
             }),

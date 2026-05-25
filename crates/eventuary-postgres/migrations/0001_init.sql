@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS {events} (
     organization TEXT NOT NULL,
     namespace TEXT NOT NULL,
     topic TEXT NOT NULL,
-    event_key TEXT,
+    event_key TEXT NOT NULL,
     payload JSONB NOT NULL,
     content_type TEXT NOT NULL,
     metadata JSONB NOT NULL,
@@ -31,4 +31,3 @@ CREATE TABLE IF NOT EXISTS {offsets} (
 ALTER TABLE {events} ADD COLUMN IF NOT EXISTS parent_id UUID;
 ALTER TABLE {events} ADD COLUMN IF NOT EXISTS correlation_id TEXT;
 ALTER TABLE {events} ADD COLUMN IF NOT EXISTS causation_id TEXT;
-ALTER TABLE {events} ALTER COLUMN event_key DROP NOT NULL;

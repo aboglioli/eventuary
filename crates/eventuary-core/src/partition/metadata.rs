@@ -1,17 +1,15 @@
-use super::{PartitionKey, PartitionKeyResolver, UnkeyedPartitionMode};
+use super::{PartitionKey, PartitionKeyResolver};
 use crate::error::{Error, Result};
 use crate::event::Event;
 
 pub struct MetadataPartitionKeyResolver {
     field: String,
-    unkeyed_mode: UnkeyedPartitionMode,
 }
 
 impl MetadataPartitionKeyResolver {
-    pub fn new(field: impl Into<String>, mode: UnkeyedPartitionMode) -> Self {
+    pub fn new(field: impl Into<String>) -> Self {
         Self {
             field: field.into(),
-            unkeyed_mode: mode,
         }
     }
 }
@@ -20,15 +18,10 @@ impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for MetadataPartitionKeyR
     fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         match event.metadata().get(&self.field) {
             Some(value) => PartitionKey::new(value),
-            None => match self.unkeyed_mode {
-                UnkeyedPartitionMode::Error => Err(Error::InvalidEventKey(format!(
-                    "unkeyed event rejected by resolver: metadata field '{}' not found",
-                    self.field
-                ))),
-                UnkeyedPartitionMode::EventId => {
-                    PartitionKey::new(event.id().as_uuid().to_string())
-                }
-            },
+            None => Err(Error::InvalidEventKey(format!(
+                "metadata field '{}' not found",
+                self.field
+            ))),
         }
     }
 }
@@ -47,6 +40,7 @@ mod tests {
             "acme",
             "/billing",
             "invoice.created",
+            "invoice-123",
             Payload::from_string("{}"),
         )
         .unwrap()
@@ -60,6 +54,7 @@ mod tests {
             "acme",
             "/billing",
             "invoice.created",
+            "invoice-123",
             Payload::from_string("{}"),
         )
         .unwrap()
@@ -67,7 +62,7 @@ mod tests {
 
     #[test]
     fn resolves_metadata_field() {
-        let resolver = MetadataPartitionKeyResolver::new("tenant", UnkeyedPartitionMode::Error);
+        let resolver = MetadataPartitionKeyResolver::new("tenant");
         let event = event_with_metadata("tenant", "acme-corp");
         assert_eq!(
             resolver.partition_key(&event).unwrap().as_str(),
@@ -76,18 +71,10 @@ mod tests {
     }
 
     #[test]
-    fn error_mode_rejects_missing_field() {
-        let resolver = MetadataPartitionKeyResolver::new("tenant", UnkeyedPartitionMode::Error);
+    fn rejects_missing_field() {
+        let resolver = MetadataPartitionKeyResolver::new("tenant");
         let event = event_without_metadata();
         let err = resolver.partition_key(&event).unwrap_err();
         assert!(matches!(err, Error::InvalidEventKey(_)));
-    }
-
-    #[test]
-    fn event_id_mode_falls_back_to_uuid_string() {
-        let resolver = MetadataPartitionKeyResolver::new("tenant", UnkeyedPartitionMode::EventId);
-        let event = event_without_metadata();
-        let key = resolver.partition_key(&event).unwrap();
-        assert_eq!(key.as_str(), event.id().as_uuid().to_string());
     }
 }

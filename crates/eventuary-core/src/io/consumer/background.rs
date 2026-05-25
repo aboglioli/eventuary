@@ -371,6 +371,7 @@ mod tests {
             "org",
             "/x",
             "thing.happened",
+            "thing-1",
             Payload::from_string(format!("p{i}")),
         )
         .unwrap()
@@ -405,6 +406,7 @@ mod tests {
                 "org",
                 "/users",
                 "user.updated",
+                "thing-1",
                 UserUpdated {
                     user_id: "u-1".to_owned(),
                 },
@@ -414,6 +416,7 @@ mod tests {
                 "org",
                 "/users",
                 "user.updated",
+                "thing-1",
                 UserUpdated {
                     user_id: "u-2".to_owned(),
                 },

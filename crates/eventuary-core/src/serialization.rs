@@ -24,12 +24,11 @@ pub struct SerializedEvent {
     pub organization: String,
     pub namespace: String,
     pub topic: String,
+    pub key: String,
     pub payload: SerializedPayload,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub version: u64,
-    #[serde(default)]
-    pub key: Option<String>,
     #[serde(default)]
     pub parent_id: Option<Uuid>,
     #[serde(default)]
@@ -120,6 +119,7 @@ impl SerializedEvent {
             organization: event.organization().to_string(),
             namespace: event.namespace().to_string(),
             topic: event.topic().to_string(),
+            key: event.key().to_string(),
             payload: SerializedPayload::from_payload(event.payload())?,
             metadata: event
                 .metadata()
@@ -129,7 +129,6 @@ impl SerializedEvent {
                 .collect(),
             timestamp: event.timestamp(),
             version: event.version(),
-            key: event.key().map(|key| key.to_string()),
             parent_id: event.parent_id().map(|id| *id.as_uuid()),
             correlation_id: event.correlation_id().map(|id| id.to_string()),
             causation_id: event.causation_id().map(|id| id.to_string()),
@@ -137,8 +136,8 @@ impl SerializedEvent {
     }
 
     pub fn to_event(&self) -> Result<Event<Payload>> {
+        let key = EventKey::new(&self.key)?;
         let payload = self.payload.clone().into_payload()?;
-        let key = self.key.as_deref().map(EventKey::new).transpose()?;
         let parent_id = self.parent_id.map(EventId::from_uuid);
         let correlation_id = self
             .correlation_id
@@ -156,11 +155,11 @@ impl SerializedEvent {
             OrganizationId::new(&self.organization)?,
             Namespace::new(&self.namespace)?,
             Topic::new(&self.topic)?,
+            key,
             payload,
             Metadata::try_from(self.metadata.clone())?,
             self.timestamp,
             self.version,
-            key,
             parent_id,
             correlation_id,
             causation_id,
@@ -195,9 +194,7 @@ mod tests {
     use super::*;
 
     fn event_with_key(payload: Payload, key: &str) -> Event {
-        Event::builder("acme", "/x", "thing.happened", payload)
-            .unwrap()
-            .key(key)
+        Event::builder("acme", "/x", "thing.happened", key, payload)
             .unwrap()
             .build()
             .expect("valid event")
@@ -206,9 +203,7 @@ mod tests {
     #[test]
     fn roundtrip() {
         let payload = Payload::from_json(&serde_json::json!({"key": "value"})).unwrap();
-        let event = Event::builder("acme", "/task", "task.created", payload)
-            .unwrap()
-            .key("task-123")
+        let event = Event::builder("acme", "/task", "task.created", "task-123", payload)
             .unwrap()
             .build()
             .unwrap();
@@ -217,56 +212,45 @@ mod tests {
         assert_eq!(serialized.topic, "task.created");
         assert_eq!(serialized.namespace, "/task");
         assert_eq!(serialized.organization, "acme");
-        assert_eq!(serialized.key.as_deref(), Some("task-123"));
+        assert_eq!(serialized.key.as_str(), "task-123");
 
         let restored = serialized.to_event().unwrap();
         assert_eq!(restored.topic().as_str(), "task.created");
         assert_eq!(restored.id(), event.id());
-        assert_eq!(restored.key().map(EventKey::as_str), Some("task-123"));
+        assert_eq!(restored.key().as_str(), "task-123");
     }
 
     #[test]
     fn field_order_matches_event() {
-        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .build()
-            .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         let serialized = SerializedEvent::from_event(&event).unwrap();
         let json = serialized.to_json_string().unwrap();
         let id_pos = json.find("\"id\"").unwrap();
         let org_pos = json.find("\"organization\"").unwrap();
         let ns_pos = json.find("\"namespace\"").unwrap();
         let topic_pos = json.find("\"topic\"").unwrap();
+        let key_pos = json.find("\"key\"").unwrap();
         let payload_pos = json.find("\"payload\"").unwrap();
         let metadata_pos = json.find("\"metadata\"").unwrap();
         let timestamp_pos = json.find("\"timestamp\"").unwrap();
         let version_pos = json.find("\"version\"").unwrap();
-        let key_pos = json.find("\"key\"").unwrap();
         assert!(id_pos < org_pos);
         assert!(org_pos < ns_pos);
         assert!(ns_pos < topic_pos);
-        assert!(topic_pos < payload_pos);
+        assert!(topic_pos < key_pos);
+        assert!(key_pos < payload_pos);
         assert!(payload_pos < metadata_pos);
         assert!(metadata_pos < timestamp_pos);
         assert!(timestamp_pos < version_pos);
-        assert!(version_pos < key_pos);
-    }
-
-    #[test]
-    fn optional_key_can_be_absent() {
-        let event = Event::create(
-            "acme",
-            "/x",
-            "thing.happened",
-            Payload::from_string("no-key"),
-        )
-        .unwrap();
-        let serialized = SerializedEvent::from_event(&event).unwrap();
-        assert_eq!(serialized.key, None);
-        let restored = serialized.to_event().unwrap();
-        assert_eq!(restored.key(), None);
     }
 
     #[test]
@@ -327,10 +311,9 @@ mod tests {
             "acme",
             "/task",
             "task.created",
+            "task-123",
             Payload::from_json(&serde_json::json!({"key": "value"})).unwrap(),
         )
-        .unwrap()
-        .key("task-123")
         .unwrap()
         .build()
         .unwrap();
@@ -350,10 +333,9 @@ mod tests {
             "acme",
             "/task",
             "task.created",
+            "task-123",
             Payload::from_json(&serde_json::json!({"key": "value"})).unwrap(),
         )
-        .unwrap()
-        .key("task-123")
         .unwrap()
         .build()
         .unwrap();
@@ -373,10 +355,9 @@ mod tests {
             "acme",
             "/task",
             "task.created",
+            "task-123",
             Payload::from_json(&serde_json::json!({"key": "value"})).unwrap(),
         )
-        .unwrap()
-        .key("task-123")
         .unwrap()
         .build()
         .unwrap();
@@ -406,31 +387,52 @@ mod tests {
     #[test]
     fn lineage_fields_roundtrip() {
         let parent_id = EventId::new();
-        let event = Event::builder("acme", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key("k")
-            .unwrap()
-            .parent_id(parent_id)
-            .correlation_id("corr")
-            .unwrap()
-            .causation_id("cause")
-            .unwrap()
-            .build()
-            .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .parent_id(parent_id)
+        .correlation_id("corr")
+        .unwrap()
+        .causation_id("cause")
+        .unwrap()
+        .build()
+        .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
-        assert_eq!(serialized.key.as_deref(), Some("k"));
+        assert_eq!(serialized.key.as_str(), "k");
         assert_eq!(serialized.parent_id, Some(*parent_id.as_uuid()));
         assert_eq!(serialized.correlation_id.as_deref(), Some("corr"));
         assert_eq!(serialized.causation_id.as_deref(), Some("cause"));
 
         let restored = serialized.to_event().unwrap();
-        assert_eq!(restored.key().map(EventKey::as_str), Some("k"));
+        assert_eq!(restored.key().as_str(), "k");
         assert_eq!(restored.parent_id(), Some(parent_id));
         assert_eq!(
             restored.correlation_id().map(EventKey::as_str),
             Some("corr")
         );
         assert_eq!(restored.causation_id().map(EventKey::as_str), Some("cause"));
+    }
+
+    #[test]
+    fn serialized_event_rejects_missing_key() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::now_v7(),
+            "organization": "acme",
+            "namespace": "/task",
+            "topic": "task.created",
+            "payload": {"content_type": "text/plain", "data": "hello"},
+            "metadata": {},
+            "timestamp": chrono::Utc::now(),
+            "version": 1
+        });
+
+        let err = SerializedEvent::from_json_value(value).unwrap_err();
+        assert!(matches!(err, Error::Serialization(_)));
     }
 }

@@ -116,7 +116,7 @@ mod tests {
     use eventuary_core::Payload;
 
     fn ev(topic: &str) -> Event {
-        Event::create("org", "/x", topic, Payload::from_string("p")).unwrap()
+        Event::create("org", "/x", topic, "entity-1", Payload::from_string("p")).unwrap()
     }
 
     #[tokio::test]
@@ -173,6 +173,7 @@ mod tests {
             "acme",
             "/orders",
             "order.placed",
+            "order-1",
             OrderPlaced {
                 order_id: "o-1".into(),
             },

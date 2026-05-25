@@ -113,12 +113,14 @@ mod tests {
     use super::*;
 
     fn ev(key: &str) -> Event {
-        Event::builder("org", "/x", "thing.happened", Payload::from_string("p"))
-            .unwrap()
-            .key(key)
-            .unwrap()
-            .build()
-            .unwrap()
+        Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            key,
+            Payload::from_string("p"),
+        )
+        .unwrap()
     }
 
     fn owner(s: &str) -> OwnerId {
@@ -255,8 +257,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(batch.len(), 3);
-        assert_eq!(batch[0].event.key().unwrap().as_str(), "first");
-        assert_eq!(batch[1].event.key().unwrap().as_str(), "second");
-        assert_eq!(batch[2].event.key().unwrap().as_str(), "third");
+        assert_eq!(batch[0].event.key().as_str(), "first");
+        assert_eq!(batch[1].event.key().as_str(), "second");
+        assert_eq!(batch[2].event.key().as_str(), "third");
     }
 }

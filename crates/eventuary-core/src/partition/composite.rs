@@ -52,6 +52,7 @@ mod tests {
             "acme",
             "/billing",
             "invoice.created",
+            "invoice-123",
             Payload::from_string("{}"),
         )
         .unwrap()
@@ -82,19 +83,5 @@ mod tests {
             resolver.partition_key(&event).unwrap().as_str(),
             "acme|invoice.created"
         );
-    }
-
-    #[test]
-    fn propagates_child_error() {
-        use super::super::{EventKeyPartitionKeyResolver, UnkeyedPartitionMode};
-
-        let resolver = CompositePartitionKeyResolver::new(vec![
-            Arc::new(OrganizationPartitionKeyResolver),
-            Arc::new(EventKeyPartitionKeyResolver::with_unkeyed_mode(
-                UnkeyedPartitionMode::Error,
-            )),
-        ]);
-        let event = test_event();
-        assert!(resolver.partition_key(&event).is_err());
     }
 }
