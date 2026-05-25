@@ -468,7 +468,7 @@ mod tests {
             "acme",
             "/orders",
             "order.created",
-            "thing-1",
+            "order-1",
             Payload::from_string("p"),
         )
         .unwrap()
@@ -766,7 +766,7 @@ mod tests {
             "acme",
             "/orders",
             "order.placed",
-            "thing-1",
+            "order-1",
             OrderPlaced {
                 order_id: order_id.to_owned(),
             },

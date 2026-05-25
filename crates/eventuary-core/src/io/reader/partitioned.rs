@@ -1092,6 +1092,7 @@ mod tests {
             .iter()
             .position(|k| k == "cold")
             .expect("cold delivered");
+        // cold-event must arrive within 1 hot burst (8) + 1 cold window = 16 deliveries
         assert!(
             cold_pos < 16,
             "cold lane starved: cold delivered at position {cold_pos}, order={order:?}"
