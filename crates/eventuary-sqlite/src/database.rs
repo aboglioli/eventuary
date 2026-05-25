@@ -46,6 +46,7 @@ const MIGRATION_TEMPLATES: &[Migration] = &[
         filename: "0006_partition_count_coordination.sql",
         template: include_str!("../migrations/0006_partition_count_coordination.sql"),
     },
+    // 0007 is Postgres-only (buffer_claims); SQLite has no equivalent.
     Migration {
         filename: "0008_required_event_key.sql",
         template: include_str!("../migrations/0008_required_event_key.sql"),

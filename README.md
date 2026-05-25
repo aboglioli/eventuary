@@ -825,8 +825,8 @@ use eventuary::io::handler::{DeadLetterWriter, DefaultRetryPolicy, RetryConfig, 
 let handler = RetryHandler::new(
     LogHandler,
     DefaultRetryPolicy,
-    DeadLetterWriter::new(dead_letter_writer),
     RetryConfig::default(),
+    DeadLetterWriter::new(dead_letter_writer),
 );
 ```
 
