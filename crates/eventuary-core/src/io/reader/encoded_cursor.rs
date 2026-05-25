@@ -67,19 +67,21 @@ where
     }
 }
 
-impl<R, Codec, C> Reader for EncodedCursorReader<R, Codec>
+impl<R, Codec, C, P> Reader<P> for EncodedCursorReader<R, Codec>
 where
-    R: Reader<Cursor = C> + Send + Sync + 'static,
+    R: Reader<P, Cursor = C> + Send + Sync + 'static,
     R::Subscription: StartableSubscription<C> + Clone + Send + 'static,
     R::Acker: Send + Sync + 'static,
     R::Stream: Send + 'static,
     C: Cursor + Clone + Ord + Send + Sync + 'static,
     Codec: CursorCodec<C>,
+    P: Send + 'static,
 {
     type Subscription = EncodedCursorSubscription<R::Subscription>;
     type Acker = R::Acker;
     type Cursor = EncodedCursor;
-    type Stream = Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, EncodedCursor>>> + Send>>;
+    type Stream =
+        Pin<Box<dyn Stream<Item = Result<Message<Self::Acker, EncodedCursor, P>>> + Send>>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
         let mut decoded_starts = Vec::with_capacity(subscription.starts.len());
@@ -234,6 +236,67 @@ mod tests {
                 StartFrom::After(TestCursor(9)),
             ])
         );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TypedEventPayload {
+        value: String,
+    }
+
+    struct TypedVecReader {
+        seen_starts: Mutex<Option<Vec<StartFrom<TestCursor>>>>,
+    }
+
+    impl TypedVecReader {
+        fn new() -> Self {
+            Self {
+                seen_starts: Mutex::new(None),
+            }
+        }
+    }
+
+    impl Reader<TypedEventPayload> for TypedVecReader {
+        type Subscription = TestSubscription;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<
+            Box<
+                dyn Stream<Item = Result<Message<NoopAcker, TestCursor, TypedEventPayload>>> + Send,
+            >,
+        >;
+
+        async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+            *self.seen_starts.lock().unwrap() = Some(subscription.starts);
+            let event = Event::builder(
+                "acme",
+                "/typed",
+                "typed.encoded_cursor",
+                TypedEventPayload {
+                    value: "typed-cursor".to_owned(),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            Ok(Box::pin(stream::once(async move {
+                Ok(Message::new(event, NoopAcker, TestCursor(42)))
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn encoded_cursor_reader_preserves_typed_payloads() {
+        let codec = JsonCursorCodec::<TestCursor>::new("test.cursor").unwrap();
+        let reader = EncodedCursorReader::new(TypedVecReader::new(), codec);
+        let sub = EncodedCursorSubscription::new(TestSubscription::default());
+
+        let mut stream = Reader::<TypedEventPayload>::read(&reader, sub)
+            .await
+            .unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+
+        assert_eq!(msg.event().payload().value, "typed-cursor");
+        assert_eq!(msg.cursor().kind().as_str(), "test.cursor");
     }
 
     #[tokio::test]
