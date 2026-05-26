@@ -260,3 +260,97 @@ async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
         m.ack().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+    let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
+    for key in &keys {
+        writer
+            .write(&ev("acme", "/x", "thing.happened", key))
+            .await
+            .unwrap();
+    }
+
+    let scp = scope();
+    let mut acked_keys: Vec<String> = Vec::new();
+
+    {
+        let source = PgReader::new(pool.clone(), fast_config());
+        let partitioned = PartitionedReader::source(
+            source,
+            PartitionedReaderConfig {
+                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                ..PartitionedReaderConfig::default()
+            },
+        );
+        let store = PgCheckpointStore::<PartitionedCursor<PgCursor>>::new(
+            pool.clone(),
+            PgCheckpointStoreConfig::default(),
+        );
+        let checkpointed = CheckpointReader::new(partitioned, store);
+
+        let inner = PartitionedSubscription::new(sub_for("acme"));
+        let mut stream = checkpointed
+            .read(CheckpointSubscription::new(inner, scp.clone()))
+            .await
+            .unwrap();
+
+        for _ in 0..4 {
+            let msg = timeout(Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            acked_keys.push(msg.event().key().as_str().to_owned());
+            msg.ack().await.unwrap();
+        }
+    }
+
+    let mut resumed_keys: Vec<String> = Vec::new();
+
+    {
+        let source2 = PgReader::new(pool.clone(), fast_config());
+        let partitioned2 = PartitionedReader::source(
+            source2,
+            PartitionedReaderConfig {
+                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                ..PartitionedReaderConfig::default()
+            },
+        );
+        let store2 = PgCheckpointStore::<PartitionedCursor<PgCursor>>::new(
+            pool.clone(),
+            PgCheckpointStoreConfig::default(),
+        );
+        let checkpointed2 = CheckpointReader::new(partitioned2, store2);
+
+        let inner2 = PartitionedSubscription::new(sub_for("acme"));
+        let mut stream2 = checkpointed2
+            .read(CheckpointSubscription::new(inner2, scp))
+            .await
+            .unwrap();
+
+        for _ in 0..4 {
+            let msg = timeout(Duration::from_secs(5), stream2.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            resumed_keys.push(msg.event().key().as_str().to_owned());
+            msg.ack().await.unwrap();
+        }
+    }
+
+    let acked_set: std::collections::HashSet<&String> = acked_keys.iter().collect();
+    let resumed_set: std::collections::HashSet<&String> = resumed_keys.iter().collect();
+    let overlap: std::collections::HashSet<_> = acked_set.intersection(&resumed_set).collect();
+    assert!(
+        overlap.is_empty(),
+        "resumed should not re-deliver acked events; overlap={overlap:?}"
+    );
+
+    let mut combined: std::collections::HashSet<String> = acked_keys.into_iter().collect();
+    combined.extend(resumed_keys);
+    assert_eq!(combined.len(), 8, "combined total should be 8");
+}

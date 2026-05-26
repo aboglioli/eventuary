@@ -264,3 +264,97 @@ async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
 
     assert_eq!(delivered, vec!["new-after-cutoff".to_owned()]);
 }
+
+#[tokio::test]
+async fn sqlite_coordinated_reader_persists_checkpoint_on_ack() {
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
+
+    let writer = SqliteWriter::new_with_config(
+        db.conn(),
+        SqliteWriterConfig {
+            partitioning: SqlitePartitioningConfig::inline(
+                partition_count,
+                EventKeyPartitionKeyResolver::new(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..SqliteWriterConfig::default()
+        },
+    );
+
+    for key in ["k0", "k1", "k2", "k3"] {
+        writer.write(&event_with_key(key)).await.unwrap();
+    }
+
+    let coordinator = Arc::new(SqlitePartitionCoordinator::new(
+        db.conn(),
+        SqlitePartitionCoordinatorConfig::default(),
+    ));
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("checkpoint-test").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let reader = SqliteCoordinatedReader::new(
+        SqliteReader::new(
+            db.conn(),
+            SqliteReaderConfig {
+                poll_interval: Duration::from_millis(20),
+                ..SqliteReaderConfig::default()
+            },
+        ),
+        Arc::clone(&coordinator),
+        OwnerId::new("owner-1").unwrap(),
+        SqliteCoordinatedReaderConfig {
+            rebalance_interval: Duration::from_millis(100),
+            partition_lease_duration: Duration::from_secs(10),
+            ..SqliteCoordinatedReaderConfig::default()
+        },
+    );
+
+    let sub = SqliteCoordinatedSubscription {
+        scope: scope.clone(),
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: SqliteSubscription::default(),
+    };
+
+    let mut stream = reader.read(sub).await.unwrap();
+
+    for _ in 0..4 {
+        let msg = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        msg.ack().await.unwrap();
+    }
+
+    // Stream drop triggers release, but checkpoints are already committed
+    // Query the partitions table to verify checkpoints were persisted
+    let conn = db.conn();
+    let guard = conn.lock().unwrap();
+    let mut stmt = guard
+        .prepare("SELECT checkpoint_sequence FROM event_stream_partitions \
+                   WHERE consumer_group_id = ?1 AND stream_id = ?2")
+        .unwrap();
+    let checkpoints: Vec<i64> = stmt
+        .query_map(
+            rusqlite::params!["checkpoint-test", "orders"],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    drop(guard);
+
+    assert!(!checkpoints.is_empty(), "expected at least one checkpoint entry");
+    assert!(
+        checkpoints.iter().all(|s| *s > 0),
+        "all partitions should have checkpoint_sequence > 0; got {checkpoints:?}"
+    );
+}

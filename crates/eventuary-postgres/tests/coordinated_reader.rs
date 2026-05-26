@@ -599,3 +599,121 @@ async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashM
         })
         .collect()
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pg_coordinated_reader_resumes_from_checkpoint_on_restart() {
+    let (_c, pool) = start_postgres().await;
+    let partition_count = NonZeroU16::new(4).unwrap();
+
+    let writer = PgWriter::new_with_config(
+        pool.clone(),
+        PgWriterConfig {
+            partitioning: PgPartitioningConfig::inline(
+                partition_count,
+                EventKeyPartitionKeyResolver::new(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..PgWriterConfig::default()
+        },
+    );
+
+    let keys = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+    for key in &keys {
+        writer.write(&event_with_key(key)).await.unwrap();
+    }
+
+    let coordinator = Arc::new(PgPartitionCoordinator::new(
+        pool.clone(),
+        PgPartitionCoordinatorConfig::default(),
+    ));
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("resume-group").unwrap(),
+        StreamId::new("orders").unwrap(),
+    );
+
+    let reader_config = PgCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(60),
+        partition_renew_interval: Duration::from_secs(15),
+        consumer_lease_duration: Duration::from_secs(30),
+        consumer_heartbeat_interval: Duration::from_secs(10),
+        rebalance_interval: Duration::from_millis(100),
+        partition_slack: 0,
+    };
+
+    let mut acked_keys: Vec<String> = Vec::new();
+
+    {
+        let reader = PgCoordinatedReader::new(
+            PgReader::new(pool.clone(), PgReaderConfig::default()),
+            Arc::clone(&coordinator),
+            OwnerId::new("owner-1").unwrap(),
+            reader_config,
+        );
+
+        let mut stream = reader
+            .read(make_sub(scope.clone(), partition_count))
+            .await
+            .unwrap();
+
+        for _ in 0..4 {
+            let msg = timeout(Duration::from_secs(5), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            acked_keys.push(msg.event().key().as_str().to_owned());
+            msg.ack().await.unwrap();
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut resumed_keys: Vec<String> = Vec::new();
+
+    {
+        let reader2 = PgCoordinatedReader::new(
+            PgReader::new(pool.clone(), PgReaderConfig::default()),
+            Arc::clone(&coordinator),
+            OwnerId::new("owner-2").unwrap(),
+            reader_config,
+        );
+
+        let mut stream2 = reader2
+            .read(make_sub(scope.clone(), partition_count))
+            .await
+            .unwrap();
+
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(5), stream2.next()).await {
+            resumed_keys.push(msg.event().key().as_str().to_owned());
+            msg.ack().await.unwrap();
+            if resumed_keys.len() >= 8 {
+                break;
+            }
+        }
+    }
+
+    let acked_set: HashSet<&String> = acked_keys.iter().collect();
+    let resumed_set: HashSet<&String> = resumed_keys.iter().collect();
+    let overlap: HashSet<_> = acked_set.intersection(&resumed_set).collect();
+    assert!(
+        overlap.is_empty(),
+        "resumed reader should not re-deliver already-acked events; overlap={overlap:?}"
+    );
+
+    let all_keys: HashSet<&str> = keys.iter().copied().collect();
+    let mut combined: HashSet<String> = acked_keys.into_iter().collect();
+    combined.extend(resumed_keys);
+    assert_eq!(
+        combined.len(),
+        8,
+        "combined total should be 8; got {}",
+        combined.len()
+    );
+    for key in &all_keys {
+        assert!(
+            combined.contains(*key),
+            "missing event key={key}; combined={combined:?}"
+        );
+    }
+}
