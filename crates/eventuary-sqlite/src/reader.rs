@@ -14,8 +14,8 @@ use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
-    Error, Partition, PartitionableSubscription, Result, SerializedEvent, SerializedPayload,
-    StartFrom, StartableSubscription, StopAt,
+    Error, PartitionableSubscription, Result, SerializedEvent, SerializedPayload, StartFrom,
+    StartableSubscription, StopAt,
 };
 
 use crate::database::SqliteConn;
@@ -83,18 +83,13 @@ impl StartableSubscription<SqliteCursor> for SqliteSubscription {
 }
 
 impl PartitionableSubscription<SqliteCursor> for SqliteSubscription {
-    fn with_partition(mut self, partition: Partition) -> Self {
-        self.partitions = PartitionSelection::One(partition);
-        self
-    }
-}
-
-impl SqliteSubscription {
     /// Restrict this subscription to a validated group of partitions sharing
     /// the same `partition_count`. The reader emits a single SQL query per
     /// poll using `partition_id IN (?, ?, ...)` instead of one query per
-    /// partition.
-    pub fn with_partitions(mut self, group: PartitionGroup) -> Self {
+    /// partition. Single-partition uses fall through the default trait impl
+    /// which wraps in a singleton group; `IN (?)` plans identically to `= ?`
+    /// in SQLite.
+    fn with_partitions(mut self, group: PartitionGroup) -> Self {
         self.partitions = PartitionSelection::Many(group);
         self
     }
@@ -678,16 +673,17 @@ mod tests {
     use eventuary_core::{Event, PartitionableSubscription, Payload, StartFrom, StopAt};
 
     #[test]
-    fn sqlite_subscription_with_partition_sets_partition_selection_one() {
+    fn sqlite_subscription_with_partition_wraps_in_singleton_partition_group() {
         let count = NonZeroU32::new(8).unwrap();
         let partition = Partition::new(3, count).unwrap();
         let sub = SqliteSubscription::default().with_partition(partition);
         match sub.partitions {
-            PartitionSelection::One(p) => {
-                assert_eq!(p.id(), 3);
-                assert_eq!(p.count(), 8);
+            PartitionSelection::Many(g) => {
+                assert_eq!(g.len(), 1);
+                assert_eq!(g.partitions()[0].id(), 3);
+                assert_eq!(g.count(), 8);
             }
-            _ => panic!("expected PartitionSelection::One"),
+            _ => panic!("expected PartitionSelection::Many(singleton)"),
         }
     }
 

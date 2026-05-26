@@ -647,6 +647,7 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::io::position::StartableSubscription;
     use crate::io::{ConsumerGroupId, NoCursor, StreamId};
+    use crate::partition::PartitionGroup;
     use futures::stream;
 
     #[test]
@@ -773,8 +774,8 @@ mod tests {
     }
 
     impl PartitionableSubscription<NoCursor> for TypedSubscription {
-        fn with_partition(mut self, partition: Partition) -> Self {
-            self.partition = Some(partition);
+        fn with_partitions(mut self, group: PartitionGroup) -> Self {
+            self.partition = group.partitions().first().copied();
             self
         }
     }

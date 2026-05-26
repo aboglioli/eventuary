@@ -192,6 +192,22 @@ impl PartitionGroup {
         Ok(Self { partitions })
     }
 
+    /// Build a singleton group containing exactly one partition. Infallible:
+    /// a single-element group trivially satisfies the non-empty and uniform
+    /// `partition_count` invariants.
+    pub fn singleton(partition: Partition) -> Self {
+        Self {
+            partitions: vec![partition],
+        }
+    }
+
+    /// Build a `PartitionGroup` from any iterator of `Partition`s, validating
+    /// that all share the same `partition_count`. Returns an error if the
+    /// iterator is empty or `partition_count` values mismatch.
+    pub fn new_from_iter(partitions: impl IntoIterator<Item = Partition>) -> Result<Self> {
+        Self::new(partitions.into_iter().collect())
+    }
+
     pub fn partitions(&self) -> &[Partition] {
         &self.partitions
     }
@@ -451,6 +467,42 @@ mod tests {
         assert_eq!(group.len(), 3);
         assert_eq!(group.count(), 8);
         assert_eq!(group.partitions().len(), 3);
+    }
+
+    #[test]
+    fn partition_group_singleton_holds_single_partition() {
+        let count = NonZeroU32::new(4).unwrap();
+        let partition = Partition::new(2, count).unwrap();
+        let group = PartitionGroup::singleton(partition);
+        assert_eq!(group.len(), 1);
+        assert_eq!(group.partitions(), &[partition]);
+        assert_eq!(group.count_nz(), count);
+    }
+
+    #[test]
+    fn partition_group_new_from_iter_accepts_uniform_counts() {
+        let count = NonZeroU32::new(8).unwrap();
+        let group = PartitionGroup::new_from_iter([
+            Partition::new(0, count).unwrap(),
+            Partition::new(5, count).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(group.len(), 2);
+        assert_eq!(group.count(), 8);
+    }
+
+    #[test]
+    fn partition_group_new_from_iter_rejects_empty() {
+        let err = PartitionGroup::new_from_iter(std::iter::empty()).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn partition_group_new_from_iter_rejects_mismatched_counts() {
+        let p1 = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+        let p2 = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
+        let err = PartitionGroup::new_from_iter([p1, p2]).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]

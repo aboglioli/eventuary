@@ -14,8 +14,8 @@ use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{PartitionGroup, PartitionSelection};
 use eventuary_core::{
-    Error, Partition, PartitionableSubscription, Result, SerializedEvent, SerializedPayload,
-    StartFrom, StartableSubscription, StopAt,
+    Error, PartitionableSubscription, Result, SerializedEvent, SerializedPayload, StartFrom,
+    StartableSubscription, StopAt,
 };
 
 use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
@@ -82,18 +82,13 @@ impl StartableSubscription<PgCursor> for PgSubscription {
 }
 
 impl PartitionableSubscription<PgCursor> for PgSubscription {
-    fn with_partition(mut self, partition: Partition) -> Self {
-        self.partitions = PartitionSelection::One(partition);
-        self
-    }
-}
-
-impl PgSubscription {
     /// Restrict this subscription to a validated group of partitions sharing
     /// the same `partition_count`. The reader emits a single SQL query per
     /// poll using `partition_id = ANY($::bigint[])` instead of one query per
-    /// partition.
-    pub fn with_partitions(mut self, group: PartitionGroup) -> Self {
+    /// partition. Single-partition uses fall through the default trait impl
+    /// which wraps in a singleton group; `partition_id = ANY(ARRAY[$1])`
+    /// plans identically to `partition_id = $1` on modern Postgres.
+    fn with_partitions(mut self, group: PartitionGroup) -> Self {
         self.partitions = PartitionSelection::Many(group);
         self
     }
@@ -587,21 +582,23 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+    use eventuary_core::Partition;
     use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
     use eventuary_core::io::{Cursor, CursorId};
 
     #[test]
-    fn pg_subscription_with_partition_sets_partition_selection_one() {
+    fn pg_subscription_with_partition_wraps_in_singleton_partition_group() {
         use eventuary_core::PartitionableSubscription;
         let count = NonZeroU32::new(8).unwrap();
         let partition = Partition::new(3, count).unwrap();
         let sub = PgSubscription::default().with_partition(partition);
         match sub.partitions {
-            PartitionSelection::One(p) => {
-                assert_eq!(p.id(), 3);
-                assert_eq!(p.count(), 8);
+            PartitionSelection::Many(g) => {
+                assert_eq!(g.len(), 1);
+                assert_eq!(g.partitions()[0].id(), 3);
+                assert_eq!(g.count(), 8);
             }
-            _ => panic!("expected PartitionSelection::One"),
+            _ => panic!("expected PartitionSelection::Many(singleton)"),
         }
     }
 

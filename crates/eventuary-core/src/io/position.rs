@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::io::NoCursor;
-use crate::partition::Partition;
+use crate::partition::{Partition, PartitionGroup};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum StartFrom<C = NoCursor> {
@@ -50,14 +50,32 @@ pub trait StartableSubscription<C>: Clone + Send + 'static {
     }
 }
 
-/// Capability trait for subscriptions that can be restricted to a single
-/// partition. `CoordinatedReader` calls `with_partition(lease.partition)` on
-/// the inner subscription before spawning each per-lease worker.
+/// Capability trait for subscriptions that can be restricted to a set of
+/// partitions. `CoordinatedReader` calls `with_partitions(group)` on the
+/// inner subscription before spawning each per-lease worker so a single
+/// fetch per poll can cover all owned lanes.
 ///
 /// Sibling of [`StartableSubscription`]: same `Self -> Self` builder shape,
 /// same role (capability marker the reader composes against).
 pub trait PartitionableSubscription<C>: StartableSubscription<C> + Clone + Send + 'static {
-    fn with_partition(self, partition: Partition) -> Self;
+    /// Restrict the subscription to a validated group of partitions sharing
+    /// the same `partition_count`. The reader emits a single fetch per poll
+    /// using a multi-partition filter instead of one fetch per partition.
+    ///
+    /// This is the primary method.
+    fn with_partitions(self, group: PartitionGroup) -> Self;
+
+    /// Restrict the subscription to a single partition. The default impl
+    /// wraps the partition in a singleton `PartitionGroup` and delegates to
+    /// [`PartitionableSubscription::with_partitions`]. Backends override
+    /// only when a single-partition path is materially cheaper than the
+    /// multi-partition path (rare).
+    fn with_partition(self, partition: Partition) -> Self
+    where
+        Self: Sized,
+    {
+        self.with_partitions(PartitionGroup::singleton(partition))
+    }
 }
 
 #[cfg(test)]
@@ -154,9 +172,12 @@ mod tests {
     }
 
     use crate::io::NoCursor;
+    use std::num::NonZeroU32;
 
-    #[derive(Clone)]
-    struct PartitionableStub;
+    #[derive(Clone, Default)]
+    struct PartitionableStub {
+        group: Option<PartitionGroup>,
+    }
 
     impl StartableSubscription<NoCursor> for PartitionableStub {
         fn with_start(self, _start: StartFrom<NoCursor>) -> Self {
@@ -165,7 +186,8 @@ mod tests {
     }
 
     impl PartitionableSubscription<NoCursor> for PartitionableStub {
-        fn with_partition(self, _partition: Partition) -> Self {
+        fn with_partitions(mut self, group: PartitionGroup) -> Self {
+            self.group = Some(group);
             self
         }
     }
@@ -178,6 +200,22 @@ mod tests {
 
     #[test]
     fn partitionable_subscription_is_super_trait_of_startable() {
-        _accepts_partitionable(PartitionableStub);
+        _accepts_partitionable(PartitionableStub::default());
+    }
+
+    #[test]
+    fn with_partition_default_impl_delegates_to_singleton_with_partitions() {
+        let count = NonZeroU32::new(4).unwrap();
+        let partition = Partition::new(2, count).unwrap();
+
+        let via_single = PartitionableStub::default().with_partition(partition);
+        let via_group =
+            PartitionableStub::default().with_partitions(PartitionGroup::singleton(partition));
+
+        assert_eq!(via_single.group, via_group.group);
+        assert_eq!(
+            via_single.group.expect("group set").partitions(),
+            &[partition]
+        );
     }
 }
