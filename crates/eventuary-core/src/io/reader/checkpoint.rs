@@ -734,11 +734,11 @@ mod tests {
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![
             (
-                CursorId::partition(8, 0),
+                CursorId::partition(old_partition),
                 PartitionedCursor::new(TestCursor(0), old_partition),
             ),
             (
-                CursorId::partition(4, 2),
+                CursorId::partition(current_partition),
                 PartitionedCursor::new(TestCursor(0), current_partition),
             ),
         ];
@@ -789,7 +789,7 @@ mod tests {
         let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![(
-            CursorId::partition(8, 0),
+            CursorId::partition(old_partition),
             PartitionedCursor::new(TestCursor(10), old_partition),
         )];
 
@@ -827,7 +827,9 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_reader_seeds_inner_with_min_cursor() {
-        let cursor_id = CursorId::partition(4, 2);
+        let cursor_id = CursorId::partition(
+            crate::partition::Partition::new(2, std::num::NonZeroU16::new(4).unwrap()).unwrap(),
+        );
         let store = PreloadedStore::default();
         *store.rows.lock().await = vec![(cursor_id, TestCursor(10))];
         let observed = std::sync::Arc::new(TokioMutex::new(None));
@@ -881,7 +883,9 @@ mod tests {
             ConsumerGroupId::new("g").unwrap(),
             StreamId::new("s").unwrap(),
         );
-        let id = CursorId::partition(100, 17);
+        let id = CursorId::partition(
+            crate::partition::Partition::new(17, std::num::NonZeroU16::new(100).unwrap()).unwrap(),
+        );
         let key = CheckpointKey::new(scope, id.clone());
         assert_eq!(key.cursor_id, id);
     }

@@ -219,7 +219,10 @@ mod tests {
 
     #[test]
     fn cursor_id_named_roundtrips_unquoted() {
-        let id = CursorId::partition(100, 17);
+        let id = CursorId::partition(
+            eventuary_core::partition::Partition::new(17, std::num::NonZeroU16::new(100).unwrap())
+                .unwrap(),
+        );
         let encoded = encode_cursor_id(&id).to_owned();
         assert_eq!(encoded, "partition:100:17");
         assert_eq!(decode_cursor_id(encoded), id);

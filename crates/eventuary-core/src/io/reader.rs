@@ -310,8 +310,8 @@ pub use outcome_router::{
     DeliveryDisposition, NackDisposition, OutcomeRouterAcker, OutcomeRouterReader,
 };
 pub use partitioned::{
-    LaneScheduling, PartitionAcker, PartitionRouteStrategy, PartitionedCursor, PartitionedReader,
-    PartitionedReaderConfig, PartitionedSubscription,
+    LaneScheduling, PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
+    PartitionedSubscription,
 };
 pub use rate_limit::{RateLimit, RateLimitReader};
 pub use recover::{RecoverConfig, RecoverReader};

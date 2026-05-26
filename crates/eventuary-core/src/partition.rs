@@ -294,8 +294,7 @@ mod tests {
 
     #[test]
     fn fnv1a_known_vector_remains_stable() {
-        // Anchors the stable hash used by Fnv1a64PartitionHasher and the
-        // PartitionedReader EventCompatibility route strategy.
+        // Anchors the stable hash used by Fnv1a64PartitionHasher across versions.
         let count = NonZeroU16::new(16).unwrap();
         let id = (fnv1a_u64("user-42".as_bytes()) % count.get() as u64) as u16;
         assert_eq!(id, 11);

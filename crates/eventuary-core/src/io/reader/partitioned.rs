@@ -1,7 +1,8 @@
 //! Partitioned reader: in-process lane scheduler over any inner reader.
 //!
-//! Routes inner messages into N lanes by partition strategy
-//! (`EventCompatibility` default, or resolver/hasher pipeline).
+//! Routes inner messages into N lanes via a `PartitionKeyResolver<P>` +
+//! `PartitionHasher` pipeline configured on `PartitionedReaderConfig`.
+//! Defaults are `EventKeyPartitionKeyResolver` + `Fnv1a64PartitionHasher`.
 //! Each lane buffers up to `lane_capacity` events. Downstream redelivery
 //! is in-memory only: a downstream `ack` clears the lane's in-flight slot
 //! so the merged emit task can serve the next event from that lane (or any
@@ -56,60 +57,30 @@ use crate::io::cursor::CursorOrder;
 use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, NoCursor, Reader};
-use crate::partition::{Partition, PartitionHasher, PartitionKeyResolver, fnv1a_u64};
+use crate::partition::{
+    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionHasher,
+    PartitionKeyResolver,
+};
 use crate::payload::Payload;
-
-#[derive(Default)]
-pub enum PartitionRouteStrategy<P = Payload> {
-    #[default]
-    EventCompatibility,
-    ResolverHasher {
-        key_resolver: Arc<dyn PartitionKeyResolver<P>>,
-        hasher: Arc<dyn PartitionHasher>,
-    },
-}
-
-impl<P> Clone for PartitionRouteStrategy<P> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::EventCompatibility => Self::EventCompatibility,
-            Self::ResolverHasher {
-                key_resolver,
-                hasher,
-            } => Self::ResolverHasher {
-                key_resolver: Arc::clone(key_resolver),
-                hasher: Arc::clone(hasher),
-            },
-        }
-    }
-}
-
-impl<P> PartitionRouteStrategy<P> {
-    pub fn resolver_hasher(
-        key_resolver: impl PartitionKeyResolver<P> + 'static,
-        hasher: impl PartitionHasher + 'static,
-    ) -> Self {
-        Self::ResolverHasher {
-            key_resolver: Arc::new(key_resolver),
-            hasher: Arc::new(hasher),
-        }
-    }
-}
-
-impl<P> fmt::Debug for PartitionRouteStrategy<P> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EventCompatibility => f.write_str("EventCompatibility"),
-            Self::ResolverHasher { .. } => f.debug_struct("ResolverHasher").finish_non_exhaustive(),
-        }
-    }
-}
 
 pub struct PartitionedReaderConfig<P = Payload> {
     pub partition_count: NonZeroU16,
     pub lane_capacity: NonZeroUsize,
     pub scheduling: LaneScheduling,
-    pub route_strategy: PartitionRouteStrategy<P>,
+    pub key_resolver: Arc<dyn PartitionKeyResolver<P>>,
+    pub hasher: Arc<dyn PartitionHasher>,
+}
+
+impl<P> PartitionedReaderConfig<P> {
+    pub fn with_router(
+        mut self,
+        key_resolver: impl PartitionKeyResolver<P> + 'static,
+        hasher: impl PartitionHasher + 'static,
+    ) -> Self {
+        self.key_resolver = Arc::new(key_resolver);
+        self.hasher = Arc::new(hasher);
+        self
+    }
 }
 
 impl<P> Clone for PartitionedReaderConfig<P> {
@@ -118,7 +89,8 @@ impl<P> Clone for PartitionedReaderConfig<P> {
             partition_count: self.partition_count,
             lane_capacity: self.lane_capacity,
             scheduling: self.scheduling,
-            route_strategy: self.route_strategy.clone(),
+            key_resolver: Arc::clone(&self.key_resolver),
+            hasher: Arc::clone(&self.hasher),
         }
     }
 }
@@ -129,12 +101,12 @@ impl<P> fmt::Debug for PartitionedReaderConfig<P> {
             .field("partition_count", &self.partition_count)
             .field("lane_capacity", &self.lane_capacity)
             .field("scheduling", &self.scheduling)
-            .field("route_strategy", &self.route_strategy)
-            .finish()
+            .field("hasher_strategy", &self.hasher.strategy())
+            .finish_non_exhaustive()
     }
 }
 
-impl<P> Default for PartitionedReaderConfig<P> {
+impl<P: Send + Sync + 'static> Default for PartitionedReaderConfig<P> {
     fn default() -> Self {
         Self {
             partition_count: NonZeroU16::new(64).unwrap(),
@@ -142,7 +114,8 @@ impl<P> Default for PartitionedReaderConfig<P> {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
-            route_strategy: PartitionRouteStrategy::EventCompatibility,
+            key_resolver: Arc::new(EventKeyPartitionKeyResolver),
+            hasher: Arc::new(Fnv1a64PartitionHasher),
         }
     }
 }
@@ -224,7 +197,7 @@ impl<C> PartitionedCursor<C> {
 
 impl<C: Cursor> Cursor for PartitionedCursor<C> {
     fn id(&self) -> CursorId {
-        CursorId::partition(self.partition.count(), self.partition.id())
+        CursorId::partition(self.partition)
     }
 
     fn order_key(&self) -> CursorOrder {
@@ -442,7 +415,8 @@ where
         let lane_capacity = self.config.lane_capacity.get();
         let scheduling = self.config.scheduling;
         let ack_mode = self.ack_mode;
-        let route_strategy = self.config.route_strategy.clone();
+        let key_resolver = Arc::clone(&self.config.key_resolver);
+        let hasher = Arc::clone(&self.config.hasher);
 
         type LanesState<A, C, P> = std::sync::Arc<Mutex<Lanes<A, C, P>>>;
         let lanes_inner: Vec<Lane<R::Acker, R::Cursor, P>> = (0..count)
@@ -495,7 +469,12 @@ where
                         continue;
                     }
                 };
-                let lane_id = match compute_partition(msg.event(), count_nz, &route_strategy) {
+                let lane_id = match compute_partition(
+                    msg.event(),
+                    count_nz,
+                    key_resolver.as_ref(),
+                    hasher.as_ref(),
+                ) {
                     Ok(p) => p.id() as usize,
                     Err(e) => {
                         let _ = intake_tx.send(Err(e)).await;
@@ -687,22 +666,11 @@ where
 fn compute_partition<P: 'static>(
     event: &Event<P>,
     count: NonZeroU16,
-    strategy: &PartitionRouteStrategy<P>,
+    key_resolver: &dyn PartitionKeyResolver<P>,
+    hasher: &dyn PartitionHasher,
 ) -> Result<Partition> {
-    match strategy {
-        PartitionRouteStrategy::EventCompatibility => {
-            let hash = fnv1a_u64(event.key().as_str().as_bytes());
-            let id = (hash % count.get() as u64) as u16;
-            Ok(Partition::new(id, count).expect("id < count by modulo"))
-        }
-        PartitionRouteStrategy::ResolverHasher {
-            key_resolver,
-            hasher,
-        } => {
-            let key = key_resolver.partition_key(event)?;
-            Ok(hasher.partition_for(&key, count))
-        }
-    }
+    let key = key_resolver.partition_key(event)?;
+    Ok(hasher.partition_for(&key, count))
 }
 
 #[cfg(test)]
@@ -742,7 +710,7 @@ mod tests {
     fn partitioned_cursor_id_is_named_with_partition() {
         let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
-        assert_eq!(cursor.id(), CursorId::partition(100, 17));
+        assert_eq!(cursor.id(), CursorId::partition(partition));
     }
 
     #[test]
@@ -870,7 +838,7 @@ mod tests {
             partition_count: NonZeroU16::new(n).unwrap(),
             lane_capacity: NonZeroUsize::new(cap).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
-            route_strategy: PartitionRouteStrategy::EventCompatibility,
+            ..PartitionedReaderConfig::default()
         }
     }
 
@@ -1074,7 +1042,7 @@ mod tests {
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
             },
-            route_strategy: PartitionRouteStrategy::EventCompatibility,
+            ..PartitionedReaderConfig::default()
         };
         let p = PartitionedReader::source(reader, cfg);
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
@@ -1261,23 +1229,23 @@ mod tests {
     }
 
     #[test]
-    fn default_route_strategy_is_event_compatibility() {
+    fn default_router_is_event_key_fnv1a64() {
         let config: PartitionedReaderConfig = PartitionedReaderConfig::default();
-        assert!(matches!(
-            config.route_strategy,
-            PartitionRouteStrategy::EventCompatibility
-        ));
+        assert_eq!(config.hasher.strategy(), Fnv1a64PartitionHasher.strategy());
     }
 
     #[tokio::test]
-    async fn event_compatibility_routes_via_event_partition() {
+    async fn default_router_routes_via_event_key_fnv1a64() {
+        use crate::partition::PartitionKey;
+
         let count_nz = NonZeroU16::new(4).unwrap();
+        let hasher = Fnv1a64PartitionHasher;
         let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
         let expected_lanes: Vec<u16> = events
             .iter()
             .map(|e| {
-                let hash = fnv1a_u64(e.key().as_str().as_bytes());
-                (hash % count_nz.get() as u64) as u16
+                let key = PartitionKey::new(e.key().as_str()).unwrap();
+                hasher.partition_for(&key, count_nz).id()
             })
             .collect();
 
@@ -1288,7 +1256,7 @@ mod tests {
             partition_count: count_nz,
             lane_capacity: NonZeroUsize::new(64).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
-            route_strategy: PartitionRouteStrategy::EventCompatibility,
+            ..PartitionedReaderConfig::default()
         };
         let p = PartitionedReader::source(reader, config);
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
@@ -1312,10 +1280,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_hasher_routes_via_pipeline() {
-        use crate::partition::{
-            EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionKey,
-        };
+    async fn custom_router_routes_via_pipeline() {
+        use crate::partition::PartitionKey;
 
         let count_nz = NonZeroU16::new(4).unwrap();
         let hasher = Fnv1a64PartitionHasher;
@@ -1335,11 +1301,9 @@ mod tests {
             partition_count: count_nz,
             lane_capacity: NonZeroUsize::new(64).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
-            route_strategy: PartitionRouteStrategy::resolver_hasher(
-                EventKeyPartitionKeyResolver::new(),
-                Fnv1a64PartitionHasher,
-            ),
-        };
+            ..PartitionedReaderConfig::default()
+        }
+        .with_router(EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher);
         let p = PartitionedReader::source(reader, config);
         let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
 

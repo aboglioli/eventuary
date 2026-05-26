@@ -116,8 +116,13 @@ mod tests {
     #[tokio::test]
     async fn load_scope_returns_all_cursors_in_scope() {
         let store: MemoryCheckpointStore<i64> = MemoryCheckpointStore::new();
-        let k1 = key(CursorId::partition(0, 4));
-        let k2 = key(CursorId::partition(1, 4));
+        let count = std::num::NonZeroU16::new(4).unwrap();
+        let k1 = key(CursorId::partition(
+            eventuary_core::partition::Partition::new(0, count).unwrap(),
+        ));
+        let k2 = key(CursorId::partition(
+            eventuary_core::partition::Partition::new(1, count).unwrap(),
+        ));
         store.commit(&k1, 10).await.unwrap();
         store.commit(&k2, 20).await.unwrap();
 
