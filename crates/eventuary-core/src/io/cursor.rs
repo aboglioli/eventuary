@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::partition::Partition;
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct CursorId(Arc<str>);
@@ -34,8 +35,12 @@ impl CursorId {
         Self(Arc::from("global"))
     }
 
-    pub fn partition(count: u16, id: u16) -> Self {
-        Self(Arc::from(format!("partition:{count}:{id}")))
+    pub fn partition(partition: Partition) -> Self {
+        Self(Arc::from(format!(
+            "partition:{count}:{id}",
+            count = partition.count(),
+            id = partition.id(),
+        )))
     }
 
     pub fn as_str(&self) -> &str {
@@ -378,7 +383,13 @@ impl Cursor for NoCursor {}
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
+
     use super::*;
+
+    fn partition(count: u16, id: u16) -> Partition {
+        Partition::new(id, NonZeroU16::new(count).unwrap()).unwrap()
+    }
 
     #[test]
     fn global_returns_static_global_id() {
@@ -388,7 +399,7 @@ mod tests {
 
     #[test]
     fn partition_constructs_stable_format() {
-        let id = CursorId::partition(100, 17);
+        let id = CursorId::partition(partition(100, 17));
         assert_eq!(id.as_str(), "partition:100:17");
     }
 
@@ -674,7 +685,7 @@ mod tests {
                 CursorId::new("partition:100:17").unwrap()
             }
         }
-        assert_eq!(NamedCursor.id(), CursorId::partition(100, 17));
+        assert_eq!(NamedCursor.id(), CursorId::partition(partition(100, 17)));
     }
 
     #[test]
@@ -711,7 +722,7 @@ mod tests {
         let v = serde_json::to_value(id).unwrap();
         assert_eq!(v.as_str(), Some("global"));
 
-        let id = CursorId::partition(4, 1);
+        let id = CursorId::partition(partition(4, 1));
         let v = serde_json::to_value(id).unwrap();
         assert_eq!(v.as_str(), Some("partition:4:1"));
     }
@@ -723,7 +734,7 @@ mod tests {
         let back: CursorId = serde_json::from_value(v).unwrap();
         assert_eq!(back, id);
 
-        let id = CursorId::partition(4, 2);
+        let id = CursorId::partition(partition(4, 2));
         let v = serde_json::to_value(id.clone()).unwrap();
         let back: CursorId = serde_json::from_value(v).unwrap();
         assert_eq!(back, id);
@@ -734,7 +745,7 @@ mod tests {
         let id = CursorId::global();
         assert_eq!(id.to_string(), "global");
 
-        let id = CursorId::partition(4, 1);
+        let id = CursorId::partition(partition(4, 1));
         assert_eq!(id.to_string(), "partition:4:1");
     }
 

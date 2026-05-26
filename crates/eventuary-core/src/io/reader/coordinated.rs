@@ -193,7 +193,7 @@ impl<C> CoordinatedCursor<C> {
 
 impl<C: Cursor> Cursor for CoordinatedCursor<C> {
     fn id(&self) -> CursorId {
-        CursorId::partition(self.partition.count(), self.partition.id())
+        CursorId::partition(self.partition)
     }
 
     fn order_key(&self) -> CursorOrder {

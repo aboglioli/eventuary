@@ -224,7 +224,7 @@ impl<C> PartitionedCursor<C> {
 
 impl<C: Cursor> Cursor for PartitionedCursor<C> {
     fn id(&self) -> CursorId {
-        CursorId::partition(self.partition.count(), self.partition.id())
+        CursorId::partition(self.partition)
     }
 
     fn order_key(&self) -> CursorOrder {
@@ -742,7 +742,7 @@ mod tests {
     fn partitioned_cursor_id_is_named_with_partition() {
         let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
-        assert_eq!(cursor.id(), CursorId::partition(100, 17));
+        assert_eq!(cursor.id(), CursorId::partition(partition));
     }
 
     #[test]
