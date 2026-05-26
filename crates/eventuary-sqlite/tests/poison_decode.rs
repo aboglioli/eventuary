@@ -91,7 +91,10 @@ async fn decode_reader_skips_poison_payload_and_continues() {
         .await
         .unwrap()
         .unwrap();
-    assert!(poison_err.is_err(), "poison event should surface as decode error");
+    assert!(
+        poison_err.is_err(),
+        "poison event should surface as decode error"
+    );
 
     let msg2 = timeout(Duration::from_secs(5), stream.next())
         .await

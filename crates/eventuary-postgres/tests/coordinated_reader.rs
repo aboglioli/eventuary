@@ -617,7 +617,9 @@ async fn pg_coordinated_reader_resumes_from_checkpoint_on_restart() {
         },
     );
 
-    let keys = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+    let keys = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ];
     for key in &keys {
         writer.write(&event_with_key(key)).await.unwrap();
     }

@@ -370,5 +370,10 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
 
     let mut combined: std::collections::HashSet<String> = acked_keys.into_iter().collect();
     combined.extend(resumed_keys);
-    assert_eq!(combined.len(), 8, "combined total should be 8; got {}", combined.len());
+    assert_eq!(
+        combined.len(),
+        8,
+        "combined total should be 8; got {}",
+        combined.len()
+    );
 }
