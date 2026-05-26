@@ -74,7 +74,7 @@ async fn acker_ack_advances_checkpoint() {
         PgCursorAcker::dummy(50),
         Arc::clone(&coord_arc),
         lease,
-        PgCursor::new(50),
+        PgCursor::new(50, partition(7)),
     );
 
     acker.ack().await.unwrap();
@@ -127,7 +127,7 @@ async fn acker_ack_fails_after_partition_taken_over() {
         PgCursorAcker::dummy(50),
         Arc::clone(&coord_arc),
         lease_a,
-        PgCursor::new(50),
+        PgCursor::new(50, partition(7)),
     );
 
     let err = stale_acker.ack().await.unwrap_err();
@@ -155,7 +155,7 @@ async fn acker_nack_does_not_touch_checkpoint() {
         PgCursorAcker::dummy(100),
         Arc::clone(&coord_arc),
         lease,
-        PgCursor::new(100),
+        PgCursor::new(100, partition(7)),
     );
 
     acker.nack().await.unwrap();

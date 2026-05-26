@@ -265,7 +265,10 @@ async fn pg_coordinator_checkpoint_with_matching_generation_advances() {
         .unwrap()
         .unwrap();
 
-    coord.checkpoint(&lease, PgCursor::new(100)).await.unwrap();
+    coord
+        .checkpoint(&lease, PgCursor::new(100, partition(0)))
+        .await
+        .unwrap();
 
     coord.release(&lease).await.unwrap();
 
@@ -295,8 +298,14 @@ async fn pg_coordinator_checkpoint_is_monotonic() {
         .unwrap()
         .unwrap();
 
-    coord.checkpoint(&lease, PgCursor::new(100)).await.unwrap();
-    coord.checkpoint(&lease, PgCursor::new(50)).await.unwrap();
+    coord
+        .checkpoint(&lease, PgCursor::new(100, partition(0)))
+        .await
+        .unwrap();
+    coord
+        .checkpoint(&lease, PgCursor::new(50, partition(0)))
+        .await
+        .unwrap();
 
     coord.release(&lease).await.unwrap();
 
@@ -329,7 +338,7 @@ async fn pg_coordinator_checkpoint_after_release_returns_ownership_lost() {
     coord.release(&lease).await.unwrap();
 
     let err = coord
-        .checkpoint(&lease, PgCursor::new(100))
+        .checkpoint(&lease, PgCursor::new(100, partition(0)))
         .await
         .unwrap_err();
     assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
@@ -390,7 +399,7 @@ async fn pg_coordinator_checkpoint_with_stale_generation_returns_ownership_lost(
         .unwrap();
 
     let err = coord
-        .checkpoint(&lease_a, PgCursor::new(100))
+        .checkpoint(&lease_a, PgCursor::new(100, partition(0)))
         .await
         .unwrap_err();
     assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));

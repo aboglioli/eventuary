@@ -299,7 +299,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                     partition,
                     generation: Generation::from_i64(generation),
                     checkpoint_cursor: (checkpoint_sequence > 0)
-                        .then_some(PgCursor::new(checkpoint_sequence)),
+                        .then_some(PgCursor::new(checkpoint_sequence, partition)),
                     lease_until: returned_lease_until,
                 }))
             }

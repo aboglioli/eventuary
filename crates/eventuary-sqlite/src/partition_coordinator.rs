@@ -323,7 +323,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         partition,
                         generation: Generation::from_i64(generation),
                         checkpoint_cursor: (checkpoint_sequence > 0)
-                            .then_some(SqliteCursor::new(checkpoint_sequence)),
+                            .then_some(SqliteCursor::new(checkpoint_sequence, partition)),
                         lease_until,
                     }))
                 }
@@ -822,7 +822,7 @@ mod tests {
             .unwrap();
 
         coord
-            .checkpoint(&lease, SqliteCursor::new(100))
+            .checkpoint(&lease, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap();
 
@@ -851,11 +851,11 @@ mod tests {
             .unwrap();
 
         coord
-            .checkpoint(&lease, SqliteCursor::new(100))
+            .checkpoint(&lease, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap();
         coord
-            .checkpoint(&lease, SqliteCursor::new(50))
+            .checkpoint(&lease, SqliteCursor::new(50, partition(0)))
             .await
             .unwrap();
 
@@ -893,7 +893,7 @@ mod tests {
             .unwrap();
 
         let err = coord
-            .checkpoint(&lease_a, SqliteCursor::new(100))
+            .checkpoint(&lease_a, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap_err();
         assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
@@ -942,7 +942,7 @@ mod tests {
         coord.release(&lease).await.unwrap();
 
         let err = coord
-            .checkpoint(&lease, SqliteCursor::new(100))
+            .checkpoint(&lease, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap_err();
         assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));

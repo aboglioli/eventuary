@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -9,10 +10,22 @@ use tokio::time::timeout;
 
 use eventuary_core::io::reader::ReaderTypedExt;
 use eventuary_core::io::{Reader, Writer};
+use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, JsonPayloadCodec, Payload, StartFrom};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
-use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
+use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
+
+fn writer_config() -> PgWriterConfig {
+    PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            NonZeroU32::new(4).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct OrderPlaced {
@@ -36,7 +49,7 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
-    PgWriter::prepare_schema(&pool, &PgWriterConfig::default())
+    PgWriter::prepare_schema(&pool, &writer_config())
         .await
         .unwrap();
     (container, pool)
@@ -45,7 +58,7 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decode_reader_skips_poison_payload_and_continues() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = PgWriter::new_with_config(pool.clone(), writer_config());
 
     let valid = Event::builder(
         "acme",

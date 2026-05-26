@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
-use eventuary_core::partition::{PartitionGroup, PartitionSelection};
+use eventuary_core::partition::{Partition, PartitionGroup, PartitionSelection};
 use eventuary_core::{
     Error, PartitionableSubscription, Result, SerializedEvent, SerializedPayload, StartFrom,
     StartableSubscription, StopAt,
@@ -24,18 +25,25 @@ use crate::relation::PgRelationName;
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
 )]
-#[serde(transparent)]
 pub struct PgCursor {
     pub sequence: i64,
+    pub partition: Partition,
 }
 
 impl PgCursor {
-    pub fn new(sequence: i64) -> Self {
-        Self { sequence }
+    pub fn new(sequence: i64, partition: Partition) -> Self {
+        Self {
+            sequence,
+            partition,
+        }
     }
 
     pub fn sequence(&self) -> i64 {
         self.sequence
+    }
+
+    pub fn partition(&self) -> Partition {
+        self.partition
     }
 }
 
@@ -236,7 +244,7 @@ impl Reader for PgReader {
 
         let handle = tokio::spawn(async move {
             let mut delivered = 0usize;
-            let mut buffer: VecDeque<(SerializedEvent, i64)> = VecDeque::new();
+            let mut buffer: VecDeque<(SerializedEvent, i64, Partition)> = VecDeque::new();
             loop {
                 if buffer.is_empty() {
                     let fetched = match fetch_batch(
@@ -269,8 +277,9 @@ impl Reader for PgReader {
                     buffer.extend(fetched);
                 }
 
-                while let Some((serialized, sequence)) = buffer.front() {
+                while let Some((serialized, sequence, partition)) = buffer.front() {
                     let sequence = *sequence;
+                    let partition = *partition;
                     let event = match serialized.to_event() {
                         Ok(e) => e,
                         Err(e) => {
@@ -297,7 +306,10 @@ impl Reader for PgReader {
                         notify: Arc::clone(&notify),
                         sequence,
                     };
-                    let cursor = PgCursor { sequence };
+                    let cursor = PgCursor {
+                        sequence,
+                        partition,
+                    };
                     if tx
                         .send(Ok(Message::new(event, acker, cursor)))
                         .await
@@ -423,7 +435,7 @@ struct FetchBatchParams<'a> {
 async fn fetch_batch(
     pool: &PgPool,
     p: FetchBatchParams<'_>,
-) -> Result<Vec<(SerializedEvent, i64)>> {
+) -> Result<Vec<(SerializedEvent, i64, Partition)>> {
     let FetchBatchParams {
         events_relation,
         after_seq,
@@ -437,7 +449,7 @@ async fn fetch_batch(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
          timestamp::text AS timestamp_text, version, parent_id::text AS parent_id_text, \
-         correlation_id, causation_id \
+         correlation_id, causation_id, partition_id, partition_count \
          FROM {events_relation} WHERE sequence > $1",
     );
     let mut bind_index = 2usize;
@@ -565,7 +577,29 @@ async fn fetch_batch(
                 correlation_id: row.get("correlation_id"),
                 causation_id: row.get("causation_id"),
             };
-            Ok((serialized, sequence))
+            let partition_id: Option<i64> = row.get("partition_id");
+            let partition_count: Option<i64> = row.get("partition_count");
+            let partition = match (partition_id, partition_count) {
+                (Some(id), Some(count)) => {
+                    let id_u32 = u32::try_from(id)
+                        .map_err(|_| Error::Store(format!("partition_id {id} exceeds u32::MAX")))?;
+                    let count_u32 = u32::try_from(count).map_err(|_| {
+                        Error::Store(format!("partition_count {count} exceeds u32::MAX"))
+                    })?;
+                    let count = NonZeroU32::new(count_u32).ok_or_else(|| {
+                        Error::Store("partition_count must be positive".to_owned())
+                    })?;
+                    Partition::new(id_u32, count)
+                        .map_err(|e| Error::Store(format!("invalid partition: {e}")))?
+                }
+                _ => {
+                    return Err(Error::Store(
+                        "event has NULL partition columns — run partition backfill first"
+                            .to_owned(),
+                    ));
+                }
+            };
+            Ok((serialized, sequence, partition))
         })
         .collect()
 }
@@ -579,12 +613,13 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
-
     use super::*;
-    use eventuary_core::Partition;
     use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
     use eventuary_core::io::{Cursor, CursorId};
+
+    fn test_partition() -> Partition {
+        Partition::new(0, NonZeroU32::new(1).unwrap()).unwrap()
+    }
 
     #[test]
     fn pg_subscription_with_partition_wraps_in_singleton_partition_group() {
@@ -625,19 +660,25 @@ mod tests {
 
     #[test]
     fn pg_cursor_id_is_global() {
-        assert_eq!(PgCursor::new(42).id(), CursorId::global());
+        assert_eq!(PgCursor::new(42, test_partition()).id(), CursorId::global());
     }
 
     #[test]
     fn pg_cursor_order_key_from_sequence() {
-        assert_eq!(PgCursor::new(42).order_key(), CursorOrder::from_i64(42));
-        assert!(PgCursor::new(9).order_key() < PgCursor::new(10).order_key());
+        assert_eq!(
+            PgCursor::new(42, test_partition()).order_key(),
+            CursorOrder::from_i64(42)
+        );
+        assert!(
+            PgCursor::new(9, test_partition()).order_key()
+                < PgCursor::new(10, test_partition()).order_key()
+        );
     }
 
     #[test]
     fn pg_cursor_codec_roundtrips() {
         let codec = PgCursor::codec().unwrap();
-        let cursor = PgCursor::new(42);
+        let cursor = PgCursor::new(42, test_partition());
         let encoded = codec.encode(&cursor).unwrap();
         assert_eq!(encoded.kind().as_str(), "eventuary.postgres.pg_cursor.v1");
         assert_eq!(encoded.order(), &CursorOrder::from_i64(42));
@@ -647,8 +688,8 @@ mod tests {
     #[test]
     fn pg_cursor_codec_preserves_typed_ord() {
         let codec = PgCursor::codec().unwrap();
-        let lo = codec.encode(&PgCursor::new(9)).unwrap();
-        let hi = codec.encode(&PgCursor::new(10)).unwrap();
+        let lo = codec.encode(&PgCursor::new(9, test_partition())).unwrap();
+        let hi = codec.encode(&PgCursor::new(10, test_partition())).unwrap();
         assert!(lo < hi);
     }
 }

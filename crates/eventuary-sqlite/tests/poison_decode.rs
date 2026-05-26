@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -5,10 +6,22 @@ use tokio::time::timeout;
 
 use eventuary_core::io::reader::ReaderTypedExt;
 use eventuary_core::io::{Reader, Writer};
+use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, JsonPayloadCodec, Payload, StartFrom};
 use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
 use eventuary_sqlite::reader::{SqliteReader, SqliteReaderConfig, SqliteSubscription};
-use eventuary_sqlite::writer::{SqliteWriter, SqliteWriterConfig};
+use eventuary_sqlite::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
+
+fn writer_config() -> SqliteWriterConfig {
+    SqliteWriterConfig {
+        partitioning: SqlitePartitioningConfig::inline(
+            NonZeroU32::new(4).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..SqliteWriterConfig::default()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct OrderPlaced {
@@ -17,14 +30,14 @@ struct OrderPlaced {
 }
 
 fn prepare_test_schema(conn: &SqliteConn) {
-    SqliteWriter::prepare_schema(conn, &SqliteWriterConfig::default()).unwrap();
+    SqliteWriter::prepare_schema(conn, &writer_config()).unwrap();
 }
 
 #[tokio::test]
 async fn decode_reader_skips_poison_payload_and_continues() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
-    let writer = SqliteWriter::new(db.conn());
+    let writer = SqliteWriter::new_with_config(db.conn(), writer_config());
 
     let valid = Event::builder(
         "acme",
