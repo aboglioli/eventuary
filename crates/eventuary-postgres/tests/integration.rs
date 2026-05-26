@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -10,13 +11,29 @@ use tokio::time::timeout;
 
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::{Reader, Writer};
+use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{
     Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt, Topic,
     TopicPattern,
 };
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
-use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
+use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
+
+fn writer_config() -> PgWriterConfig {
+    PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            NonZeroU32::new(4).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    }
+}
+
+fn make_writer(pool: PgPool) -> PgWriter {
+    PgWriter::new_with_config(pool, writer_config())
+}
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
@@ -34,7 +51,7 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let url = format!("postgres://eventuary:eventuary@127.0.0.1:{port}/eventuary");
     let db = PgDatabase::connect(&url).await.unwrap();
     let pool = db.pool();
-    PgWriter::prepare_schema(&pool, &PgWriterConfig::default())
+    PgWriter::prepare_schema(&pool, &writer_config())
         .await
         .unwrap();
     (container, pool)
@@ -68,7 +85,7 @@ fn fast_config() -> PgReaderConfig {
 #[tokio::test]
 async fn write_read_roundtrip() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     let event = ev("acme", "/x", "thing.happened", "k0");
     writer.write(&event).await.unwrap();
 
@@ -86,7 +103,7 @@ async fn write_read_roundtrip() {
 #[tokio::test]
 async fn reader_roundtrips_lineage_fields() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     let parent_id = EventId::new();
     let event = Event::builder(
         "acme",
@@ -121,7 +138,7 @@ async fn reader_roundtrips_lineage_fields() {
 #[tokio::test]
 async fn postgres_reader_advances_after_ack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -153,7 +170,7 @@ async fn postgres_reader_advances_after_ack() {
 #[tokio::test]
 async fn postgres_reader_redelivers_after_nack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -182,7 +199,7 @@ async fn postgres_reader_redelivers_after_nack() {
 #[tokio::test]
 async fn start_from_after_cursor_resumes() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..4 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -223,7 +240,7 @@ async fn start_from_after_cursor_resumes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_from_latest_skips_existing_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("old{i}")))
@@ -258,7 +275,7 @@ async fn start_from_latest_skips_existing_events() {
 #[tokio::test]
 async fn start_from_timestamp_filters_old_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "before"))
         .await
@@ -292,7 +309,7 @@ async fn start_from_timestamp_filters_old_events() {
 #[tokio::test]
 async fn topic_filter() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     writer
         .write(&ev("acme", "/x", "task.created", "t1"))
         .await
@@ -337,7 +354,7 @@ async fn topic_filter() {
 #[tokio::test]
 async fn namespace_filter() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     writer
         .write(&ev("acme", "/backend", "thing.happened", "b1"))
         .await
@@ -383,13 +400,15 @@ async fn namespace_filter() {
 
 #[allow(dead_code)]
 fn _cursor_type_uses_pg_cursor() {
-    let _: PgCursor = PgCursor::new(1);
+    use std::num::NonZeroU32;
+    let partition = eventuary_core::Partition::new(0, NonZeroU32::new(1).unwrap()).unwrap();
+    let _: PgCursor = PgCursor::new(1, partition);
 }
 
 #[tokio::test]
 async fn stop_at_current_end_finishes_after_existing_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -423,7 +442,7 @@ async fn stop_at_current_end_finishes_after_existing_events() {
 #[tokio::test]
 async fn stop_at_cursor_finishes_at_inclusive_cursor() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..4 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -488,7 +507,7 @@ async fn stop_at_cursor_finishes_at_inclusive_cursor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_at_never_waits_for_future_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     let reader = PgReader::new(pool, fast_config());
     let mut stream = reader
         .read(PgSubscription {

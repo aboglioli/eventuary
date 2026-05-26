@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,10 +13,10 @@ use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
-use eventuary_core::partition::{PartitionGroup, PartitionSelection};
+use eventuary_core::partition::{HasPartition, Partition, PartitionGroup, PartitionSelection};
 use eventuary_core::{
-    Error, Partition, PartitionableSubscription, Result, SerializedEvent, SerializedPayload,
-    StartFrom, StartableSubscription, StopAt,
+    Error, PartitionableSubscription, Result, SerializedEvent, SerializedPayload, StartFrom,
+    StartableSubscription, StopAt,
 };
 
 use crate::database::SqliteConn;
@@ -25,24 +26,37 @@ use crate::relation::SqliteRelationName;
 #[derive(
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
 )]
-#[serde(transparent)]
 pub struct SqliteCursor {
     pub sequence: i64,
+    pub partition: Partition,
 }
 
 impl SqliteCursor {
-    pub fn new(sequence: i64) -> Self {
-        Self { sequence }
+    pub fn new(sequence: i64, partition: Partition) -> Self {
+        Self {
+            sequence,
+            partition,
+        }
     }
 
     pub fn sequence(&self) -> i64 {
         self.sequence
+    }
+
+    pub fn partition(&self) -> Partition {
+        self.partition
     }
 }
 
 impl Cursor for SqliteCursor {
     fn order_key(&self) -> CursorOrder {
         CursorOrder::from_i64(self.sequence)
+    }
+}
+
+impl HasPartition for SqliteCursor {
+    fn partition(&self) -> Partition {
+        self.partition
     }
 }
 
@@ -83,18 +97,13 @@ impl StartableSubscription<SqliteCursor> for SqliteSubscription {
 }
 
 impl PartitionableSubscription<SqliteCursor> for SqliteSubscription {
-    fn with_partition(mut self, partition: Partition) -> Self {
-        self.partitions = PartitionSelection::One(partition);
-        self
-    }
-}
-
-impl SqliteSubscription {
     /// Restrict this subscription to a validated group of partitions sharing
     /// the same `partition_count`. The reader emits a single SQL query per
     /// poll using `partition_id IN (?, ?, ...)` instead of one query per
-    /// partition.
-    pub fn with_partitions(mut self, group: PartitionGroup) -> Self {
+    /// partition. Single-partition uses fall through the default trait impl
+    /// which wraps in a singleton group; `IN (?)` plans identically to `= ?`
+    /// in SQLite.
+    fn with_partitions(mut self, group: PartitionGroup) -> Self {
         self.partitions = PartitionSelection::Many(group);
         self
     }
@@ -233,7 +242,7 @@ impl Reader for SqliteReader {
 
         let handle = tokio::spawn(async move {
             let mut delivered = 0usize;
-            let mut buffer: VecDeque<(SerializedEvent, i64)> = VecDeque::new();
+            let mut buffer: VecDeque<(SerializedEvent, i64, Partition)> = VecDeque::new();
             loop {
                 if buffer.is_empty() {
                     let fetched = match fetch_batch(
@@ -266,8 +275,9 @@ impl Reader for SqliteReader {
                     buffer.extend(fetched);
                 }
 
-                while let Some((serialized, sequence)) = buffer.front() {
+                while let Some((serialized, sequence, partition)) = buffer.front() {
                     let sequence = *sequence;
+                    let partition = *partition;
                     let event = match serialized.to_event() {
                         Ok(e) => e,
                         Err(e) => {
@@ -294,7 +304,10 @@ impl Reader for SqliteReader {
                         notify: Arc::clone(&notify),
                         sequence,
                     };
-                    let cursor = SqliteCursor { sequence };
+                    let cursor = SqliteCursor {
+                        sequence,
+                        partition,
+                    };
                     if tx
                         .send(Ok(Message::new(event, acker, cursor)))
                         .await
@@ -468,7 +481,7 @@ struct FetchBatchParams<'a> {
 async fn fetch_batch(
     conn: &SqliteConn,
     p: FetchBatchParams<'_>,
-) -> Result<Vec<(SerializedEvent, i64)>> {
+) -> Result<Vec<(SerializedEvent, i64, Partition)>> {
     let FetchBatchParams {
         events_relation,
         after_seq,
@@ -496,7 +509,7 @@ async fn fetch_batch(
 
         let mut sql = format!(
             "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, parent_id, correlation_id, causation_id \
+             timestamp, version, parent_id, correlation_id, causation_id, partition_id, partition_count \
              FROM {relation} WHERE sequence > ?1"
         );
         let mut params: Vec<Value> = vec![Value::Integer(after_seq)];
@@ -580,6 +593,8 @@ async fn fetch_batch(
                 let parent_id: Option<String> = row.get(11)?;
                 let correlation_id: Option<String> = row.get(12)?;
                 let causation_id: Option<String> = row.get(13)?;
+                let partition_id: Option<i64> = row.get(14)?;
+                let partition_count: Option<i64> = row.get(15)?;
                 Ok((
                     sequence,
                     id,
@@ -595,6 +610,8 @@ async fn fetch_batch(
                     parent_id,
                     correlation_id,
                     causation_id,
+                    partition_id,
+                    partition_count,
                 ))
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -616,6 +633,8 @@ async fn fetch_batch(
                 parent_id,
                 correlation_id,
                 causation_id,
+                partition_id,
+                partition_count,
             ) = row.map_err(|e| Error::Store(e.to_string()))?;
 
             let payload: SerializedPayload = serde_json::from_str(&payload_str)
@@ -633,6 +652,27 @@ async fn fetch_batch(
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|d| d.with_timezone(&Utc))
                 .map_err(|e| Error::Serialization(format!("decode timestamp: {e}")))?;
+            let partition = match (partition_id, partition_count) {
+                (Some(pid), Some(pcount)) => {
+                    let id_u32 = u32::try_from(pid).map_err(|_| {
+                        Error::Store(format!("partition_id {pid} exceeds u32::MAX"))
+                    })?;
+                    let count_u32 = u32::try_from(pcount).map_err(|_| {
+                        Error::Store(format!("partition_count {pcount} exceeds u32::MAX"))
+                    })?;
+                    let count = NonZeroU32::new(count_u32).ok_or_else(|| {
+                        Error::Store("partition_count must be positive".to_owned())
+                    })?;
+                    Partition::new(id_u32, count)
+                        .map_err(|e| Error::Store(format!("invalid partition: {e}")))?
+                }
+                _ => {
+                    return Err(Error::Store(
+                        "event has NULL partition columns — run partition backfill first"
+                            .to_owned(),
+                    ));
+                }
+            };
             out.push((
                 SerializedEvent {
                     id,
@@ -649,6 +689,7 @@ async fn fetch_batch(
                     causation_id,
                 },
                 sequence,
+                partition,
             ));
         }
         Ok(out)
@@ -660,7 +701,6 @@ async fn fetch_batch(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::num::NonZeroU16;
     use std::time::Duration;
 
     use futures::StreamExt;
@@ -672,28 +712,32 @@ mod tests {
     use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
     use eventuary_core::io::{Cursor, CursorId, Reader, Writer};
     use eventuary_core::partition::{
-        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionGroup,
-        PartitionHasher, PartitionKey,
+        EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
     };
     use eventuary_core::{Event, PartitionableSubscription, Payload, StartFrom, StopAt};
 
+    fn test_partition() -> Partition {
+        Partition::new(0, NonZeroU32::new(1).unwrap()).unwrap()
+    }
+
     #[test]
-    fn sqlite_subscription_with_partition_sets_partition_selection_one() {
-        let count = NonZeroU16::new(8).unwrap();
+    fn sqlite_subscription_with_partition_wraps_in_singleton_partition_group() {
+        let count = NonZeroU32::new(8).unwrap();
         let partition = Partition::new(3, count).unwrap();
         let sub = SqliteSubscription::default().with_partition(partition);
         match sub.partitions {
-            PartitionSelection::One(p) => {
-                assert_eq!(p.id(), 3);
-                assert_eq!(p.count(), 8);
+            PartitionSelection::Many(g) => {
+                assert_eq!(g.len(), 1);
+                assert_eq!(g.partitions()[0].id(), 3);
+                assert_eq!(g.count(), 8);
             }
-            _ => panic!("expected PartitionSelection::One"),
+            _ => panic!("expected PartitionSelection::Many(singleton)"),
         }
     }
 
     #[test]
     fn sqlite_subscription_with_partitions_sets_partition_selection_many() {
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let group = PartitionGroup::new(vec![
             Partition::new(2, count).unwrap(),
             Partition::new(5, count).unwrap(),
@@ -703,7 +747,7 @@ mod tests {
         match sub.partitions {
             PartitionSelection::Many(g) => {
                 assert_eq!(g.len(), 2);
-                let ids: Vec<u16> = g.partitions().iter().map(|p| p.id()).collect();
+                let ids: Vec<u32> = g.partitions().iter().map(|p| p.id()).collect();
                 assert_eq!(ids, vec![2, 5]);
             }
             _ => panic!("expected PartitionSelection::Many"),
@@ -712,19 +756,28 @@ mod tests {
 
     #[test]
     fn sqlite_cursor_id_is_global() {
-        assert_eq!(SqliteCursor::new(42).id(), CursorId::global());
+        assert_eq!(
+            SqliteCursor::new(42, test_partition()).id(),
+            CursorId::global()
+        );
     }
 
     #[test]
     fn sqlite_cursor_order_key_from_sequence() {
-        assert_eq!(SqliteCursor::new(42).order_key(), CursorOrder::from_i64(42));
-        assert!(SqliteCursor::new(9).order_key() < SqliteCursor::new(10).order_key());
+        assert_eq!(
+            SqliteCursor::new(42, test_partition()).order_key(),
+            CursorOrder::from_i64(42)
+        );
+        assert!(
+            SqliteCursor::new(9, test_partition()).order_key()
+                < SqliteCursor::new(10, test_partition()).order_key()
+        );
     }
 
     #[test]
     fn sqlite_cursor_codec_roundtrips() {
         let codec = SqliteCursor::codec().unwrap();
-        let cursor = SqliteCursor::new(42);
+        let cursor = SqliteCursor::new(42, test_partition());
         let encoded = codec.encode(&cursor).unwrap();
         assert_eq!(encoded.kind().as_str(), "eventuary.sqlite.sqlite_cursor.v1");
         assert_eq!(encoded.order(), &CursorOrder::from_i64(42));
@@ -734,12 +787,16 @@ mod tests {
     #[test]
     fn sqlite_cursor_codec_preserves_typed_ord() {
         let codec = SqliteCursor::codec().unwrap();
-        let lo = codec.encode(&SqliteCursor::new(9)).unwrap();
-        let hi = codec.encode(&SqliteCursor::new(10)).unwrap();
+        let lo = codec
+            .encode(&SqliteCursor::new(9, test_partition()))
+            .unwrap();
+        let hi = codec
+            .encode(&SqliteCursor::new(10, test_partition()))
+            .unwrap();
         assert!(lo < hi);
     }
 
-    const PARTITION_COUNT: u16 = 4;
+    const PARTITION_COUNT: u32 = 4;
 
     fn event_with_key(key: &str) -> Event {
         Event::builder(
@@ -754,10 +811,10 @@ mod tests {
         .unwrap()
     }
 
-    fn partition_for_key(key: &str) -> u16 {
+    fn partition_for_key(key: &str) -> u32 {
         let k = PartitionKey::new(key).unwrap();
         let hash = Fnv1a64PartitionHasher.hash(&k);
-        (hash.get() % PARTITION_COUNT as u64) as u16
+        (hash.get() % PARTITION_COUNT as u64) as u32
     }
 
     fn fast_config() -> SqliteReaderConfig {
@@ -772,7 +829,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                NonZeroU32::new(PARTITION_COUNT).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
@@ -808,7 +865,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                NonZeroU32::new(PARTITION_COUNT).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
@@ -822,7 +879,7 @@ mod tests {
             writer.write(&event_with_key(key)).await.unwrap();
         }
 
-        let partitions_by_id: HashMap<u16, Vec<&str>> =
+        let partitions_by_id: HashMap<u32, Vec<&str>> =
             keys.iter().fold(HashMap::new(), |mut acc, key| {
                 acc.entry(partition_for_key(key)).or_default().push(key);
                 acc
@@ -839,7 +896,7 @@ mod tests {
             start: StartFrom::Earliest,
             stop_at: StopAt::CurrentEnd,
             partitions: PartitionSelection::One(
-                Partition::new(chosen_partition, NonZeroU16::new(PARTITION_COUNT).unwrap())
+                Partition::new(chosen_partition, NonZeroU32::new(PARTITION_COUNT).unwrap())
                     .unwrap(),
             ),
             ..SqliteSubscription::default()
@@ -868,7 +925,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                NonZeroU32::new(PARTITION_COUNT).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
@@ -882,8 +939,8 @@ mod tests {
             writer.write(&event_with_key(key)).await.unwrap();
         }
 
-        let count = NonZeroU16::new(PARTITION_COUNT).unwrap();
-        let mut populated: Vec<u16> = keys
+        let count = NonZeroU32::new(PARTITION_COUNT).unwrap();
+        let mut populated: Vec<u32> = keys
             .iter()
             .map(|k| partition_for_key(k))
             .collect::<std::collections::BTreeSet<_>>()
@@ -895,7 +952,7 @@ mod tests {
             "fixture must populate at least 2 distinct partitions"
         );
 
-        let selected: std::collections::HashSet<u16> = populated.iter().copied().collect();
+        let selected: std::collections::HashSet<u32> = populated.iter().copied().collect();
         let expected_len = keys
             .iter()
             .copied()

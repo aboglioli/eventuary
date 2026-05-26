@@ -17,7 +17,8 @@
 
 use eventuary_core::io::reader::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
-    CoordinatedStream, CoordinatedSubscription,
+    CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
+    PartitionedCursor,
 };
 
 use crate::partition_coordinator::PgPartitionCoordinator;
@@ -26,6 +27,20 @@ use crate::reader::{PgCursor, PgCursorAcker, PgReader, PgSubscription};
 pub type PgCoordinatedReaderConfig = CoordinatedReaderConfig;
 pub type PgCoordinatedSubscription = CoordinatedSubscription<PgSubscription, PgCursor>;
 pub type PgCoordinatedReader = CoordinatedReader<PgReader, PgPartitionCoordinator>;
+/// Standalone `PartitionLease`-fenced acker over the raw `PgCursor`. This
+/// alias matches the simple shape used by code paths that wire a coordinator
+/// outside of `CoordinatedReader::read`. The stream-emitted acker after the
+/// shared-fetch rewrite is [`PgCoordinatedStreamAcker`].
 pub type PgCoordinatedAcker = CoordinatedAcker<PgCursorAcker, PgCursor, PgPartitionCoordinator>;
-pub type PgCoordinatedCursor = CoordinatedCursor<PgCursor>;
-pub type PgCoordinatedStream = CoordinatedStream<PgCursorAcker, PgCursor, PgPartitionCoordinator>;
+/// Acker carried on every message emitted by [`PgCoordinatedReader`].
+pub type PgCoordinatedStreamAcker = CoordinatedAcker<
+    PartitionAcker<PgCursorAcker, PgCursor>,
+    PartitionedCursor<PgCursor>,
+    PartitionedCoordAdapter<PgPartitionCoordinator, PgCursor>,
+>;
+pub type PgCoordinatedCursor = CoordinatedCursor<PartitionedCursor<PgCursor>>;
+pub type PgCoordinatedStream = CoordinatedStream<
+    PartitionAcker<PgCursorAcker, PgCursor>,
+    PartitionedCursor<PgCursor>,
+    PartitionedCoordAdapter<PgPartitionCoordinator, PgCursor>,
+>;

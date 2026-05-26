@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 
 use sqlx::PgPool;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -45,8 +45,8 @@ fn scope() -> CheckpointScope {
     )
 }
 
-fn partition(id: u16) -> Partition {
-    Partition::new(id, NonZeroU16::new(64).unwrap()).unwrap()
+fn partition(id: u32) -> Partition {
+    Partition::new(id, NonZeroU32::new(64).unwrap()).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -265,7 +265,10 @@ async fn pg_coordinator_checkpoint_with_matching_generation_advances() {
         .unwrap()
         .unwrap();
 
-    coord.checkpoint(&lease, PgCursor::new(100)).await.unwrap();
+    coord
+        .checkpoint(&lease, PgCursor::new(100, partition(0)))
+        .await
+        .unwrap();
 
     coord.release(&lease).await.unwrap();
 
@@ -295,8 +298,14 @@ async fn pg_coordinator_checkpoint_is_monotonic() {
         .unwrap()
         .unwrap();
 
-    coord.checkpoint(&lease, PgCursor::new(100)).await.unwrap();
-    coord.checkpoint(&lease, PgCursor::new(50)).await.unwrap();
+    coord
+        .checkpoint(&lease, PgCursor::new(100, partition(0)))
+        .await
+        .unwrap();
+    coord
+        .checkpoint(&lease, PgCursor::new(50, partition(0)))
+        .await
+        .unwrap();
 
     coord.release(&lease).await.unwrap();
 
@@ -329,7 +338,7 @@ async fn pg_coordinator_checkpoint_after_release_returns_ownership_lost() {
     coord.release(&lease).await.unwrap();
 
     let err = coord
-        .checkpoint(&lease, PgCursor::new(100))
+        .checkpoint(&lease, PgCursor::new(100, partition(0)))
         .await
         .unwrap_err();
     assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
@@ -342,8 +351,8 @@ async fn pg_coordinator_rejects_partition_count_mismatch() {
     let s = scope();
     let owner_a = OwnerId::new("worker-a").unwrap();
     let owner_b = OwnerId::new("worker-b").unwrap();
-    let p_four = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
-    let p_eight = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+    let p_four = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+    let p_eight = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
 
     coord
         .claim(&s, &owner_a, p_four, std::time::Duration::from_millis(1))
@@ -390,7 +399,7 @@ async fn pg_coordinator_checkpoint_with_stale_generation_returns_ownership_lost(
         .unwrap();
 
     let err = coord
-        .checkpoint(&lease_a, PgCursor::new(100))
+        .checkpoint(&lease_a, PgCursor::new(100, partition(0)))
         .await
         .unwrap_err();
     assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));

@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 
 use futures::StreamExt;
 use sqlx::PgPool;
@@ -40,7 +40,7 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     (container, pool)
 }
 
-const PARTITION_COUNT: u16 = 4;
+const PARTITION_COUNT: u32 = 4;
 
 fn event_with_key(key: &str) -> Event {
     Event::builder(
@@ -55,10 +55,10 @@ fn event_with_key(key: &str) -> Event {
     .unwrap()
 }
 
-fn partition_for_key(key: &str) -> u16 {
+fn partition_for_key(key: &str) -> u32 {
     let k = PartitionKey::new(key).unwrap();
     let hash = Fnv1a64PartitionHasher.hash(&k);
-    (hash.get() % PARTITION_COUNT as u64) as u16
+    (hash.get() % PARTITION_COUNT as u64) as u32
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -67,7 +67,7 @@ async fn pg_reader_default_all_returns_every_event() {
 
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
-            NonZeroU16::new(PARTITION_COUNT).unwrap(),
+            NonZeroU32::new(PARTITION_COUNT).unwrap(),
             EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
@@ -105,7 +105,7 @@ async fn pg_reader_one_filters_to_single_partition() {
 
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
-            NonZeroU16::new(PARTITION_COUNT).unwrap(),
+            NonZeroU32::new(PARTITION_COUNT).unwrap(),
             EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
@@ -120,7 +120,7 @@ async fn pg_reader_one_filters_to_single_partition() {
         writer.write(&event_with_key(key)).await.unwrap();
     }
 
-    let partitions_by_id: std::collections::HashMap<u16, Vec<&str>> =
+    let partitions_by_id: std::collections::HashMap<u32, Vec<&str>> =
         keys.iter()
             .fold(std::collections::HashMap::new(), |mut acc, key| {
                 acc.entry(partition_for_key(key)).or_default().push(key);
@@ -138,7 +138,7 @@ async fn pg_reader_one_filters_to_single_partition() {
         start: StartFrom::Earliest,
         stop_at: StopAt::CurrentEnd,
         partitions: PartitionSelection::One(
-            Partition::new(chosen_partition, NonZeroU16::new(PARTITION_COUNT).unwrap()).unwrap(),
+            Partition::new(chosen_partition, NonZeroU32::new(PARTITION_COUNT).unwrap()).unwrap(),
         ),
         ..PgSubscription::default()
     };

@@ -20,7 +20,7 @@ struct ConsumerKey {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct PartitionStateKey {
     scope: CheckpointScope,
-    partition_id: u16,
+    partition_id: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -29,14 +29,14 @@ struct PartitionState<C> {
     lease_until: Option<DateTime<Utc>>,
     generation: Generation,
     checkpoint_cursor: Option<C>,
-    partition_count: u16,
+    partition_count: u32,
 }
 
 fn partition_count_mismatch_error(
     scope: &CheckpointScope,
-    partition_id: u16,
-    stored: u16,
-    requested: u16,
+    partition_id: u32,
+    stored: u32,
+    requested: u32,
 ) -> Error {
     Error::Config(format!(
         "partition count mismatch for scope {} stream {} partition {}: stored {}, requested {}",
@@ -322,7 +322,7 @@ where
 mod tests {
     use super::*;
 
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use serde::{Deserialize, Serialize};
     use tokio::time::sleep;
@@ -346,8 +346,8 @@ mod tests {
         )
     }
 
-    fn partition(id: u16) -> Partition {
-        Partition::new(id, NonZeroU16::new(8).unwrap()).unwrap()
+    fn partition(id: u32) -> Partition {
+        Partition::new(id, NonZeroU32::new(8).unwrap()).unwrap()
     }
 
     fn owner_a() -> OwnerId {
@@ -535,8 +535,8 @@ mod tests {
         let owner_a = OwnerId::new("worker-a").unwrap();
         let owner_b = OwnerId::new("worker-b").unwrap();
 
-        let count_four = NonZeroU16::new(4).unwrap();
-        let count_eight = NonZeroU16::new(8).unwrap();
+        let count_four = NonZeroU32::new(4).unwrap();
+        let count_eight = NonZeroU32::new(8).unwrap();
         let p_four = Partition::new(0, count_four).unwrap();
         let p_eight = Partition::new(0, count_eight).unwrap();
 

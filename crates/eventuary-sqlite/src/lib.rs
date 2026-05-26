@@ -30,6 +30,7 @@ pub mod database;
 pub mod dedupe_store;
 pub mod event_log;
 pub mod multiplexer_store;
+pub mod partition_backfill;
 pub mod partition_coordinator;
 pub mod reader;
 pub mod relation;
@@ -46,5 +47,9 @@ pub use coordinated_reader::{
 pub use dedupe_store::{SqliteDedupeStore, SqliteDedupeStoreConfig};
 pub use event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 pub use multiplexer_store::{SqliteMultiplexerStore, SqliteMultiplexerStoreConfig};
+pub use partition_backfill::{
+    BackfillReport, SqlitePartitionBackfill, SqlitePartitionBackfillConfig,
+};
 pub use partition_coordinator::{SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig};
 pub use watermark_store::{SqliteWatermarkStore, SqliteWatermarkStoreConfig};
+pub use writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};

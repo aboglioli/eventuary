@@ -323,7 +323,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         partition,
                         generation: Generation::from_i64(generation),
                         checkpoint_cursor: (checkpoint_sequence > 0)
-                            .then_some(SqliteCursor::new(checkpoint_sequence)),
+                            .then_some(SqliteCursor::new(checkpoint_sequence, partition)),
                         lease_until,
                     }))
                 }
@@ -577,7 +577,7 @@ fn check_partition_count_mismatch(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use super::*;
     use eventuary_core::io::reader::PartitionCoordinator;
@@ -611,8 +611,8 @@ mod tests {
         )
     }
 
-    fn partition(id: u16) -> Partition {
-        Partition::new(id, NonZeroU16::new(64).unwrap()).unwrap()
+    fn partition(id: u32) -> Partition {
+        Partition::new(id, NonZeroU32::new(64).unwrap()).unwrap()
     }
 
     #[tokio::test]
@@ -822,7 +822,7 @@ mod tests {
             .unwrap();
 
         coord
-            .checkpoint(&lease, SqliteCursor::new(100))
+            .checkpoint(&lease, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap();
 
@@ -851,11 +851,11 @@ mod tests {
             .unwrap();
 
         coord
-            .checkpoint(&lease, SqliteCursor::new(100))
+            .checkpoint(&lease, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap();
         coord
-            .checkpoint(&lease, SqliteCursor::new(50))
+            .checkpoint(&lease, SqliteCursor::new(50, partition(0)))
             .await
             .unwrap();
 
@@ -893,7 +893,7 @@ mod tests {
             .unwrap();
 
         let err = coord
-            .checkpoint(&lease_a, SqliteCursor::new(100))
+            .checkpoint(&lease_a, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap_err();
         assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));
@@ -905,8 +905,8 @@ mod tests {
         let s = scope();
         let owner_a = OwnerId::new("worker-a").unwrap();
         let owner_b = OwnerId::new("worker-b").unwrap();
-        let p_four = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
-        let p_eight = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let p_four = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+        let p_eight = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
 
         coord
             .claim(&s, &owner_a, p_four, std::time::Duration::from_millis(1))
@@ -942,7 +942,7 @@ mod tests {
         coord.release(&lease).await.unwrap();
 
         let err = coord
-            .checkpoint(&lease, SqliteCursor::new(100))
+            .checkpoint(&lease, SqliteCursor::new(100, partition(0)))
             .await
             .unwrap_err();
         assert!(matches!(err, eventuary_core::Error::OwnershipLost(_)));

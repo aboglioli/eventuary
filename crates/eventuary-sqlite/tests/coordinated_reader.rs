@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ fn event_with_key(key: &str) -> Event {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
@@ -106,6 +106,16 @@ async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
             partition_count.get(),
             "expected partition count to match"
         );
+        // Cursor partition correctness: the partition stamped on the
+        // outer cursor must match the partition stamped on the inner
+        // source cursor (the writer's persisted partition_id). The
+        // shared-fetch data plane routes by the inner cursor's
+        // partition, so this is the single source of truth.
+        assert_eq!(
+            msg.cursor().partition.id(),
+            msg.cursor().inner.inner().partition.id(),
+            "outer partition must match inner source partition"
+        );
         msg.ack().await.unwrap();
         count += 1;
         if count == 4 {
@@ -118,7 +128,7 @@ async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
 
@@ -190,7 +200,7 @@ async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
 
@@ -268,7 +278,7 @@ async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_persists_checkpoint_on_ack() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
@@ -366,7 +376,7 @@ async fn sqlite_coordinated_reader_persists_checkpoint_on_ack() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_resumes_from_checkpoint_on_restart() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
@@ -407,6 +417,7 @@ async fn sqlite_coordinated_reader_resumes_from_checkpoint_on_restart() {
         consumer_heartbeat_interval: Duration::from_secs(10),
         rebalance_interval: Duration::from_millis(100),
         partition_slack: 0,
+        ..SqliteCoordinatedReaderConfig::default()
     };
 
     let make_sub = || SqliteCoordinatedSubscription {
@@ -497,4 +508,141 @@ async fn sqlite_coordinated_reader_resumes_from_checkpoint_on_restart() {
             "missing event key={key}; combined={combined:?}"
         );
     }
+}
+
+/// Exercises the shared-fetch rebalance path: a second consumer joins
+/// after the first has claimed all partitions, the coordinator
+/// reassigns half of them, and the combined delivery still covers
+/// every event written after the join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sqlite_coordinated_reader_rebalances_when_second_owner_joins() {
+    use std::sync::Mutex as StdMutex;
+
+    let partition_count = NonZeroU32::new(4).unwrap();
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    prepare_test_schema(&db.conn());
+
+    let writer = SqliteWriter::new_with_config(
+        db.conn(),
+        SqliteWriterConfig {
+            partitioning: SqlitePartitioningConfig::inline(
+                partition_count,
+                EventKeyPartitionKeyResolver::new(),
+                Fnv1a64PartitionHasher,
+            ),
+            ..SqliteWriterConfig::default()
+        },
+    );
+
+    let coordinator = Arc::new(SqlitePartitionCoordinator::new(
+        db.conn(),
+        SqlitePartitionCoordinatorConfig::default(),
+    ));
+
+    let scope = CheckpointScope::new(
+        ConsumerGroupId::new("rebalance-group").unwrap(),
+        StreamId::new("sqlite-events").unwrap(),
+    );
+
+    let reader_config = SqliteCoordinatedReaderConfig {
+        partition_lease_duration: Duration::from_secs(10),
+        partition_renew_interval: Duration::from_millis(200),
+        consumer_lease_duration: Duration::from_secs(10),
+        consumer_heartbeat_interval: Duration::from_millis(100),
+        rebalance_interval: Duration::from_millis(100),
+        partition_slack: 0,
+        ..SqliteCoordinatedReaderConfig::default()
+    };
+
+    let make_sub = || SqliteCoordinatedSubscription {
+        scope: scope.clone(),
+        partition_count,
+        start: StartFrom::Earliest,
+        inner: SqliteSubscription::default(),
+    };
+
+    let reader_a = SqliteCoordinatedReader::new(
+        SqliteReader::new(
+            db.conn(),
+            SqliteReaderConfig {
+                poll_interval: Duration::from_millis(20),
+                ..SqliteReaderConfig::default()
+            },
+        ),
+        Arc::clone(&coordinator),
+        OwnerId::new("rebalance-a").unwrap(),
+        reader_config,
+    );
+    let stream_a = reader_a.read(make_sub()).await.unwrap();
+    let a_keys: Arc<StdMutex<HashSet<String>>> = Arc::new(StdMutex::new(HashSet::new()));
+    let a_keys_in = Arc::clone(&a_keys);
+    let drain_a = tokio::spawn(async move {
+        let mut stream = stream_a;
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(3), stream.next()).await {
+            let key = msg.event().key().as_str().to_owned();
+            // The rebalance releases partitions while in-flight messages
+            // may still be on their way to ack, which is the documented
+            // fenced-checkpoint behavior. Swallow OwnershipLost on ack so
+            // the test focuses on the combined delivery invariant.
+            let _ = msg.ack().await;
+            a_keys_in.lock().unwrap().insert(key);
+        }
+    });
+
+    // Give A time to claim all 4 partitions.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Start B; rebalance will reassign 2 partitions to B.
+    let reader_b = SqliteCoordinatedReader::new(
+        SqliteReader::new(
+            db.conn(),
+            SqliteReaderConfig {
+                poll_interval: Duration::from_millis(20),
+                ..SqliteReaderConfig::default()
+            },
+        ),
+        Arc::clone(&coordinator),
+        OwnerId::new("rebalance-b").unwrap(),
+        reader_config,
+    );
+    let stream_b = reader_b.read(make_sub()).await.unwrap();
+    let b_keys: Arc<StdMutex<HashSet<String>>> = Arc::new(StdMutex::new(HashSet::new()));
+    let b_keys_in = Arc::clone(&b_keys);
+    let drain_b = tokio::spawn(async move {
+        let mut stream = stream_b;
+        while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(3), stream.next()).await {
+            let key = msg.event().key().as_str().to_owned();
+            let _ = msg.ack().await;
+            b_keys_in.lock().unwrap().insert(key);
+        }
+    });
+
+    // Give the rebalance time to settle before writing events.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let keys: Vec<String> = (0..32).map(|i| format!("post-{i}")).collect();
+    for key in &keys {
+        writer.write(&event_with_key(key)).await.unwrap();
+    }
+
+    let _ = tokio::join!(drain_a, drain_b);
+
+    let a = a_keys.lock().unwrap().clone();
+    let b = b_keys.lock().unwrap().clone();
+    let combined: HashSet<String> = a.union(&b).cloned().collect();
+
+    let all: HashSet<String> = keys.iter().cloned().collect();
+    let missing: Vec<&String> = all.difference(&combined).collect();
+    assert!(
+        missing.is_empty(),
+        "events missing from delivery after rebalance: {missing:?}"
+    );
+
+    // Both owners should have observed at least one post-join event.
+    let a_post: usize = a.iter().filter(|k| k.starts_with("post-")).count();
+    let b_post: usize = b.iter().filter(|k| k.starts_with("post-")).count();
+    assert!(
+        a_post > 0 && b_post > 0,
+        "expected both owners to deliver post-rebalance events; a={a_post} b={b_post}"
+    );
 }

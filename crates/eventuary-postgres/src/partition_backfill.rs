@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use crate::relation::PgRelationName;
 
 pub struct PgPartitionBackfillConfig {
     pub events_relation: PgRelationName,
-    pub partition_count: NonZeroU16,
+    pub partition_count: NonZeroU32,
     pub key_resolver: Arc<dyn PartitionKeyResolver>,
     pub hasher: Arc<dyn PartitionHasher>,
     pub batch_size: usize,
@@ -23,7 +23,7 @@ pub struct PgPartitionBackfillConfig {
 impl PgPartitionBackfillConfig {
     pub fn new(
         events_relation: PgRelationName,
-        partition_count: NonZeroU16,
+        partition_count: NonZeroU32,
         key_resolver: impl PartitionKeyResolver + 'static,
         hasher: impl PartitionHasher + 'static,
         batch_size: usize,
@@ -150,8 +150,8 @@ impl PgPartitionBackfill {
                 let result = sqlx::query(&update_sql)
                     .bind(partition_key.as_str())
                     .bind(partition_hash.to_sql_i64())
-                    .bind(partition.id() as i32)
-                    .bind(partition.count() as i32)
+                    .bind(partition.id() as i64)
+                    .bind(partition.count() as i64)
                     .bind(partition_strategy.as_str())
                     .bind(sequence)
                     .execute(&mut *tx)

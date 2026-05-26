@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -11,21 +12,37 @@ use eventuary_core::io::reader::{
     PartitionedCursor, PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
 use eventuary_core::io::{CursorId, Reader, StreamId, Writer};
+use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
 use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
 use eventuary_sqlite::reader::{
     SqliteCursor, SqliteReader, SqliteReaderConfig, SqliteSubscription,
 };
-use eventuary_sqlite::writer::{SqliteWriter, SqliteWriterConfig};
+use eventuary_sqlite::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
+
+fn writer_config() -> SqliteWriterConfig {
+    SqliteWriterConfig {
+        partitioning: SqlitePartitioningConfig::inline(
+            NonZeroU32::new(4).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..SqliteWriterConfig::default()
+    }
+}
 
 fn prepare_test_schema(conn: &SqliteConn) {
-    SqliteWriter::prepare_schema(conn, &SqliteWriterConfig::default()).unwrap();
+    SqliteWriter::prepare_schema(conn, &writer_config()).unwrap();
     SqliteCheckpointStore::<SqliteCursor>::prepare_schema(
         conn,
         &SqliteCheckpointStoreConfig::default(),
     )
     .unwrap();
+}
+
+fn make_writer(conn: SqliteConn) -> SqliteWriter {
+    SqliteWriter::new_with_config(conn, writer_config())
 }
 
 fn ev(org: &str, ns: &str, topic: &str, key: &str) -> Event {
@@ -64,7 +81,7 @@ fn scope() -> CheckpointScope {
 async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
-    let writer = SqliteWriter::new(db.conn());
+    let writer = make_writer(db.conn());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -121,7 +138,7 @@ async fn checkpoint_reader_over_sqlite_resumes_after_ack() {
 async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
-    let writer = SqliteWriter::new(db.conn());
+    let writer = make_writer(db.conn());
     for i in 0..6 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -133,7 +150,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -176,7 +193,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
 async fn checkpoint_reader_no_advance_on_nack() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
-    let writer = SqliteWriter::new(db.conn());
+    let writer = make_writer(db.conn());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -220,7 +237,7 @@ async fn checkpoint_reader_no_advance_on_nack() {
 async fn partitioned_reader_tags_partition_on_cursor() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
-    let writer = SqliteWriter::new(db.conn());
+    let writer = make_writer(db.conn());
     for i in 0..8 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -232,7 +249,7 @@ async fn partitioned_reader_tags_partition_on_cursor() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -283,7 +300,7 @@ async fn sqlite_checkpoint_store_persists_encoded_cursor() {
 async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
-    let writer = SqliteWriter::new(db.conn());
+    let writer = make_writer(db.conn());
     for i in 0..8 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -299,7 +316,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned = PartitionedReader::source(
             source,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
@@ -333,7 +350,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned2 = PartitionedReader::source(
             source2,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );

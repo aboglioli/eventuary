@@ -383,12 +383,12 @@ impl Cursor for NoCursor {}
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use super::*;
 
-    fn partition(count: u16, id: u16) -> Partition {
-        Partition::new(id, NonZeroU16::new(count).unwrap()).unwrap()
+    fn partition(count: u32, id: u32) -> Partition {
+        Partition::new(id, NonZeroU32::new(count).unwrap()).unwrap()
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -14,11 +15,27 @@ use eventuary_core::io::reader::{
     PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
 use eventuary_core::io::{Reader, StreamId, Writer};
+use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
 use eventuary_postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
-use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
+use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
+
+fn writer_config() -> PgWriterConfig {
+    PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            NonZeroU32::new(4).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    }
+}
+
+fn make_writer(pool: PgPool) -> PgWriter {
+    PgWriter::new_with_config(pool, writer_config())
+}
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
@@ -41,7 +58,7 @@ async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
 }
 
 async fn prepare_test_schema(pool: &PgPool) {
-    PgWriter::prepare_schema(pool, &PgWriterConfig::default())
+    PgWriter::prepare_schema(pool, &writer_config())
         .await
         .unwrap();
     PgCheckpointStore::<PgCursor>::prepare_schema(pool, &PgCheckpointStoreConfig::default())
@@ -84,7 +101,7 @@ fn scope() -> CheckpointScope {
 #[tokio::test]
 async fn checkpoint_reader_over_pg_reader_resumes_after_ack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..3 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -135,7 +152,7 @@ async fn checkpoint_reader_over_pg_reader_resumes_after_ack() {
 #[tokio::test]
 async fn checkpoint_reader_over_pg_reader_no_advance_on_nack() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     writer
         .write(&ev("acme", "/x", "thing.happened", "k0"))
         .await
@@ -166,7 +183,7 @@ async fn checkpoint_reader_over_pg_reader_no_advance_on_nack() {
 #[tokio::test]
 async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..6 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -178,7 +195,7 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -220,7 +237,7 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
 #[tokio::test]
 async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     for i in 0..16 {
         writer
             .write(&ev("acme", "/x", "thing.happened", &format!("k{i}")))
@@ -232,7 +249,7 @@ async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -264,7 +281,7 @@ async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
 #[tokio::test]
 async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
     let (_c, pool) = start_postgres().await;
-    let writer = PgWriter::new(pool.clone());
+    let writer = make_writer(pool.clone());
     let keys = ["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7"];
     for key in &keys {
         writer
@@ -281,7 +298,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned = PartitionedReader::source(
             source,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
@@ -315,7 +332,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned2 = PartitionedReader::source(
             source2,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );

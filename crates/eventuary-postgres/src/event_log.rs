@@ -23,8 +23,8 @@ CREATE TABLE IF NOT EXISTS {events} (
     causation_id TEXT,
     partition_key TEXT,
     partition_hash BIGINT,
-    partition_id INT,
-    partition_count INT,
+    partition_id BIGINT,
+    partition_count BIGINT,
     partition_strategy TEXT
 );
 

@@ -726,10 +726,10 @@ mod tests {
         };
         use crate::partition::Partition;
         use futures::StreamExt;
-        use std::num::NonZeroU16;
+        use std::num::NonZeroU32;
 
-        let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
-        let current_partition = Partition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+        let old_partition = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
+        let current_partition = Partition::new(2, NonZeroU32::new(4).unwrap()).unwrap();
 
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![
@@ -749,7 +749,7 @@ mod tests {
         let partitioned = PartitionedReader::source(
             inner_reader,
             PartitionedReaderConfig {
-                partition_count: NonZeroU16::new(4).unwrap(),
+                partition_count: NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
@@ -784,9 +784,9 @@ mod tests {
         };
         use crate::partition::Partition;
         use futures::StreamExt;
-        use std::num::NonZeroU16;
+        use std::num::NonZeroU32;
 
-        let old_partition = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let old_partition = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
         let store = PreloadedStore::<PartitionedCursor<TestCursor>>::default();
         *store.rows.lock().await = vec![(
             CursorId::partition(old_partition),
@@ -799,7 +799,7 @@ mod tests {
         let partitioned = PartitionedReader::source(
             inner_reader,
             PartitionedReaderConfig {
-                partition_count: NonZeroU16::new(4).unwrap(),
+                partition_count: NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
@@ -828,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_reader_seeds_inner_with_min_cursor() {
         let cursor_id = CursorId::partition(
-            crate::partition::Partition::new(2, std::num::NonZeroU16::new(4).unwrap()).unwrap(),
+            crate::partition::Partition::new(2, std::num::NonZeroU32::new(4).unwrap()).unwrap(),
         );
         let store = PreloadedStore::default();
         *store.rows.lock().await = vec![(cursor_id, TestCursor(10))];
@@ -884,7 +884,7 @@ mod tests {
             StreamId::new("s").unwrap(),
         );
         let id = CursorId::partition(
-            crate::partition::Partition::new(17, std::num::NonZeroU16::new(100).unwrap()).unwrap(),
+            crate::partition::Partition::new(17, std::num::NonZeroU32::new(100).unwrap()).unwrap(),
         );
         let key = CheckpointKey::new(scope, id.clone());
         assert_eq!(key.cursor_id, id);

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,12 +20,12 @@ pub(crate) fn fnv1a_u64(bytes: &[u8]) -> u64 {
     Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct Partition {
-    id: u16,
-    count: NonZeroU16,
+    id: u32,
+    count: NonZeroU32,
 }
 
 impl Partition {
-    pub fn new(id: u16, count: NonZeroU16) -> Result<Self> {
+    pub fn new(id: u32, count: NonZeroU32) -> Result<Self> {
         if id >= count.get() {
             return Err(Error::Config(format!(
                 "partition id {id} out of range for count {count}",
@@ -35,17 +35,26 @@ impl Partition {
         Ok(Self { id, count })
     }
 
-    pub fn id(&self) -> u16 {
+    pub fn id(&self) -> u32 {
         self.id
     }
 
-    pub fn count(&self) -> u16 {
+    pub fn count(&self) -> u32 {
         self.count.get()
     }
 
-    pub fn count_nz(&self) -> NonZeroU16 {
+    pub fn count_nz(&self) -> NonZeroU32 {
         self.count
     }
+}
+
+/// Capability trait for any type that carries a resolved `Partition`.
+///
+/// Implemented by cursors emitted by partition-aware sources, by message
+/// envelopes that have been routed, and by any future type that wants to
+/// participate in partition-aware routing without going through key hashing.
+pub trait HasPartition {
+    fn partition(&self) -> Partition;
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -192,15 +201,31 @@ impl PartitionGroup {
         Ok(Self { partitions })
     }
 
+    /// Build a singleton group containing exactly one partition. Infallible:
+    /// a single-element group trivially satisfies the non-empty and uniform
+    /// `partition_count` invariants.
+    pub fn singleton(partition: Partition) -> Self {
+        Self {
+            partitions: vec![partition],
+        }
+    }
+
+    /// Build a `PartitionGroup` from any iterator of `Partition`s, validating
+    /// that all share the same `partition_count`. Returns an error if the
+    /// iterator is empty or `partition_count` values mismatch.
+    pub fn new_from_iter(partitions: impl IntoIterator<Item = Partition>) -> Result<Self> {
+        Self::new(partitions.into_iter().collect())
+    }
+
     pub fn partitions(&self) -> &[Partition] {
         &self.partitions
     }
 
-    pub fn count_nz(&self) -> NonZeroU16 {
+    pub fn count_nz(&self) -> NonZeroU32 {
         self.partitions[0].count_nz()
     }
 
-    pub fn count(&self) -> u16 {
+    pub fn count(&self) -> u32 {
         self.count_nz().get()
     }
 
@@ -229,9 +254,9 @@ pub trait PartitionHasher: Send + Sync + 'static {
     fn hash(&self, key: &PartitionKey) -> PartitionHash;
     fn strategy(&self) -> &str;
 
-    fn partition_for(&self, key: &PartitionKey, count: NonZeroU16) -> Partition {
+    fn partition_for(&self, key: &PartitionKey, count: NonZeroU32) -> Partition {
         let hash = self.hash(key);
-        Partition::new((hash.get() % count.get() as u64) as u16, count)
+        Partition::new((hash.get() % count.get() as u64) as u32, count)
             .expect("hash modulo count is always in range")
     }
 }
@@ -269,14 +294,14 @@ mod tests {
 
     #[test]
     fn partition_rejects_id_out_of_range() {
-        let count = NonZeroU16::new(4).unwrap();
+        let count = NonZeroU32::new(4).unwrap();
         let err = Partition::new(4, count).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]
     fn partition_accessors_reflect_construction() {
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let p = Partition::new(3, count).unwrap();
         assert_eq!(p.id(), 3);
         assert_eq!(p.count(), 8);
@@ -284,7 +309,7 @@ mod tests {
 
     #[test]
     fn partition_serializes_as_id_and_count() {
-        let p = Partition::new(3, NonZeroU16::new(8).unwrap()).unwrap();
+        let p = Partition::new(3, NonZeroU32::new(8).unwrap()).unwrap();
         let value = serde_json::to_value(p).unwrap();
         assert_eq!(value["id"], 3);
         assert_eq!(value["count"], 8);
@@ -293,10 +318,22 @@ mod tests {
     }
 
     #[test]
+    fn partition_supports_ids_beyond_u16_range() {
+        let id = u16::MAX as u32 + 1;
+        let count = NonZeroU32::new(u32::MAX).unwrap();
+        let p = Partition::new(id, count).unwrap();
+        assert_eq!(p.id(), id);
+        assert_eq!(p.count(), u32::MAX);
+        let value = serde_json::to_value(p).unwrap();
+        let decoded: Partition = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, p);
+    }
+
+    #[test]
     fn fnv1a_known_vector_remains_stable() {
         // Anchors the stable hash used by Fnv1a64PartitionHasher across versions.
-        let count = NonZeroU16::new(16).unwrap();
-        let id = (fnv1a_u64("user-42".as_bytes()) % count.get() as u64) as u16;
+        let count = NonZeroU32::new(16).unwrap();
+        let id = (fnv1a_u64("user-42".as_bytes()) % count.get() as u64) as u32;
         assert_eq!(id, 11);
     }
 
@@ -407,7 +444,7 @@ mod tests {
 
     #[test]
     fn partition_selection_one_constructs_correctly() {
-        let count = NonZeroU16::new(4).unwrap();
+        let count = NonZeroU32::new(4).unwrap();
         let p = Partition::new(2, count).unwrap();
         let sel = PartitionSelection::One(p);
         assert_eq!(sel, PartitionSelection::One(p));
@@ -421,15 +458,15 @@ mod tests {
 
     #[test]
     fn partition_group_rejects_mismatched_counts() {
-        let p1 = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
-        let p2 = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let p1 = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+        let p2 = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
         let err = PartitionGroup::new(vec![p1, p2]).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }
 
     #[test]
     fn partition_group_accepts_uniform_counts() {
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let group = PartitionGroup::new(vec![
             Partition::new(0, count).unwrap(),
             Partition::new(3, count).unwrap(),
@@ -442,8 +479,44 @@ mod tests {
     }
 
     #[test]
+    fn partition_group_singleton_holds_single_partition() {
+        let count = NonZeroU32::new(4).unwrap();
+        let partition = Partition::new(2, count).unwrap();
+        let group = PartitionGroup::singleton(partition);
+        assert_eq!(group.len(), 1);
+        assert_eq!(group.partitions(), &[partition]);
+        assert_eq!(group.count_nz(), count);
+    }
+
+    #[test]
+    fn partition_group_new_from_iter_accepts_uniform_counts() {
+        let count = NonZeroU32::new(8).unwrap();
+        let group = PartitionGroup::new_from_iter([
+            Partition::new(0, count).unwrap(),
+            Partition::new(5, count).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(group.len(), 2);
+        assert_eq!(group.count(), 8);
+    }
+
+    #[test]
+    fn partition_group_new_from_iter_rejects_empty() {
+        let err = PartitionGroup::new_from_iter(std::iter::empty()).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn partition_group_new_from_iter_rejects_mismatched_counts() {
+        let p1 = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+        let p2 = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
+        let err = PartitionGroup::new_from_iter([p1, p2]).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
     fn partition_selection_many_constructs_from_group() {
-        let count = NonZeroU16::new(4).unwrap();
+        let count = NonZeroU32::new(4).unwrap();
         let group = PartitionGroup::new(vec![
             Partition::new(0, count).unwrap(),
             Partition::new(1, count).unwrap(),
@@ -490,8 +563,8 @@ mod tests {
     fn hasher_partition_for_returns_modulo_partition() {
         let hasher = Fnv1a64PartitionHasher;
         let key = PartitionKey::new("order-123").unwrap();
-        let partition = hasher.partition_for(&key, NonZeroU16::new(64).unwrap());
-        let expected_id = (0x1b96f9c28b5d5aba_u64 % 64) as u16;
+        let partition = hasher.partition_for(&key, NonZeroU32::new(64).unwrap());
+        let expected_id = (0x1b96f9c28b5d5aba_u64 % 64) as u32;
         assert_eq!(partition.id(), expected_id);
         assert_eq!(partition.count(), 64);
     }
