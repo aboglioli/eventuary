@@ -1,5 +1,5 @@
 use std::fmt;
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use sqlx::PgPool;
@@ -18,7 +18,7 @@ pub enum PgPartitioningConfig {
     #[default]
     Off,
     Inline {
-        partition_count: NonZeroU16,
+        partition_count: NonZeroU32,
         key_resolver: Arc<dyn PartitionKeyResolver>,
         hasher: Arc<dyn PartitionHasher>,
     },
@@ -26,7 +26,7 @@ pub enum PgPartitioningConfig {
 
 impl PgPartitioningConfig {
     pub fn inline(
-        count: NonZeroU16,
+        count: NonZeroU32,
         resolver: impl PartitionKeyResolver + 'static,
         hasher: impl PartitionHasher + 'static,
     ) -> Self {
@@ -132,8 +132,8 @@ impl PgWriter {
                 Ok(PartitionData {
                     partition_key: Some(partition_key),
                     partition_hash: Some(partition_hash),
-                    partition_id: Some(partition.id() as i32),
-                    partition_count: Some(partition.count() as i32),
+                    partition_id: Some(partition.id() as i64),
+                    partition_count: Some(partition.count() as i64),
                     partition_strategy: Some(partition_strategy),
                 })
             }
@@ -216,8 +216,8 @@ impl Writer for PgWriter {
 struct PartitionData {
     partition_key: Option<PartitionKey>,
     partition_hash: Option<PartitionHash>,
-    partition_id: Option<i32>,
-    partition_count: Option<i32>,
+    partition_id: Option<i64>,
+    partition_count: Option<i64>,
     partition_strategy: Option<PartitionStrategy>,
 }
 

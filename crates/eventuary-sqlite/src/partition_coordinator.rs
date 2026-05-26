@@ -577,7 +577,7 @@ fn check_partition_count_mismatch(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use super::*;
     use eventuary_core::io::reader::PartitionCoordinator;
@@ -611,8 +611,8 @@ mod tests {
         )
     }
 
-    fn partition(id: u16) -> Partition {
-        Partition::new(id, NonZeroU16::new(64).unwrap()).unwrap()
+    fn partition(id: u32) -> Partition {
+        Partition::new(id, NonZeroU32::new(64).unwrap()).unwrap()
     }
 
     #[tokio::test]
@@ -905,8 +905,8 @@ mod tests {
         let s = scope();
         let owner_a = OwnerId::new("worker-a").unwrap();
         let owner_b = OwnerId::new("worker-b").unwrap();
-        let p_four = Partition::new(0, NonZeroU16::new(4).unwrap()).unwrap();
-        let p_eight = Partition::new(0, NonZeroU16::new(8).unwrap()).unwrap();
+        let p_four = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+        let p_eight = Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap();
 
         coord
             .claim(&s, &owner_a, p_four, std::time::Duration::from_millis(1))

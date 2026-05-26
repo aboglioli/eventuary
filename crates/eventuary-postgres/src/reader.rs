@@ -91,7 +91,7 @@ impl PartitionableSubscription<PgCursor> for PgSubscription {
 impl PgSubscription {
     /// Restrict this subscription to a validated group of partitions sharing
     /// the same `partition_count`. The reader emits a single SQL query per
-    /// poll using `partition_id = ANY($::int[])` instead of one query per
+    /// poll using `partition_id = ANY($::bigint[])` instead of one query per
     /// partition.
     pub fn with_partitions(mut self, group: PartitionGroup) -> Self {
         self.partitions = PartitionSelection::Many(group);
@@ -489,7 +489,7 @@ async fn fetch_batch(
         }
         PartitionSelection::Many(_) => {
             sql.push_str(&format!(
-                " AND partition_count = ${bind_index} AND partition_id = ANY(${}::int[])",
+                " AND partition_count = ${bind_index} AND partition_id = ANY(${}::bigint[])",
                 bind_index + 1
             ));
             bind_index += 2;
@@ -518,12 +518,12 @@ async fn fetch_batch(
     match partitions {
         PartitionSelection::All => {}
         PartitionSelection::One(partition) => {
-            q = q.bind(partition.count() as i32);
-            q = q.bind(partition.id() as i32);
+            q = q.bind(partition.count() as i64);
+            q = q.bind(partition.id() as i64);
         }
         PartitionSelection::Many(group) => {
-            q = q.bind(group.count() as i32);
-            let ids: Vec<i32> = group.partitions().iter().map(|p| p.id() as i32).collect();
+            q = q.bind(group.count() as i64);
+            let ids: Vec<i64> = group.partitions().iter().map(|p| p.id() as i64).collect();
             q = q.bind(ids);
         }
     }
@@ -584,7 +584,7 @@ fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::Par
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use super::*;
     use eventuary_core::io::cursor::{CursorCodec, CursorOrder};
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn pg_subscription_with_partition_sets_partition_selection_one() {
         use eventuary_core::PartitionableSubscription;
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let partition = Partition::new(3, count).unwrap();
         let sub = PgSubscription::default().with_partition(partition);
         match sub.partitions {
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn pg_subscription_with_partitions_sets_partition_selection_many() {
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let group = PartitionGroup::new(vec![
             Partition::new(1, count).unwrap(),
             Partition::new(4, count).unwrap(),
@@ -619,7 +619,7 @@ mod tests {
             PartitionSelection::Many(g) => {
                 assert_eq!(g.len(), 3);
                 assert_eq!(g.count(), 8);
-                let ids: Vec<u16> = g.partitions().iter().map(|p| p.id()).collect();
+                let ids: Vec<u32> = g.partitions().iter().map(|p| p.id()).collect();
                 assert_eq!(ids, vec![1, 4, 7]);
             }
             _ => panic!("expected PartitionSelection::Many"),

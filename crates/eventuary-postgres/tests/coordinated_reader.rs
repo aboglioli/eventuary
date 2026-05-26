@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ fn event_with_key(key: &str) -> Event {
     .unwrap()
 }
 
-fn make_sub(scope: CheckpointScope, partition_count: NonZeroU16) -> PgCoordinatedSubscription {
+fn make_sub(scope: CheckpointScope, partition_count: NonZeroU32) -> PgCoordinatedSubscription {
     PgCoordinatedSubscription {
         scope,
         partition_count,
@@ -81,7 +81,7 @@ fn make_sub(scope: CheckpointScope, partition_count: NonZeroU16) -> PgCoordinate
 async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
     let (_c, pool) = start_postgres().await;
 
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
@@ -140,7 +140,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
     let stream_b = stream_b.unwrap();
 
     let drain = |mut stream: PgCoordinatedStream| async move {
-        let mut results: HashMap<u16, Vec<String>> = HashMap::new();
+        let mut results: HashMap<u32, Vec<String>> = HashMap::new();
         while let Ok(Some(Ok(msg))) = timeout(Duration::from_secs(2), stream.next()).await {
             let partition_id = msg.cursor().partition.id();
             let key = msg.event().key().as_str().to_owned();
@@ -160,9 +160,9 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         "combined count must be 8; got a={total_a} b={total_b}"
     );
 
-    let partitions_a: HashSet<u16> = results_a.keys().copied().collect();
-    let partitions_b: HashSet<u16> = results_b.keys().copied().collect();
-    let overlap: HashSet<u16> = partitions_a.intersection(&partitions_b).copied().collect();
+    let partitions_a: HashSet<u32> = results_a.keys().copied().collect();
+    let partitions_b: HashSet<u32> = results_b.keys().copied().collect();
+    let overlap: HashSet<u32> = partitions_a.intersection(&partitions_b).copied().collect();
     assert!(
         overlap.is_empty(),
         "partitions should be disjoint; overlap={overlap:?}"
@@ -173,7 +173,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
 async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
     let (_c, pool) = start_postgres().await;
 
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
@@ -309,7 +309,7 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
 async fn pg_coordinated_reader_drop_releases_owned_partitions() {
     let (_c, pool) = start_postgres().await;
 
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let writer_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
@@ -395,7 +395,7 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         assert!(
             owner_id.is_none(),
             "partition {} should be released after stream drop; still owned by {:?}",
-            row.get::<i32, _>("partition_id"),
+            row.get::<i64, _>("partition_id"),
             owner_id
         );
     }
@@ -430,7 +430,7 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pg_coordinated_reader_fresh_latest_skips_existing_events() {
     let (_c, pool) = start_postgres().await;
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let writer = PgWriter::new_with_config(
         pool.clone(),
@@ -503,7 +503,7 @@ async fn pg_coordinated_reader_fresh_latest_skips_existing_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pg_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
     let (_c, pool) = start_postgres().await;
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let writer = PgWriter::new_with_config(
         pool.clone(),
@@ -579,7 +579,7 @@ async fn pg_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
     assert_eq!(delivered, vec!["new-after-cutoff".to_owned()]);
 }
 
-async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashMap<i32, String> {
+async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashMap<i64, String> {
     let rows = sqlx::query(
         "SELECT partition_id, owner_id FROM event_stream_partitions \
          WHERE consumer_group_id = $1 AND stream_id = $2 AND owner_id IS NOT NULL \
@@ -593,7 +593,7 @@ async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashM
 
     rows.into_iter()
         .map(|r| {
-            let partition_id: i32 = r.get("partition_id");
+            let partition_id: i64 = r.get("partition_id");
             let owner_id: String = r.get("owner_id");
             (partition_id, owner_id)
         })
@@ -603,7 +603,7 @@ async fn query_owned_partitions(pool: &PgPool, scope: &CheckpointScope) -> HashM
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pg_coordinated_reader_resumes_from_checkpoint_on_restart() {
     let (_c, pool) = start_postgres().await;
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let writer = PgWriter::new_with_config(
         pool.clone(),

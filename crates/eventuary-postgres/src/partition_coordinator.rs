@@ -28,8 +28,8 @@ ON {consumers} (consumer_group_id, stream_id, lease_until);
 CREATE TABLE IF NOT EXISTS {partitions} (
     consumer_group_id   TEXT        NOT NULL,
     stream_id           TEXT        NOT NULL,
-    partition_id        INT         NOT NULL,
-    partition_count     INT         NULL,
+    partition_id        BIGINT      NOT NULL,
+    partition_count     BIGINT      NULL,
     owner_id            TEXT        NULL,
     lease_until         TIMESTAMPTZ NULL,
     checkpoint_sequence BIGINT      NOT NULL DEFAULT 0,
@@ -225,8 +225,8 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         lease_duration: std::time::Duration,
     ) -> Result<Option<PartitionLease<PgCursor>>> {
         let lease_until = lease_until_to_sql(compute_lease_until(lease_duration)?);
-        let partition_id_i32 = partition.id() as i32;
-        let partition_count_i32 = partition.count() as i32;
+        let partition_id_i64 = partition.id() as i64;
+        let partition_count_i64 = partition.count() as i64;
         let sql = format!(
             "INSERT INTO {partitions} \
                 (consumer_group_id, stream_id, partition_id, partition_count, owner_id, lease_until, generation, checkpoint_sequence) \
@@ -250,8 +250,8 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         let row = sqlx::query(&sql)
             .bind(scope.consumer_group_id.as_str())
             .bind(scope.stream_id.as_str())
-            .bind(partition_id_i32)
-            .bind(partition_count_i32)
+            .bind(partition_id_i64)
+            .bind(partition_count_i64)
             .bind(owner_id.as_str())
             .bind(lease_until)
             .fetch_optional(&self.pool)
@@ -267,14 +267,14 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                 let check_row = sqlx::query(&check_sql)
                     .bind(scope.consumer_group_id.as_str())
                     .bind(scope.stream_id.as_str())
-                    .bind(partition_id_i32)
+                    .bind(partition_id_i64)
                     .fetch_optional(&self.pool)
                     .await
                     .map_err(|e| Error::Store(e.to_string()))?;
                 if let Some(r) = check_row {
-                    let stored: Option<i32> = r.get("partition_count");
+                    let stored: Option<i64> = r.get("partition_count");
                     if let Some(stored) = stored
-                        && stored != partition_count_i32
+                        && stored != partition_count_i64
                     {
                         return Err(Error::Config(format!(
                             "partition count mismatch for scope {} stream {} partition {}: stored {}, requested {}",
@@ -282,7 +282,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                             scope.stream_id.as_str(),
                             partition.id(),
                             stored,
-                            partition_count_i32,
+                            partition_count_i64,
                         )));
                     }
                 }
@@ -312,8 +312,8 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         lease_duration: std::time::Duration,
     ) -> Result<()> {
         let lease_until = lease_until_to_sql(compute_lease_until(lease_duration)?);
-        let partition_id_i32 = lease.partition.id() as i32;
-        let partition_count_i32 = lease.partition.count() as i32;
+        let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         let sql = format!(
             "UPDATE {partitions} \
@@ -329,11 +329,11 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         let result = sqlx::query(&sql)
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
-            .bind(partition_id_i32)
+            .bind(partition_id_i64)
             .bind(lease.owner_id.as_str())
             .bind(lease_until)
             .bind(generation)
-            .bind(partition_count_i32)
+            .bind(partition_count_i64)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -349,8 +349,8 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
     }
 
     async fn release<'a>(&'a self, lease: &'a PartitionLease<PgCursor>) -> Result<()> {
-        let partition_id_i32 = lease.partition.id() as i32;
-        let partition_count_i32 = lease.partition.count() as i32;
+        let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         let sql = format!(
             "UPDATE {partitions} \
@@ -368,10 +368,10 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         let result = sqlx::query(&sql)
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
-            .bind(partition_id_i32)
+            .bind(partition_id_i64)
             .bind(lease.owner_id.as_str())
             .bind(generation)
-            .bind(partition_count_i32)
+            .bind(partition_count_i64)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -391,8 +391,8 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         lease: &'a PartitionLease<PgCursor>,
         cursor: PgCursor,
     ) -> Result<()> {
-        let partition_id_i32 = lease.partition.id() as i32;
-        let partition_count_i32 = lease.partition.count() as i32;
+        let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         let sequence = cursor.sequence;
         let sql = format!(
@@ -410,11 +410,11 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         let result = sqlx::query(&sql)
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
-            .bind(partition_id_i32)
+            .bind(partition_id_i64)
             .bind(lease.owner_id.as_str())
             .bind(generation)
             .bind(sequence)
-            .bind(partition_count_i32)
+            .bind(partition_count_i64)
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -427,7 +427,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             let check_row = sqlx::query(&check_sql)
                 .bind(lease.scope.consumer_group_id.as_str())
                 .bind(lease.scope.stream_id.as_str())
-                .bind(partition_id_i32)
+                .bind(partition_id_i64)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| Error::Store(e.to_string()))?;
@@ -435,9 +435,9 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                 Some(r) => {
                     let current_generation: i64 = r.get("generation");
                     let current_owner: Option<String> = r.get("owner_id");
-                    let current_count: Option<i32> = r.get("partition_count");
+                    let current_count: Option<i64> = r.get("partition_count");
                     if let Some(stored) = current_count
-                        && stored != partition_count_i32
+                        && stored != partition_count_i64
                     {
                         return Err(Error::Config(format!(
                             "partition count mismatch for scope {} stream {} partition {}: stored {}, requested {}",
@@ -445,7 +445,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                             lease.scope.stream_id.as_str(),
                             lease.partition.id(),
                             stored,
-                            partition_count_i32,
+                            partition_count_i64,
                         )));
                     }
                     if current_generation == generation
@@ -472,8 +472,8 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
 
 impl PgPartitionCoordinator {
     async fn check_partition_count_mismatch(&self, lease: &PartitionLease<PgCursor>) -> Result<()> {
-        let partition_id_i32 = lease.partition.id() as i32;
-        let partition_count_i32 = lease.partition.count() as i32;
+        let partition_id_i64 = lease.partition.id() as i64;
+        let partition_count_i64 = lease.partition.count() as i64;
         let sql = format!(
             "SELECT partition_count FROM {partitions} \
              WHERE consumer_group_id = $1 AND stream_id = $2 AND partition_id = $3",
@@ -482,14 +482,14 @@ impl PgPartitionCoordinator {
         let row = sqlx::query(&sql)
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
-            .bind(partition_id_i32)
+            .bind(partition_id_i64)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
         if let Some(r) = row {
-            let stored: Option<i32> = r.get("partition_count");
+            let stored: Option<i64> = r.get("partition_count");
             if let Some(stored) = stored
-                && stored != partition_count_i32
+                && stored != partition_count_i64
             {
                 return Err(Error::Config(format!(
                     "partition count mismatch for scope {} stream {} partition {}: stored {}, requested {}",
@@ -497,7 +497,7 @@ impl PgPartitionCoordinator {
                     lease.scope.stream_id.as_str(),
                     lease.partition.id(),
                     stored,
-                    partition_count_i32,
+                    partition_count_i64,
                 )));
             }
         }

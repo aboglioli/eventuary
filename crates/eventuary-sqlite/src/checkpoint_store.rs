@@ -231,7 +231,7 @@ mod tests {
     use eventuary_core::io::cursor::CursorOrder;
     use eventuary_core::io::reader::CheckpointScope;
     use eventuary_core::io::{ConsumerGroupId, StreamId};
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use crate::database::SqliteDatabase;
 
@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn encode_cursor_preserves_nested_json() {
-        let partition = Partition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(2, NonZeroU32::new(4).unwrap()).unwrap();
         let cursor = WrappedCursor {
             sequence: 42,
             partition,
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn cursor_id_named_roundtrips_unquoted() {
         let id = CursorId::partition(
-            eventuary_core::partition::Partition::new(17, std::num::NonZeroU16::new(100).unwrap())
+            eventuary_core::partition::Partition::new(17, std::num::NonZeroU32::new(100).unwrap())
                 .unwrap(),
         );
         let encoded = encode_cursor_id(&id);

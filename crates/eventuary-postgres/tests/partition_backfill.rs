@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 
 use sqlx::PgPool;
 use sqlx::Row;
@@ -67,7 +67,7 @@ async fn pg_partition_backfill_populates_partition_columns() {
 
     let config = PgPartitionBackfillConfig::new(
         PgRelationName::new("events").unwrap(),
-        NonZeroU16::new(4).unwrap(),
+        NonZeroU32::new(4).unwrap(),
         EventKeyPartitionKeyResolver::new(),
         Fnv1a64PartitionHasher,
         3,
@@ -99,12 +99,12 @@ async fn pg_partition_backfill_populates_partition_columns() {
         let expected_pk = PartitionKey::new(&expected_key).unwrap();
         let expected_hash = hasher.hash(&expected_pk);
         let expected_hash_i64 = expected_hash.to_sql_i64();
-        let expected_partition_id = (expected_hash.get() % 4) as i32;
+        let expected_partition_id = (expected_hash.get() % 4) as i64;
 
         let partition_key: Option<String> = row.get("partition_key");
         let partition_hash: Option<i64> = row.get("partition_hash");
-        let partition_id: Option<i32> = row.get("partition_id");
-        let partition_count: Option<i32> = row.get("partition_count");
+        let partition_id: Option<i64> = row.get("partition_id");
+        let partition_count: Option<i64> = row.get("partition_count");
         let partition_strategy: Option<String> = row.get("partition_strategy");
 
         assert_eq!(
@@ -114,7 +114,7 @@ async fn pg_partition_backfill_populates_partition_columns() {
         );
         assert_eq!(partition_hash, Some(expected_hash_i64), "row {i}");
         assert_eq!(partition_id, Some(expected_partition_id), "row {i}");
-        assert_eq!(partition_count, Some(4_i32), "row {i}");
+        assert_eq!(partition_count, Some(4_i64), "row {i}");
         assert_eq!(partition_strategy.as_deref(), Some("fnv1a64:v1"), "row {i}");
     }
 }
@@ -125,7 +125,7 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
 
     let inline_config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
-            NonZeroU16::new(4).unwrap(),
+            NonZeroU32::new(4).unwrap(),
             EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
@@ -149,7 +149,7 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
 
     let config = PgPartitionBackfillConfig::new(
         PgRelationName::new("events").unwrap(),
-        NonZeroU16::new(4).unwrap(),
+        NonZeroU32::new(4).unwrap(),
         EventKeyPartitionKeyResolver::new(),
         Fnv1a64PartitionHasher,
         10,
@@ -172,7 +172,7 @@ async fn pg_partition_backfill_skips_already_partitioned_rows() {
 fn pg_partition_backfill_config_rejects_zero_batch_size() {
     let err = PgPartitionBackfillConfig::new(
         PgRelationName::new("events").unwrap(),
-        NonZeroU16::new(4).unwrap(),
+        NonZeroU32::new(4).unwrap(),
         EventKeyPartitionKeyResolver::new(),
         Fnv1a64PartitionHasher,
         0,

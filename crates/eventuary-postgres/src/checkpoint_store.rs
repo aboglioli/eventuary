@@ -189,7 +189,7 @@ where
 mod tests {
     use super::*;
     use eventuary_core::Partition;
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     struct WrappedCursor {
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn encode_cursor_preserves_nested_json() {
-        let partition = Partition::new(2, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(2, NonZeroU32::new(4).unwrap()).unwrap();
         let cursor = WrappedCursor {
             sequence: 42,
             partition,
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn cursor_id_named_roundtrips_unquoted() {
         let id = CursorId::partition(
-            eventuary_core::partition::Partition::new(17, std::num::NonZeroU16::new(100).unwrap())
+            eventuary_core::partition::Partition::new(17, std::num::NonZeroU32::new(100).unwrap())
                 .unwrap(),
         );
         let encoded = encode_cursor_id(&id).to_owned();

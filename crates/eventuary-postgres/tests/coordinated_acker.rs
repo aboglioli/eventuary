@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use sqlx::{PgPool, Row};
@@ -49,8 +49,8 @@ fn scope() -> CheckpointScope {
     )
 }
 
-fn partition(id: u16) -> Partition {
-    Partition::new(id, NonZeroU16::new(64).unwrap()).unwrap()
+fn partition(id: u32) -> Partition {
+    Partition::new(id, NonZeroU32::new(64).unwrap()).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

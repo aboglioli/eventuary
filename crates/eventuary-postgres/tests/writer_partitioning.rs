@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 
 use sqlx::PgPool;
 use sqlx::Row;
@@ -61,8 +61,8 @@ async fn pg_writer_off_partitioning_leaves_columns_null() {
 
     let partition_key: Option<String> = row.get("partition_key");
     let partition_hash: Option<i64> = row.get("partition_hash");
-    let partition_id: Option<i32> = row.get("partition_id");
-    let partition_count: Option<i32> = row.get("partition_count");
+    let partition_id: Option<i64> = row.get("partition_id");
+    let partition_count: Option<i64> = row.get("partition_count");
     let partition_strategy: Option<String> = row.get("partition_strategy");
 
     assert!(partition_key.is_none());
@@ -78,7 +78,7 @@ async fn pg_writer_inline_partitioning_persists_all_columns() {
 
     let config = PgWriterConfig {
         partitioning: PgPartitioningConfig::inline(
-            NonZeroU16::new(64).unwrap(),
+            NonZeroU32::new(64).unwrap(),
             EventKeyPartitionKeyResolver::new(),
             Fnv1a64PartitionHasher,
         ),
@@ -108,17 +108,17 @@ async fn pg_writer_inline_partitioning_persists_all_columns() {
 
     let partition_key: Option<String> = row.get("partition_key");
     let partition_hash: Option<i64> = row.get("partition_hash");
-    let partition_id: Option<i32> = row.get("partition_id");
-    let partition_count: Option<i32> = row.get("partition_count");
+    let partition_id: Option<i64> = row.get("partition_id");
+    let partition_count: Option<i64> = row.get("partition_count");
     let partition_strategy: Option<String> = row.get("partition_strategy");
 
     let expected_hash_u64: u64 = 0x1b96f9c28b5d5aba;
     let expected_hash_i64 = expected_hash_u64 as i64;
-    let expected_partition_id = (expected_hash_u64 % 64) as i32;
+    let expected_partition_id = (expected_hash_u64 % 64) as i64;
 
     assert_eq!(partition_key.as_deref(), Some("order-123"));
     assert_eq!(partition_hash, Some(expected_hash_i64));
     assert_eq!(partition_id, Some(expected_partition_id));
-    assert_eq!(partition_count, Some(64_i32));
+    assert_eq!(partition_count, Some(64_i64));
     assert_eq!(partition_strategy.as_deref(), Some("fnv1a64:v1"));
 }

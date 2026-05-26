@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,7 +62,7 @@ fn event_with_key(key: &str) -> Event {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pg_coordinated_reader_ack_fails_with_ownership_lost_after_lease_stolen() {
     let (_c, pool) = start_postgres().await;
-    let partition_count = NonZeroU16::new(1).unwrap();
+    let partition_count = NonZeroU32::new(1).unwrap();
 
     let writer = PgWriter::new_with_config(
         pool.clone(),

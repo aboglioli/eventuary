@@ -36,7 +36,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,7 +64,7 @@ use crate::partition::{
 use crate::payload::Payload;
 
 pub struct PartitionedReaderConfig<P = Payload> {
-    pub partition_count: NonZeroU16,
+    pub partition_count: NonZeroU32,
     pub lane_capacity: NonZeroUsize,
     pub scheduling: LaneScheduling,
     pub key_resolver: Arc<dyn PartitionKeyResolver<P>>,
@@ -109,7 +109,7 @@ impl<P> fmt::Debug for PartitionedReaderConfig<P> {
 impl<P: Send + Sync + 'static> Default for PartitionedReaderConfig<P> {
     fn default() -> Self {
         Self {
-            partition_count: NonZeroU16::new(64).unwrap(),
+            partition_count: NonZeroU32::new(64).unwrap(),
             lane_capacity: NonZeroUsize::new(128).unwrap(),
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
@@ -618,7 +618,7 @@ where
                 match pick {
                     Some((lane_id, id, event, inner_acker, cursor)) => {
                         let partition =
-                            Partition::new(lane_id as u16, count_nz).expect("valid lane");
+                            Partition::new(lane_id as u32, count_nz).expect("valid lane");
                         let acker = PartitionAcker {
                             state: Arc::clone(&emit_state),
                             notify: Arc::clone(&emit_notify),
@@ -665,7 +665,7 @@ where
 
 fn compute_partition<P: 'static>(
     event: &Event<P>,
-    count: NonZeroU16,
+    count: NonZeroU32,
     key_resolver: &dyn PartitionKeyResolver<P>,
     hasher: &dyn PartitionHasher,
 ) -> Result<Partition> {
@@ -708,14 +708,14 @@ mod tests {
 
     #[test]
     fn partitioned_cursor_id_is_named_with_partition() {
-        let partition = Partition::new(17, NonZeroU16::new(100).unwrap()).unwrap();
+        let partition = Partition::new(17, NonZeroU32::new(100).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(7), partition);
         assert_eq!(cursor.id(), CursorId::partition(partition));
     }
 
     #[test]
     fn partitioned_cursor_order_passes_through_inner() {
-        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU32::new(4).unwrap()).unwrap();
         let inner = TestCursor(7);
         let expected = inner.order_key();
         let cursor = PartitionedCursor::new(inner, partition);
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn partitioned_cursor_roundtrip_preserves_partition_and_inner() {
-        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU32::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(42), partition);
 
         let value = serde_json::to_value(&cursor).unwrap();
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn partitioned_subscription_stores_start_after_cursor() {
-        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU32::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), partition);
         let subscription = PartitionedSubscription::<(), TestCursor>::new(())
             .with_start(StartFrom::After(cursor.clone()));
@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn partitioned_subscription_stores_starts_from_with_starts() {
-        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU32::new(4).unwrap()).unwrap();
         let starts = vec![StartFrom::After(PartitionedCursor::new(
             TestCursor(10),
             partition,
@@ -761,7 +761,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
         let partitioned = PartitionedReader::source(reader, rr_config(4, 64));
-        let old_partition = Partition::new(1, NonZeroU16::new(8).unwrap()).unwrap();
+        let old_partition = Partition::new(1, NonZeroU32::new(8).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), old_partition);
         let subscription =
             PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
@@ -781,7 +781,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(vec![ev("k0")])),
         };
         let partitioned = PartitionedReader::source(reader, rr_config(4, 64));
-        let partition = Partition::new(1, NonZeroU16::new(4).unwrap()).unwrap();
+        let partition = Partition::new(1, NonZeroU32::new(4).unwrap()).unwrap();
         let cursor = PartitionedCursor::new(TestCursor(10), partition);
         let subscription =
             PartitionedSubscription::<_, TestCursor>::new(()).with_start(StartFrom::After(cursor));
@@ -833,9 +833,9 @@ mod tests {
         .expect("valid event")
     }
 
-    fn rr_config(n: u16, cap: usize) -> PartitionedReaderConfig {
+    fn rr_config(n: u32, cap: usize) -> PartitionedReaderConfig {
         PartitionedReaderConfig {
-            partition_count: NonZeroU16::new(n).unwrap(),
+            partition_count: NonZeroU32::new(n).unwrap(),
             lane_capacity: NonZeroUsize::new(cap).unwrap(),
             scheduling: LaneScheduling::RoundRobin,
             ..PartitionedReaderConfig::default()
@@ -1037,7 +1037,7 @@ mod tests {
             events: std::sync::Mutex::new(Some(events)),
         };
         let cfg = PartitionedReaderConfig {
-            partition_count: NonZeroU16::new(4).unwrap(),
+            partition_count: NonZeroU32::new(4).unwrap(),
             lane_capacity: NonZeroUsize::new(64).unwrap(),
             scheduling: LaneScheduling::QueueDepthWeighted {
                 max_burst_per_lane: NonZeroUsize::new(8).unwrap(),
@@ -1238,10 +1238,10 @@ mod tests {
     async fn default_router_routes_via_event_key_fnv1a64() {
         use crate::partition::PartitionKey;
 
-        let count_nz = NonZeroU16::new(4).unwrap();
+        let count_nz = NonZeroU32::new(4).unwrap();
         let hasher = Fnv1a64PartitionHasher;
         let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
-        let expected_lanes: Vec<u16> = events
+        let expected_lanes: Vec<u32> = events
             .iter()
             .map(|e| {
                 let key = PartitionKey::new(e.key().as_str()).unwrap();
@@ -1283,10 +1283,10 @@ mod tests {
     async fn custom_router_routes_via_pipeline() {
         use crate::partition::PartitionKey;
 
-        let count_nz = NonZeroU16::new(4).unwrap();
+        let count_nz = NonZeroU32::new(4).unwrap();
         let hasher = Fnv1a64PartitionHasher;
         let events: Vec<Event> = (0..8).map(|i| ev(&format!("k{i}"))).collect();
-        let expected_lanes: Vec<u16> = events
+        let expected_lanes: Vec<u32> = events
             .iter()
             .map(|e| {
                 let key = PartitionKey::new(e.key().as_str()).unwrap();

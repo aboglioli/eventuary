@@ -1,5 +1,5 @@
 use std::fmt;
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use eventuary_core::io::Writer;
@@ -17,7 +17,7 @@ pub enum SqlitePartitioningConfig {
     #[default]
     Off,
     Inline {
-        partition_count: NonZeroU16,
+        partition_count: NonZeroU32,
         key_resolver: Arc<dyn PartitionKeyResolver>,
         hasher: Arc<dyn PartitionHasher>,
     },
@@ -25,7 +25,7 @@ pub enum SqlitePartitioningConfig {
 
 impl SqlitePartitioningConfig {
     pub fn inline(
-        count: NonZeroU16,
+        count: NonZeroU32,
         resolver: impl PartitionKeyResolver + 'static,
         hasher: impl PartitionHasher + 'static,
     ) -> Self {
@@ -229,7 +229,7 @@ fn insert_event(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
 
     use eventuary_core::io::Writer;
     use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
@@ -292,7 +292,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(64).unwrap(),
+                NonZeroU32::new(64).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),

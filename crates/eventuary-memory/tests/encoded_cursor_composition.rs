@@ -1,4 +1,4 @@
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Mutex;
 
@@ -78,7 +78,7 @@ async fn partitioned_then_encoded_then_checkpointed_roundtrip() {
     let partitioned = PartitionedReader::source(
         inner,
         PartitionedReaderConfig {
-            partition_count: NonZeroU16::new(4).unwrap(),
+            partition_count: NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );

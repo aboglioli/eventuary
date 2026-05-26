@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ fn event_with_key(key: &str) -> Event {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
@@ -118,7 +118,7 @@ async fn sqlite_coordinated_reader_claims_and_delivers_partition_events() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
 
@@ -190,7 +190,7 @@ async fn sqlite_coordinated_reader_fresh_latest_skips_existing_events() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
 
@@ -268,7 +268,7 @@ async fn sqlite_coordinated_reader_fresh_timestamp_skips_pre_cutoff_events() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_persists_checkpoint_on_ack() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());
@@ -366,7 +366,7 @@ async fn sqlite_coordinated_reader_persists_checkpoint_on_ack() {
 
 #[tokio::test]
 async fn sqlite_coordinated_reader_resumes_from_checkpoint_on_restart() {
-    let partition_count = NonZeroU16::new(4).unwrap();
+    let partition_count = NonZeroU32::new(4).unwrap();
 
     let db = SqliteDatabase::open_in_memory().unwrap();
     prepare_test_schema(&db.conn());

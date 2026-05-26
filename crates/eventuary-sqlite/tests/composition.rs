@@ -133,7 +133,7 @@ async fn checkpoint_over_partitioned_sqlite_stores_per_lane_offsets() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -232,7 +232,7 @@ async fn partitioned_reader_tags_partition_on_cursor() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -299,7 +299,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned = PartitionedReader::source(
             source,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
@@ -333,7 +333,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned2 = PartitionedReader::source(
             source2,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );

@@ -660,7 +660,7 @@ async fn fetch_batch(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::num::NonZeroU16;
+    use std::num::NonZeroU32;
     use std::time::Duration;
 
     use futures::StreamExt;
@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn sqlite_subscription_with_partition_sets_partition_selection_one() {
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let partition = Partition::new(3, count).unwrap();
         let sub = SqliteSubscription::default().with_partition(partition);
         match sub.partitions {
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn sqlite_subscription_with_partitions_sets_partition_selection_many() {
-        let count = NonZeroU16::new(8).unwrap();
+        let count = NonZeroU32::new(8).unwrap();
         let group = PartitionGroup::new(vec![
             Partition::new(2, count).unwrap(),
             Partition::new(5, count).unwrap(),
@@ -703,7 +703,7 @@ mod tests {
         match sub.partitions {
             PartitionSelection::Many(g) => {
                 assert_eq!(g.len(), 2);
-                let ids: Vec<u16> = g.partitions().iter().map(|p| p.id()).collect();
+                let ids: Vec<u32> = g.partitions().iter().map(|p| p.id()).collect();
                 assert_eq!(ids, vec![2, 5]);
             }
             _ => panic!("expected PartitionSelection::Many"),
@@ -739,7 +739,7 @@ mod tests {
         assert!(lo < hi);
     }
 
-    const PARTITION_COUNT: u16 = 4;
+    const PARTITION_COUNT: u32 = 4;
 
     fn event_with_key(key: &str) -> Event {
         Event::builder(
@@ -754,10 +754,10 @@ mod tests {
         .unwrap()
     }
 
-    fn partition_for_key(key: &str) -> u16 {
+    fn partition_for_key(key: &str) -> u32 {
         let k = PartitionKey::new(key).unwrap();
         let hash = Fnv1a64PartitionHasher.hash(&k);
-        (hash.get() % PARTITION_COUNT as u64) as u16
+        (hash.get() % PARTITION_COUNT as u64) as u32
     }
 
     fn fast_config() -> SqliteReaderConfig {
@@ -772,7 +772,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                NonZeroU32::new(PARTITION_COUNT).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
@@ -808,7 +808,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                NonZeroU32::new(PARTITION_COUNT).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
@@ -822,7 +822,7 @@ mod tests {
             writer.write(&event_with_key(key)).await.unwrap();
         }
 
-        let partitions_by_id: HashMap<u16, Vec<&str>> =
+        let partitions_by_id: HashMap<u32, Vec<&str>> =
             keys.iter().fold(HashMap::new(), |mut acc, key| {
                 acc.entry(partition_for_key(key)).or_default().push(key);
                 acc
@@ -839,7 +839,7 @@ mod tests {
             start: StartFrom::Earliest,
             stop_at: StopAt::CurrentEnd,
             partitions: PartitionSelection::One(
-                Partition::new(chosen_partition, NonZeroU16::new(PARTITION_COUNT).unwrap())
+                Partition::new(chosen_partition, NonZeroU32::new(PARTITION_COUNT).unwrap())
                     .unwrap(),
             ),
             ..SqliteSubscription::default()
@@ -868,7 +868,7 @@ mod tests {
         let db = SqliteDatabase::open_in_memory().unwrap();
         let config = SqliteWriterConfig {
             partitioning: SqlitePartitioningConfig::inline(
-                NonZeroU16::new(PARTITION_COUNT).unwrap(),
+                NonZeroU32::new(PARTITION_COUNT).unwrap(),
                 EventKeyPartitionKeyResolver::new(),
                 Fnv1a64PartitionHasher,
             ),
@@ -882,8 +882,8 @@ mod tests {
             writer.write(&event_with_key(key)).await.unwrap();
         }
 
-        let count = NonZeroU16::new(PARTITION_COUNT).unwrap();
-        let mut populated: Vec<u16> = keys
+        let count = NonZeroU32::new(PARTITION_COUNT).unwrap();
+        let mut populated: Vec<u32> = keys
             .iter()
             .map(|k| partition_for_key(k))
             .collect::<std::collections::BTreeSet<_>>()
@@ -895,7 +895,7 @@ mod tests {
             "fixture must populate at least 2 distinct partitions"
         );
 
-        let selected: std::collections::HashSet<u16> = populated.iter().copied().collect();
+        let selected: std::collections::HashSet<u32> = populated.iter().copied().collect();
         let expected_len = keys
             .iter()
             .copied()

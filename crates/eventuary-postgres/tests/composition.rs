@@ -178,7 +178,7 @@ async fn checkpoint_over_partitioned_pg_reader_stores_per_lane_offsets() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -232,7 +232,7 @@ async fn partitioned_pg_reader_continues_other_lanes_when_one_lane_unacked() {
     let partitioned = PartitionedReader::source(
         source,
         PartitionedReaderConfig {
-            partition_count: std::num::NonZeroU16::new(4).unwrap(),
+            partition_count: std::num::NonZeroU32::new(4).unwrap(),
             ..PartitionedReaderConfig::default()
         },
     );
@@ -281,7 +281,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned = PartitionedReader::source(
             source,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
@@ -315,7 +315,7 @@ async fn checkpoint_over_partitioned_resumes_and_skips_acked_events() {
         let partitioned2 = PartitionedReader::source(
             source2,
             PartitionedReaderConfig {
-                partition_count: std::num::NonZeroU16::new(4).unwrap(),
+                partition_count: std::num::NonZeroU32::new(4).unwrap(),
                 ..PartitionedReaderConfig::default()
             },
         );
