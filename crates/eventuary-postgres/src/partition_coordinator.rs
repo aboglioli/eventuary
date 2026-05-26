@@ -197,6 +197,26 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
         Ok(count as usize)
     }
 
+    async fn release_consumer<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+    ) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM {consumers} \
+             WHERE consumer_group_id = $1 AND stream_id = $2 AND owner_id = $3",
+            consumers = self.consumers_relation
+        );
+        sqlx::query(&sql)
+            .bind(scope.consumer_group_id.as_str())
+            .bind(scope.stream_id.as_str())
+            .bind(owner_id.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
     async fn claim<'a>(
         &'a self,
         scope: &'a CheckpointScope,

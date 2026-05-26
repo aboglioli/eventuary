@@ -101,6 +101,16 @@ where
         scope: &'a CheckpointScope,
     ) -> impl Future<Output = Result<usize>> + Send + 'a;
 
+    /// Remove this consumer's registration so other consumers stop counting it
+    /// as live when computing `target_partition_count`. Called by
+    /// `CoordinatedReader` on stream shutdown. Should be idempotent and must
+    /// not return an error when the consumer record is missing.
+    fn release_consumer<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+    ) -> impl Future<Output = Result<()>> + Send + 'a;
+
     /// Attempt to take a partition. Returns `Ok(Some(lease))` on success or
     /// `Ok(None)` if another live owner holds it. Increments `generation` on
     /// every successful claim.
@@ -418,8 +428,7 @@ where
 
             let tick_duration = renew_interval.min(heartbeat_interval);
 
-            let mut next_rebalance =
-                tokio::time::Instant::now() + jittered_duration(rebalance_interval);
+            let mut next_rebalance = tokio::time::Instant::now();
             let mut next_renew = tokio::time::Instant::now() + jittered_duration(tick_duration);
 
             loop {
@@ -580,6 +589,12 @@ where
                                 );
                             }
                         }
+                        if let Err(e) = coordinator.release_consumer(&scope, &owner_id).await {
+                            tracing::warn!(
+                                owner = %owner_id,
+                                "coordinated reader: release_consumer on shutdown failed: {e}"
+                            );
+                        }
                         return;
                     }
                 }
@@ -594,6 +609,12 @@ where
                                 "coordinated reader: release on stream close failed: {e}"
                             );
                         }
+                    }
+                    if let Err(e) = coordinator.release_consumer(&scope, &owner_id).await {
+                        tracing::warn!(
+                            owner = %owner_id,
+                            "coordinated reader: release_consumer on stream close failed: {e}"
+                        );
                     }
                     return;
                 }
@@ -837,6 +858,19 @@ mod tests {
                 .iter()
                 .filter(|((s, _), lease_until)| s == scope && **lease_until > now)
                 .count())
+        }
+
+        async fn release_consumer<'a>(
+            &'a self,
+            scope: &'a CheckpointScope,
+            owner_id: &'a OwnerId,
+        ) -> Result<()> {
+            self.state
+                .lock()
+                .await
+                .consumers
+                .remove(&(scope.clone(), owner_id.clone()));
+            Ok(())
         }
 
         async fn claim<'a>(

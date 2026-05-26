@@ -194,6 +194,31 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
     }
 
+    async fn release_consumer<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+    ) -> Result<()> {
+        let conn = Arc::clone(&self.conn);
+        let consumers = Arc::clone(&self.consumers_relation);
+        let group = scope.consumer_group_id.as_str().to_owned();
+        let stream = scope.stream_id.as_str().to_owned();
+        let owner = owner_id.as_str().to_owned();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let sql = format!(
+                "DELETE FROM {consumers} \
+                 WHERE consumer_group_id = ?1 AND stream_id = ?2 AND owner_id = ?3"
+            );
+            guard
+                .execute(&sql, rusqlite::params![group, stream, owner])
+                .map_err(|e| Error::Store(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    }
+
     async fn claim<'a>(
         &'a self,
         scope: &'a CheckpointScope,

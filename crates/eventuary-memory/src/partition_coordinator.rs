@@ -120,6 +120,19 @@ where
         Ok(count)
     }
 
+    async fn release_consumer<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+    ) -> Result<()> {
+        let key = ConsumerKey {
+            scope: scope.clone(),
+            owner_id: owner_id.clone(),
+        };
+        self.state.lock().await.consumers.remove(&key);
+        Ok(())
+    }
+
     async fn claim<'a>(
         &'a self,
         scope: &'a CheckpointScope,
