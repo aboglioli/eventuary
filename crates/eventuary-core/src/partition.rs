@@ -48,6 +48,15 @@ impl Partition {
     }
 }
 
+/// Capability trait for any type that carries a resolved `Partition`.
+///
+/// Implemented by cursors emitted by partition-aware sources, by message
+/// envelopes that have been routed, and by any future type that wants to
+/// participate in partition-aware routing without going through key hashing.
+pub trait HasPartition {
+    fn partition(&self) -> Partition;
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PartitionKey(String);

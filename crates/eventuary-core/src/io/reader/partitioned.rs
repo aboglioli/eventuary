@@ -58,7 +58,7 @@ use crate::io::position::{StartFrom, StartableSubscription};
 use crate::io::stream::SpawnedStream;
 use crate::io::{Acker, Cursor, CursorId, Message, NoCursor, Reader};
 use crate::partition::{
-    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionHasher,
+    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, HasPartition, Partition, PartitionHasher,
     PartitionKeyResolver,
 };
 use crate::payload::Payload;
@@ -205,6 +205,12 @@ impl<C: Cursor> Cursor for PartitionedCursor<C> {
     }
 }
 
+impl<C> HasPartition for PartitionedCursor<C> {
+    fn partition(&self) -> Partition {
+        self.partition
+    }
+}
+
 struct InFlightItem<A: Acker, C, P> {
     id: u64,
     event: Event<P>,
@@ -321,32 +327,117 @@ where
     }
 }
 
-pub struct PartitionedReader<R, P = Payload> {
+pub struct PartitionedReader<R, P = Payload>
+where
+    R: Reader<P>,
+    P: Send + Sync + 'static,
+{
     inner: R,
     config: PartitionedReaderConfig<P>,
     ack_mode: PartitionedAckMode,
+    router: LaneRouter<R::Cursor, P>,
 }
 
-impl<R, P> PartitionedReader<R, P> {
+/// Concrete per-message router closure. Held by `PartitionedReader` so
+/// the `Reader` impl can stay generic over `R::Cursor` while specific
+/// constructors (`source_from_cursor`) capture extra trait bounds
+/// (`HasPartition`) at the call site rather than the impl.
+type LaneRouter<C, P> = Arc<dyn Fn(&Event<P>, &C) -> Result<Partition> + Send + Sync + 'static>;
+
+impl<R, P> PartitionedReader<R, P>
+where
+    R: Reader<P>,
+    R::Cursor: 'static,
+    P: Send + Sync + 'static,
+{
     /// Source-cursor mode: acks inner on lane accept.
     /// For PgReader, SqliteReader — inner ack only advances a local cursor.
+    /// Routes events by hashing the configured `PartitionKeyResolver` output.
     pub fn source(inner: R, config: PartitionedReaderConfig<P>) -> Self {
+        let router = strategy_router::<R::Cursor, P>(
+            Arc::clone(&config.key_resolver),
+            Arc::clone(&config.hasher),
+            config.partition_count,
+        );
         Self {
             inner,
             config,
             ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
+            router,
         }
     }
 
     /// Delivery-preserving mode: defers inner ack to downstream ack.
     /// For SqsReader, KafkaReader — inner ack deletes/commits the message.
     pub fn delivery(inner: R, config: PartitionedReaderConfig<P>) -> Self {
+        let router = strategy_router::<R::Cursor, P>(
+            Arc::clone(&config.key_resolver),
+            Arc::clone(&config.hasher),
+            config.partition_count,
+        );
         Self {
             inner,
             config,
             ack_mode: PartitionedAckMode::AckInnerOnDownstreamAck,
+            router,
         }
     }
+}
+
+impl<R, P> PartitionedReader<R, P>
+where
+    R: Reader<P>,
+    R::Cursor: HasPartition + 'static,
+    P: Send + Sync + 'static,
+{
+    /// Source-cursor mode that routes by the `Partition` carried on each
+    /// inner message's cursor. Use when the inner source is partition-
+    /// aware (e.g. `PgReader`, `SqliteReader`) and lane assignment must
+    /// match the writer's persisted partition column exactly.
+    ///
+    /// Unlike [`PartitionedReader::source`], this constructor does not
+    /// consult any [`PartitionKeyResolver`] or [`PartitionHasher`] — the
+    /// writer's choice (the partition stamped on the cursor) is the
+    /// single source of truth for lane routing. The resolver and hasher
+    /// configured on `PartitionedReaderConfig` are ignored.
+    ///
+    /// Like `source`, the inner acker is invoked on lane accept; the
+    /// inner reader is expected to be advancing its own local cursor.
+    pub fn source_from_cursor(inner: R, config: PartitionedReaderConfig<P>) -> Self {
+        let expected_count = config.partition_count;
+        let router: LaneRouter<R::Cursor, P> = Arc::new(move |_event, cursor| {
+            let partition = cursor.partition();
+            if partition.count_nz() != expected_count {
+                return Err(Error::InvalidCursor(format!(
+                    "partitioned reader: inner cursor partition count {} does not match configured {}",
+                    partition.count(),
+                    expected_count.get()
+                )));
+            }
+            Ok(partition)
+        });
+        Self {
+            inner,
+            config,
+            ack_mode: PartitionedAckMode::AckInnerOnLaneAccept,
+            router,
+        }
+    }
+}
+
+fn strategy_router<C, P>(
+    key_resolver: Arc<dyn PartitionKeyResolver<P>>,
+    hasher: Arc<dyn PartitionHasher>,
+    count: NonZeroU32,
+) -> LaneRouter<C, P>
+where
+    C: 'static,
+    P: Send + Sync + 'static,
+{
+    Arc::new(move |event, _cursor| {
+        let key = key_resolver.partition_key(event)?;
+        Ok(hasher.partition_for(&key, count))
+    })
 }
 
 impl<R, P> Reader<P> for PartitionedReader<R, P>
@@ -415,8 +506,7 @@ where
         let lane_capacity = self.config.lane_capacity.get();
         let scheduling = self.config.scheduling;
         let ack_mode = self.ack_mode;
-        let key_resolver = Arc::clone(&self.config.key_resolver);
-        let hasher = Arc::clone(&self.config.hasher);
+        let router = Arc::clone(&self.router);
 
         type LanesState<A, C, P> = std::sync::Arc<Mutex<Lanes<A, C, P>>>;
         let lanes_inner: Vec<Lane<R::Acker, R::Cursor, P>> = (0..count)
@@ -469,12 +559,7 @@ where
                         continue;
                     }
                 };
-                let lane_id = match compute_partition(
-                    msg.event(),
-                    count_nz,
-                    key_resolver.as_ref(),
-                    hasher.as_ref(),
-                ) {
+                let lane_id = match router(msg.event(), msg.cursor()) {
                     Ok(p) => p.id() as usize,
                     Err(e) => {
                         let _ = intake_tx.send(Err(e)).await;
@@ -661,16 +746,6 @@ where
 
         Ok(SpawnedStream::new(rx, handle))
     }
-}
-
-fn compute_partition<P: 'static>(
-    event: &Event<P>,
-    count: NonZeroU32,
-    key_resolver: &dyn PartitionKeyResolver<P>,
-    hasher: &dyn PartitionHasher,
-) -> Result<Partition> {
-    let key = key_resolver.partition_key(event)?;
-    Ok(hasher.partition_for(&key, count))
 }
 
 #[cfg(test)]
@@ -1323,5 +1398,159 @@ mod tests {
             delivered += 1;
         }
         assert_eq!(delivered, 8);
+    }
+
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Eq,
+        PartialEq,
+        Ord,
+        PartialOrd,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    struct PartitionedTestCursor {
+        sequence: i64,
+        partition: Partition,
+    }
+
+    impl Cursor for PartitionedTestCursor {
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_i64(self.sequence)
+        }
+    }
+
+    impl HasPartition for PartitionedTestCursor {
+        fn partition(&self) -> Partition {
+            self.partition
+        }
+    }
+
+    impl StartableSubscription<PartitionedTestCursor> for () {
+        fn with_start(self, _: StartFrom<PartitionedTestCursor>) -> Self {}
+    }
+
+    struct PartitionStampedReader {
+        events: std::sync::Mutex<Option<Vec<(Event, Partition)>>>,
+    }
+
+    impl Reader for PartitionStampedReader {
+        type Subscription = ();
+        type Acker = NoopAcker;
+        type Cursor = PartitionedTestCursor;
+        type Stream =
+            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, PartitionedTestCursor>>> + Send>>;
+
+        async fn read(&self, _: ()) -> Result<Self::Stream> {
+            let events = self.events.lock().unwrap().take().unwrap();
+            let iter = events.into_iter().enumerate().map(|(i, (e, partition))| {
+                Ok(Message::new(
+                    e,
+                    NoopAcker,
+                    PartitionedTestCursor {
+                        sequence: i as i64 + 1,
+                        partition,
+                    },
+                ))
+            });
+            Ok(Box::pin(futures::stream::iter(iter)))
+        }
+    }
+
+    #[tokio::test]
+    async fn source_from_cursor_routes_by_cursor_partition() {
+        let count_nz = NonZeroU32::new(4).unwrap();
+        // Build events stamped with deterministic, non-hash-aligned
+        // partitions so this test would fail if the reader were
+        // hashing keys instead of trusting the cursor.
+        let stamped: Vec<(Event, Partition)> = (0..12)
+            .map(|i| {
+                let p = Partition::new(i % 4, count_nz).unwrap();
+                (ev(&format!("k{i}")), p)
+            })
+            .collect();
+        let expected: Vec<u32> = stamped.iter().map(|(_, p)| p.id()).collect();
+
+        let reader = PartitionStampedReader {
+            events: std::sync::Mutex::new(Some(stamped)),
+        };
+        let p = PartitionedReader::source_from_cursor(reader, rr_config(4, 64));
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+
+        let mut observed: Vec<u32> = Vec::new();
+        for _ in 0..12 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            observed.push(msg.cursor().partition().id());
+            msg.ack().await.unwrap();
+        }
+
+        // Order may differ across lanes, but per-event the lane id must
+        // equal the partition stamped on the inner cursor.
+        let mut expected_sorted = expected.clone();
+        expected_sorted.sort_unstable();
+        let mut observed_sorted = observed.clone();
+        observed_sorted.sort_unstable();
+        assert_eq!(observed_sorted, expected_sorted);
+    }
+
+    #[tokio::test]
+    async fn source_from_cursor_errors_when_inner_count_mismatches_config() {
+        let configured = NonZeroU32::new(4).unwrap();
+        let stamped: Vec<(Event, Partition)> = vec![(
+            ev("k0"),
+            Partition::new(0, NonZeroU32::new(8).unwrap()).unwrap(),
+        )];
+
+        let reader = PartitionStampedReader {
+            events: std::sync::Mutex::new(Some(stamped)),
+        };
+        let p = PartitionedReader::source_from_cursor(reader, rr_config(configured.get(), 64));
+        let mut stream = p.read(PartitionedSubscription::new(())).await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        match first {
+            Err(Error::InvalidCursor(_)) => {}
+            Err(e) => panic!("expected InvalidCursor, got {e:?}"),
+            Ok(_) => panic!("expected InvalidCursor, got Ok(_)"),
+        }
+    }
+
+    #[test]
+    fn source_from_cursor_accepts_chained_composition() {
+        // Outer wrapper's HasPartition impl is satisfied via the blanket
+        // impl on PartitionedCursor<C>. This test exists to anchor the
+        // type-level guarantee: a partition-aware reader can be wrapped
+        // twice without losing the `R::Cursor: HasPartition` bound.
+        // (A full end-to-end read+ack roundtrip on the chained pair
+        // additionally requires `PartitionAcker: Clone`, which is out of
+        // scope for this task — the type bound is the load-bearing
+        // contract here.)
+        let reader = PartitionStampedReader {
+            events: std::sync::Mutex::new(Some(Vec::new())),
+        };
+        let inner = PartitionedReader::source_from_cursor(reader, rr_config(4, 64));
+        let _outer = PartitionedReader::source_from_cursor(inner, rr_config(4, 64));
+    }
+
+    #[test]
+    fn partitioned_cursor_has_partition_impl_returns_wrapper_partition() {
+        let partition = Partition::new(2, NonZeroU32::new(4).unwrap()).unwrap();
+        let cursor = PartitionedCursor::new(TestCursor(7), partition);
+        // Disambiguate: call via the trait method explicitly to ensure
+        // the blanket impl is reachable.
+        assert_eq!(
+            <PartitionedCursor<_> as HasPartition>::partition(&cursor),
+            partition
+        );
     }
 }

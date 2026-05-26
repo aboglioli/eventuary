@@ -54,7 +54,7 @@ pub use field_map::FieldMap;
 pub use metadata::Metadata;
 pub use namespace::Namespace;
 pub use organization::OrganizationId;
-pub use partition::Partition;
+pub use partition::{HasPartition, Partition};
 pub use payload_codec::{
     EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
 };

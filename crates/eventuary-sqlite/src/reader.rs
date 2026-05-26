@@ -13,7 +13,7 @@ use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
-use eventuary_core::partition::{Partition, PartitionGroup, PartitionSelection};
+use eventuary_core::partition::{HasPartition, Partition, PartitionGroup, PartitionSelection};
 use eventuary_core::{
     Error, PartitionableSubscription, Result, SerializedEvent, SerializedPayload, StartFrom,
     StartableSubscription, StopAt,
@@ -51,6 +51,12 @@ impl SqliteCursor {
 impl Cursor for SqliteCursor {
     fn order_key(&self) -> CursorOrder {
         CursorOrder::from_i64(self.sequence)
+    }
+}
+
+impl HasPartition for SqliteCursor {
+    fn partition(&self) -> Partition {
+        self.partition
     }
 }
 
