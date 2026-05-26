@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -26,7 +26,8 @@ use futures::Stream;
 use futures::StreamExt;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::time::Instant;
 
 use crate::Result;
 use crate::error::Error;
@@ -148,6 +149,31 @@ where
     ) -> impl Future<Output = Result<()>> + Send + 'a;
 }
 
+/// Buffering policy for per-partition checkpoint flushes.
+///
+/// `CoordinatedReader` collapses repeated `coordinator.checkpoint(...)` calls
+/// per partition into a single flush, controlled by either a count or a time
+/// threshold. The default policy (`max_pending_acks = 1`,
+/// `max_pending_interval = ZERO`) flushes on every ack, matching the
+/// historical behavior.
+///
+/// Events acked between flushes will be redelivered on owner crash. Handlers
+/// must already be idempotent for redelivery.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointFlushPolicy {
+    pub max_pending_acks: NonZeroUsize,
+    pub max_pending_interval: Duration,
+}
+
+impl Default for CheckpointFlushPolicy {
+    fn default() -> Self {
+        Self {
+            max_pending_acks: NonZeroUsize::new(1).unwrap(),
+            max_pending_interval: Duration::ZERO,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CoordinatedReaderConfig {
     pub partition_lease_duration: Duration,
@@ -156,6 +182,7 @@ pub struct CoordinatedReaderConfig {
     pub consumer_heartbeat_interval: Duration,
     pub rebalance_interval: Duration,
     pub partition_slack: u32,
+    pub checkpoint_flush: CheckpointFlushPolicy,
 }
 
 impl Default for CoordinatedReaderConfig {
@@ -167,6 +194,7 @@ impl Default for CoordinatedReaderConfig {
             consumer_heartbeat_interval: Duration::from_secs(10),
             rebalance_interval: Duration::from_secs(10),
             partition_slack: 0,
+            checkpoint_flush: CheckpointFlushPolicy::default(),
         }
     }
 }
@@ -201,20 +229,66 @@ impl<C: Cursor> Cursor for CoordinatedCursor<C> {
     }
 }
 
+/// Per-partition checkpoint buffer entry.
+///
+/// Tracks the highest acked cursor (by `order_key`), the count of
+/// un-flushed acks, and the timestamp of the first un-flushed ack since
+/// the last flush.
+#[derive(Debug)]
+pub(crate) struct PendingCheckpoint<C> {
+    cursor: C,
+    count: usize,
+    first_pending_at: Instant,
+}
+
+pub(crate) type PendingCheckpoints<C> = Arc<Mutex<HashMap<u32, PendingCheckpoint<C>>>>;
+
+#[derive(Clone)]
+pub(crate) struct FlushContext<C: Cursor + Clone + Send + Sync + 'static> {
+    pending: PendingCheckpoints<C>,
+    policy: CheckpointFlushPolicy,
+}
+
 pub struct CoordinatedAcker<A, C, Coord> {
     inner: A,
     coordinator: Arc<Coord>,
     lease: PartitionLease<C>,
     cursor: C,
+    pending: PendingCheckpoints<C>,
+    policy: CheckpointFlushPolicy,
 }
 
 impl<A, C, Coord> CoordinatedAcker<A, C, Coord> {
+    /// Construct an acker that flushes the checkpoint on every ack.
+    ///
+    /// Equivalent to the default `CheckpointFlushPolicy`
+    /// (`max_pending_acks = 1`, `max_pending_interval = 0`).
     pub fn new(inner: A, coordinator: Arc<Coord>, lease: PartitionLease<C>, cursor: C) -> Self {
         Self {
             inner,
             coordinator,
             lease,
             cursor,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            policy: CheckpointFlushPolicy::default(),
+        }
+    }
+
+    pub(crate) fn with_buffer(
+        inner: A,
+        coordinator: Arc<Coord>,
+        lease: PartitionLease<C>,
+        cursor: C,
+        pending: PendingCheckpoints<C>,
+        policy: CheckpointFlushPolicy,
+    ) -> Self {
+        Self {
+            inner,
+            coordinator,
+            lease,
+            cursor,
+            pending,
+            policy,
         }
     }
 }
@@ -227,13 +301,114 @@ where
 {
     async fn ack(&self) -> Result<()> {
         self.inner.ack().await?;
-        self.coordinator
-            .checkpoint(&self.lease, self.cursor.clone())
-            .await
+
+        let partition_id = self.lease.partition.id();
+        let to_flush = {
+            let mut pending = self.pending.lock().await;
+            let now = Instant::now();
+            let entry = pending
+                .entry(partition_id)
+                .or_insert_with(|| PendingCheckpoint {
+                    cursor: self.cursor.clone(),
+                    count: 0,
+                    first_pending_at: now,
+                });
+
+            if self.cursor.order_key() > entry.cursor.order_key() {
+                entry.cursor = self.cursor.clone();
+            }
+            entry.count += 1;
+
+            let count_hit = entry.count >= self.policy.max_pending_acks.get();
+            let interval_hit = !self.policy.max_pending_interval.is_zero()
+                && now.duration_since(entry.first_pending_at) >= self.policy.max_pending_interval;
+
+            if count_hit || interval_hit {
+                pending.remove(&partition_id).map(|e| e.cursor)
+            } else {
+                None
+            }
+        };
+
+        if let Some(cursor) = to_flush {
+            self.coordinator.checkpoint(&self.lease, cursor).await?;
+        }
+        Ok(())
     }
 
     async fn nack(&self) -> Result<()> {
         self.inner.nack().await
+    }
+}
+
+/// Flush the pending checkpoint for `partition_id` (if any) under `lease`.
+/// Errors are logged but do not propagate — callers (release/shutdown paths)
+/// must continue regardless.
+async fn flush_pending_for<C, Coord>(
+    pending: &PendingCheckpoints<C>,
+    coordinator: &Arc<Coord>,
+    lease: &PartitionLease<C>,
+    owner_id: &OwnerId,
+) where
+    C: Cursor + Clone + Send + Sync + 'static,
+    Coord: PartitionCoordinator<C>,
+{
+    let partition_id = lease.partition.id();
+    let cursor = {
+        let mut pending = pending.lock().await;
+        pending.remove(&partition_id).map(|e| e.cursor)
+    };
+    if let Some(cursor) = cursor
+        && let Err(e) = coordinator.checkpoint(lease, cursor).await
+    {
+        tracing::warn!(
+            owner = %owner_id,
+            partition = partition_id,
+            "coordinated reader: pending checkpoint flush failed: {e}"
+        );
+    }
+}
+
+/// Tick the per-partition interval-based flush. Called from the coordinator
+/// loop; for each partition whose oldest pending ack has exceeded
+/// `max_pending_interval`, drain and checkpoint.
+async fn tick_interval_flush<C, Coord>(
+    pending: &PendingCheckpoints<C>,
+    coordinator: &Arc<Coord>,
+    owned: &HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)>,
+    owner_id: &OwnerId,
+    interval: Duration,
+) where
+    C: Cursor + Clone + Send + Sync + 'static,
+    Coord: PartitionCoordinator<C>,
+{
+    if interval.is_zero() {
+        return;
+    }
+    let now = Instant::now();
+    let due: Vec<(u32, C)> = {
+        let mut pending = pending.lock().await;
+        let due_ids: Vec<u32> = pending
+            .iter()
+            .filter(|(_, entry)| now.duration_since(entry.first_pending_at) >= interval)
+            .map(|(id, _)| *id)
+            .collect();
+        due_ids
+            .into_iter()
+            .filter_map(|id| pending.remove(&id).map(|e| (id, e.cursor)))
+            .collect()
+    };
+    for (partition_id, cursor) in due {
+        let Some((lease, _)) = owned.get(&partition_id) else {
+            continue;
+        };
+        if let Err(e) = coordinator.checkpoint(lease, cursor).await {
+            tracing::warn!(
+                owner = %owner_id,
+                partition = partition_id,
+                "coordinated reader: interval checkpoint flush failed: {e}"
+            );
+        }
     }
 }
 
@@ -325,6 +500,7 @@ fn target_partition_count(total: NonZeroU32, live: usize, slack: u32) -> u32 {
 async fn release_owned_partitions_concurrent<C, Coord>(
     owned: &mut HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)>,
     coordinator: &Arc<Coord>,
+    pending: &PendingCheckpoints<C>,
     owner_id: &OwnerId,
     reason: &'static str,
 ) where
@@ -334,7 +510,10 @@ async fn release_owned_partitions_concurrent<C, Coord>(
     let releases = owned.drain().map(|(partition_id, (lease, handle))| {
         handle.abort();
         let coord = Arc::clone(coordinator);
+        let pending = Arc::clone(pending);
+        let owner_id = owner_id.clone();
         async move {
+            flush_pending_for(&pending, &coord, &lease, &owner_id).await;
             let result = coord.release(&lease).await;
             (partition_id, result)
         }
@@ -358,6 +537,7 @@ async fn partition_worker<R, S, C, A, Coord, P>(
     base_subscription: S,
     start: StartFrom<C>,
     tx: mpsc::Sender<Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>>,
+    flush: FlushContext<C>,
 ) where
     R: Reader<P, Subscription = S, Cursor = C, Acker = A>,
     S: PartitionableSubscription<C>,
@@ -387,11 +567,13 @@ async fn partition_worker<R, S, C, A, Coord, P>(
         match item {
             Ok(msg) => {
                 let (event, inner_acker, inner_cursor) = msg.into_parts();
-                let coord_acker = CoordinatedAcker::new(
+                let coord_acker = CoordinatedAcker::with_buffer(
                     inner_acker,
                     Arc::clone(&coordinator),
                     lease.clone(),
                     inner_cursor.clone(),
+                    Arc::clone(&flush.pending),
+                    flush.policy,
                 );
                 let coord_cursor = CoordinatedCursor::new(lease.partition, inner_cursor);
                 let out = Message::new(event, coord_acker, coord_cursor);
@@ -448,13 +630,18 @@ where
         let heartbeat_interval = self.config.consumer_heartbeat_interval;
         let rebalance_interval = self.config.rebalance_interval;
         let slack = self.config.partition_slack;
+        let flush_policy = self.config.checkpoint_flush;
         let shutdown_notify = Arc::clone(&shutdown);
+        let pending_checkpoints: PendingCheckpoints<C> = Arc::new(Mutex::new(HashMap::new()));
 
         tokio::spawn(async move {
             let mut owned: HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)> =
                 HashMap::new();
 
-            let tick_duration = renew_interval.min(heartbeat_interval);
+            let mut tick_duration = renew_interval.min(heartbeat_interval);
+            if !flush_policy.max_pending_interval.is_zero() {
+                tick_duration = tick_duration.min(flush_policy.max_pending_interval);
+            }
 
             let mut next_rebalance = tokio::time::Instant::now();
             let mut next_renew = tokio::time::Instant::now() + jittered_duration(tick_duration);
@@ -470,6 +657,13 @@ where
                         for partition_id in dead_partitions {
                             if let Some((lease, handle)) = owned.remove(&partition_id) {
                                 handle.abort();
+                                flush_pending_for(
+                                    &pending_checkpoints,
+                                    &coordinator,
+                                    &lease,
+                                    &owner_id,
+                                )
+                                .await;
                                 if let Err(e) = coordinator.release(&lease).await {
                                     tracing::warn!(
                                         owner = %owner_id,
@@ -523,6 +717,10 @@ where
                                             base_sub.clone(),
                                             start.clone(),
                                             tx.clone(),
+                                            FlushContext {
+                                                pending: Arc::clone(&pending_checkpoints),
+                                                policy: flush_policy,
+                                            },
                                         ));
                                         owned.insert(partition_id, (lease, worker_handle));
                                     }
@@ -544,6 +742,13 @@ where
                             for partition_id in to_release.into_iter().take(surplus) {
                                 if let Some((lease, handle)) = owned.remove(&partition_id) {
                                     handle.abort();
+                                    flush_pending_for(
+                                        &pending_checkpoints,
+                                        &coordinator,
+                                        &lease,
+                                        &owner_id,
+                                    )
+                                    .await;
                                     if let Err(e) = coordinator.release(&lease).await {
                                         tracing::warn!(
                                             owner = %owner_id,
@@ -591,6 +796,7 @@ where
                             if let Some((_, handle)) = owned.remove(&partition_id) {
                                 handle.abort();
                             }
+                            pending_checkpoints.lock().await.remove(&partition_id);
                         }
                         if let Err(e) = coordinator
                             .heartbeat(&scope, &owner_id, consumer_lease_duration)
@@ -602,12 +808,27 @@ where
                             );
                         }
 
+                        tick_interval_flush(
+                            &pending_checkpoints,
+                            &coordinator,
+                            &owned,
+                            &owner_id,
+                            flush_policy.max_pending_interval,
+                        )
+                        .await;
+
                         next_renew =
                             tokio::time::Instant::now() + jittered_duration(tick_duration);
                     }
 
                     _ = shutdown_notify.notified() => {
-                        release_owned_partitions_concurrent(&mut owned, &coordinator, &owner_id, "on shutdown").await;
+                        release_owned_partitions_concurrent(
+                            &mut owned,
+                            &coordinator,
+                            &pending_checkpoints,
+                            &owner_id,
+                            "on shutdown",
+                        ).await;
                         if let Err(e) = coordinator.release_consumer(&scope, &owner_id).await {
                             tracing::warn!(
                                 owner = %owner_id,
@@ -622,6 +843,7 @@ where
                     release_owned_partitions_concurrent(
                         &mut owned,
                         &coordinator,
+                        &pending_checkpoints,
                         &owner_id,
                         "on stream close",
                     )
@@ -1001,6 +1223,7 @@ mod tests {
                 consumer_lease_duration: Duration::from_secs(1),
                 consumer_heartbeat_interval: Duration::from_millis(100),
                 partition_slack: 0,
+                checkpoint_flush: CheckpointFlushPolicy::default(),
             },
         );
 
@@ -1023,5 +1246,310 @@ mod tests {
 
         assert_eq!(msg.event().payload().value, "typed-value");
         msg.ack().await.unwrap();
+    }
+
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+    struct CountCursor(u64);
+
+    impl Cursor for CountCursor {
+        fn id(&self) -> CursorId {
+            CursorId::global()
+        }
+
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_u64(self.0)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingCoordinatorState {
+        checkpoint_calls: u64,
+        last_cursor: Option<CountCursor>,
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingCoordinator {
+        state: Arc<tokio::sync::Mutex<CountingCoordinatorState>>,
+    }
+
+    impl CountingCoordinator {
+        async fn snapshot(&self) -> (u64, Option<CountCursor>) {
+            let s = self.state.lock().await;
+            (s.checkpoint_calls, s.last_cursor)
+        }
+    }
+
+    impl PartitionCoordinator<CountCursor> for CountingCoordinator {
+        async fn heartbeat<'a>(
+            &'a self,
+            _scope: &'a CheckpointScope,
+            _owner_id: &'a OwnerId,
+            _lease_duration: Duration,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn live_consumers<'a>(&'a self, _scope: &'a CheckpointScope) -> Result<usize> {
+            Ok(1)
+        }
+
+        async fn release_consumer<'a>(
+            &'a self,
+            _scope: &'a CheckpointScope,
+            _owner_id: &'a OwnerId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn claim<'a>(
+            &'a self,
+            _scope: &'a CheckpointScope,
+            _owner_id: &'a OwnerId,
+            _partition: Partition,
+            _lease_duration: Duration,
+        ) -> Result<Option<PartitionLease<CountCursor>>> {
+            Ok(None)
+        }
+
+        async fn renew<'a>(
+            &'a self,
+            _lease: &'a PartitionLease<CountCursor>,
+            _lease_duration: Duration,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn release<'a>(&'a self, _lease: &'a PartitionLease<CountCursor>) -> Result<()> {
+            Ok(())
+        }
+
+        async fn checkpoint<'a>(
+            &'a self,
+            _lease: &'a PartitionLease<CountCursor>,
+            cursor: CountCursor,
+        ) -> Result<()> {
+            let mut s = self.state.lock().await;
+            s.checkpoint_calls += 1;
+            s.last_cursor = Some(cursor);
+            Ok(())
+        }
+    }
+
+    fn test_lease() -> PartitionLease<CountCursor> {
+        PartitionLease {
+            scope: CheckpointScope::new(
+                ConsumerGroupId::new("flush-group").unwrap(),
+                StreamId::new("flush-stream").unwrap(),
+            ),
+            owner_id: OwnerId::new("flush-owner").unwrap(),
+            partition: Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap(),
+            generation: Generation::initial(),
+            checkpoint_cursor: None,
+            lease_until: Utc::now() + Duration::from_secs(60),
+        }
+    }
+
+    fn build_buffered_acker(
+        coordinator: Arc<CountingCoordinator>,
+        pending: PendingCheckpoints<CountCursor>,
+        policy: CheckpointFlushPolicy,
+        cursor: CountCursor,
+    ) -> CoordinatedAcker<NoopAcker, CountCursor, CountingCoordinator> {
+        CoordinatedAcker::with_buffer(
+            NoopAcker,
+            coordinator,
+            test_lease(),
+            cursor,
+            pending,
+            policy,
+        )
+    }
+
+    #[tokio::test]
+    async fn flush_policy_default_flushes_on_every_ack() {
+        let coordinator = Arc::new(CountingCoordinator::default());
+        let pending: PendingCheckpoints<CountCursor> = Arc::new(Mutex::new(HashMap::new()));
+        let policy = CheckpointFlushPolicy::default();
+
+        for i in 1..=3 {
+            let acker = build_buffered_acker(
+                Arc::clone(&coordinator),
+                Arc::clone(&pending),
+                policy,
+                CountCursor(i),
+            );
+            acker.ack().await.unwrap();
+        }
+
+        let (calls, last) = coordinator.snapshot().await;
+        assert_eq!(calls, 3);
+        assert_eq!(last, Some(CountCursor(3)));
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flush_policy_count_5_flushes_only_on_fifth_ack() {
+        let coordinator = Arc::new(CountingCoordinator::default());
+        let pending: PendingCheckpoints<CountCursor> = Arc::new(Mutex::new(HashMap::new()));
+        let policy = CheckpointFlushPolicy {
+            max_pending_acks: NonZeroUsize::new(5).unwrap(),
+            max_pending_interval: Duration::ZERO,
+        };
+
+        for i in 1..=4 {
+            let acker = build_buffered_acker(
+                Arc::clone(&coordinator),
+                Arc::clone(&pending),
+                policy,
+                CountCursor(i),
+            );
+            acker.ack().await.unwrap();
+        }
+        let (calls, _) = coordinator.snapshot().await;
+        assert_eq!(calls, 0, "first 4 acks must not flush");
+
+        let acker = build_buffered_acker(
+            Arc::clone(&coordinator),
+            Arc::clone(&pending),
+            policy,
+            CountCursor(5),
+        );
+        acker.ack().await.unwrap();
+
+        let (calls, last) = coordinator.snapshot().await;
+        assert_eq!(calls, 1);
+        assert_eq!(last, Some(CountCursor(5)));
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flush_policy_keeps_highest_cursor_in_buffer() {
+        let coordinator = Arc::new(CountingCoordinator::default());
+        let pending: PendingCheckpoints<CountCursor> = Arc::new(Mutex::new(HashMap::new()));
+        let policy = CheckpointFlushPolicy {
+            max_pending_acks: NonZeroUsize::new(3).unwrap(),
+            max_pending_interval: Duration::ZERO,
+        };
+
+        for cursor in [CountCursor(10), CountCursor(7), CountCursor(99)] {
+            let acker = build_buffered_acker(
+                Arc::clone(&coordinator),
+                Arc::clone(&pending),
+                policy,
+                cursor,
+            );
+            acker.ack().await.unwrap();
+        }
+
+        let (calls, last) = coordinator.snapshot().await;
+        assert_eq!(calls, 1);
+        assert_eq!(last, Some(CountCursor(99)));
+    }
+
+    #[tokio::test]
+    async fn flush_policy_interval_flushes_when_threshold_exceeded() {
+        let coordinator = Arc::new(CountingCoordinator::default());
+        let pending: PendingCheckpoints<CountCursor> = Arc::new(Mutex::new(HashMap::new()));
+        let policy = CheckpointFlushPolicy {
+            max_pending_acks: NonZeroUsize::new(100).unwrap(),
+            max_pending_interval: Duration::from_millis(50),
+        };
+
+        let acker = build_buffered_acker(
+            Arc::clone(&coordinator),
+            Arc::clone(&pending),
+            policy,
+            CountCursor(1),
+        );
+        acker.ack().await.unwrap();
+        assert_eq!(coordinator.snapshot().await.0, 0);
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let acker = build_buffered_acker(
+            Arc::clone(&coordinator),
+            Arc::clone(&pending),
+            policy,
+            CountCursor(2),
+        );
+        acker.ack().await.unwrap();
+
+        let (calls, last) = coordinator.snapshot().await;
+        assert_eq!(calls, 1);
+        assert_eq!(last, Some(CountCursor(2)));
+    }
+
+    #[tokio::test]
+    async fn flush_pending_for_drains_buffer_on_release() {
+        let coordinator = Arc::new(CountingCoordinator::default());
+        let pending: PendingCheckpoints<CountCursor> = Arc::new(Mutex::new(HashMap::new()));
+        let policy = CheckpointFlushPolicy {
+            max_pending_acks: NonZeroUsize::new(10).unwrap(),
+            max_pending_interval: Duration::ZERO,
+        };
+
+        let acker = build_buffered_acker(
+            Arc::clone(&coordinator),
+            Arc::clone(&pending),
+            policy,
+            CountCursor(42),
+        );
+        acker.ack().await.unwrap();
+        assert_eq!(coordinator.snapshot().await.0, 0);
+
+        let lease = test_lease();
+        let owner = OwnerId::new("flush-owner").unwrap();
+        flush_pending_for(&pending, &coordinator, &lease, &owner).await;
+
+        let (calls, last) = coordinator.snapshot().await;
+        assert_eq!(calls, 1);
+        assert_eq!(last, Some(CountCursor(42)));
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_interval_flush_flushes_due_partition() {
+        let coordinator = Arc::new(CountingCoordinator::default());
+        let pending: PendingCheckpoints<CountCursor> = Arc::new(Mutex::new(HashMap::new()));
+        let policy = CheckpointFlushPolicy {
+            max_pending_acks: NonZeroUsize::new(100).unwrap(),
+            max_pending_interval: Duration::from_millis(20),
+        };
+
+        let acker = build_buffered_acker(
+            Arc::clone(&coordinator),
+            Arc::clone(&pending),
+            policy,
+            CountCursor(7),
+        );
+        acker.ack().await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let mut owned: HashMap<u32, (PartitionLease<CountCursor>, tokio::task::JoinHandle<()>)> =
+            HashMap::new();
+        owned.insert(
+            0,
+            (test_lease(), tokio::spawn(async move { /* idle worker */ })),
+        );
+
+        let owner = OwnerId::new("flush-owner").unwrap();
+        tick_interval_flush(
+            &pending,
+            &coordinator,
+            &owned,
+            &owner,
+            policy.max_pending_interval,
+        )
+        .await;
+
+        let (calls, last) = coordinator.snapshot().await;
+        assert_eq!(calls, 1);
+        assert_eq!(last, Some(CountCursor(7)));
+        assert!(pending.lock().await.is_empty());
+
+        for (_, (_, handle)) in owned.into_iter() {
+            handle.abort();
+        }
     }
 }

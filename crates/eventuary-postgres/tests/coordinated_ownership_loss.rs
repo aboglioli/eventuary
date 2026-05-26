@@ -100,6 +100,7 @@ async fn pg_coordinated_reader_ack_fails_with_ownership_lost_after_lease_stolen(
             consumer_heartbeat_interval: Duration::from_secs(60),
             rebalance_interval: Duration::from_secs(60),
             partition_slack: 0,
+            ..PgCoordinatedReaderConfig::default()
         },
     );
 
@@ -133,6 +134,7 @@ async fn pg_coordinated_reader_ack_fails_with_ownership_lost_after_lease_stolen(
             consumer_heartbeat_interval: Duration::from_secs(10),
             rebalance_interval: Duration::from_millis(100),
             partition_slack: 0,
+            ..PgCoordinatedReaderConfig::default()
         },
     );
 

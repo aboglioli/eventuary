@@ -110,6 +110,7 @@ async fn pg_coordinated_reader_two_owners_claim_disjoint_partitions() {
         consumer_heartbeat_interval: Duration::from_secs(10),
         rebalance_interval: Duration::from_millis(100),
         partition_slack: 0,
+        ..PgCoordinatedReaderConfig::default()
     };
 
     let scope = CheckpointScope::new(
@@ -204,6 +205,7 @@ async fn pg_coordinated_reader_rebalances_when_third_owner_joins() {
         consumer_heartbeat_interval: Duration::from_secs(3),
         rebalance_interval: Duration::from_millis(200),
         partition_slack: 0,
+        ..PgCoordinatedReaderConfig::default()
     };
 
     let scope = CheckpointScope::new(
@@ -345,6 +347,7 @@ async fn pg_coordinated_reader_drop_releases_owned_partitions() {
         consumer_heartbeat_interval: Duration::from_secs(10),
         rebalance_interval: Duration::from_millis(100),
         partition_slack: 0,
+        ..PgCoordinatedReaderConfig::default()
     };
 
     let reader_a = PgCoordinatedReader::new(
@@ -641,6 +644,7 @@ async fn pg_coordinated_reader_resumes_from_checkpoint_on_restart() {
         consumer_heartbeat_interval: Duration::from_secs(10),
         rebalance_interval: Duration::from_millis(100),
         partition_slack: 0,
+        ..PgCoordinatedReaderConfig::default()
     };
 
     let mut acked_keys: Vec<String> = Vec::new();

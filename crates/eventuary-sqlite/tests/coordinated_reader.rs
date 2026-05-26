@@ -407,6 +407,7 @@ async fn sqlite_coordinated_reader_resumes_from_checkpoint_on_restart() {
         consumer_heartbeat_interval: Duration::from_secs(10),
         rebalance_interval: Duration::from_millis(100),
         partition_slack: 0,
+        ..SqliteCoordinatedReaderConfig::default()
     };
 
     let make_sub = || SqliteCoordinatedSubscription {
