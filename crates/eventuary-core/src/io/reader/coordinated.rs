@@ -28,14 +28,19 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use crate::Result;
 use crate::error::Error;
 use crate::io::cursor::CursorOrder;
-use crate::io::position::{PartitionableSubscription, StartFrom};
+use crate::io::position::{PartitionableSubscription, StartFrom, StartableSubscription};
 use crate::io::reader::CheckpointScope;
+use crate::io::reader::partitioned::{
+    PartitionAcker, PartitionedCursor, PartitionedReader, PartitionedReaderConfig,
+    PartitionedSubscription,
+};
 use crate::io::{Acker, Cursor, CursorId, Message, OwnerId, Reader};
-use crate::partition::Partition;
+use crate::partition::{HasPartition, Partition, PartitionGroup};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -149,6 +154,142 @@ where
     ) -> impl Future<Output = Result<()>> + Send + 'a;
 }
 
+/// Adapter that lifts a `PartitionCoordinator<C>` to
+/// `PartitionCoordinator<PartitionedCursor<C>>`.
+///
+/// The shared-fetch data plane in `CoordinatedReader::read` composes
+/// `PartitionedReader::source_from_cursor` over the inner partition-aware
+/// reader, which turns every emitted cursor into
+/// `PartitionedCursor<R::Cursor>`. The acker the coordinator fences against
+/// therefore carries `PartitionedCursor<R::Cursor>`, not the raw `R::Cursor`.
+///
+/// Backends only implement `PartitionCoordinator<R::Cursor>` (e.g.
+/// `PartitionCoordinator<PgCursor>`). This adapter wraps and unwraps the
+/// `PartitionedCursor` envelope so no backend needs to know about the lane
+/// scheduler. The wrap reuses `lease.partition` for the partition field,
+/// which is already known on every codepath and matches the writer's stamped
+/// partition.
+///
+/// A direct blanket `impl<T, C> PartitionCoordinator<PartitionedCursor<C>> for T
+/// where T: PartitionCoordinator<C>` would type-recurse on itself
+/// (`PartitionedCursor<PartitionedCursor<C>>` …) and overflow rustc. An
+/// explicit adapter type breaks the recursion.
+pub struct PartitionedCoordAdapter<Coord, C> {
+    inner: Arc<Coord>,
+    _cursor: std::marker::PhantomData<fn() -> C>,
+}
+
+impl<Coord, C> PartitionedCoordAdapter<Coord, C> {
+    pub fn new(inner: Arc<Coord>) -> Self {
+        Self {
+            inner,
+            _cursor: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<Coord, C> Clone for PartitionedCoordAdapter<Coord, C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            _cursor: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<Coord, C> PartitionCoordinator<PartitionedCursor<C>> for PartitionedCoordAdapter<Coord, C>
+where
+    Coord: PartitionCoordinator<C>,
+    C: Cursor + Clone + Ord + Send + Sync + 'static,
+{
+    async fn heartbeat<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+        lease_duration: Duration,
+    ) -> Result<()> {
+        self.inner.heartbeat(scope, owner_id, lease_duration).await
+    }
+
+    async fn live_consumers<'a>(&'a self, scope: &'a CheckpointScope) -> Result<usize> {
+        self.inner.live_consumers(scope).await
+    }
+
+    async fn release_consumer<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+    ) -> Result<()> {
+        self.inner.release_consumer(scope, owner_id).await
+    }
+
+    async fn claim<'a>(
+        &'a self,
+        scope: &'a CheckpointScope,
+        owner_id: &'a OwnerId,
+        partition: Partition,
+        lease_duration: Duration,
+    ) -> Result<Option<PartitionLease<PartitionedCursor<C>>>> {
+        let inner_lease = self
+            .inner
+            .claim(scope, owner_id, partition, lease_duration)
+            .await?;
+        Ok(inner_lease.map(|l| wrap_lease(l, partition)))
+    }
+
+    async fn renew<'a>(
+        &'a self,
+        lease: &'a PartitionLease<PartitionedCursor<C>>,
+        lease_duration: Duration,
+    ) -> Result<()> {
+        let inner_lease = unwrap_lease_ref(lease);
+        self.inner.renew(&inner_lease, lease_duration).await
+    }
+
+    async fn release<'a>(&'a self, lease: &'a PartitionLease<PartitionedCursor<C>>) -> Result<()> {
+        let inner_lease = unwrap_lease_ref(lease);
+        self.inner.release(&inner_lease).await
+    }
+
+    async fn checkpoint<'a>(
+        &'a self,
+        lease: &'a PartitionLease<PartitionedCursor<C>>,
+        cursor: PartitionedCursor<C>,
+    ) -> Result<()> {
+        let inner_lease = unwrap_lease_ref(lease);
+        self.inner
+            .checkpoint(&inner_lease, cursor.into_inner())
+            .await
+    }
+}
+
+fn wrap_lease<C>(
+    lease: PartitionLease<C>,
+    partition: Partition,
+) -> PartitionLease<PartitionedCursor<C>> {
+    PartitionLease {
+        scope: lease.scope,
+        owner_id: lease.owner_id,
+        partition: lease.partition,
+        generation: lease.generation,
+        checkpoint_cursor: lease
+            .checkpoint_cursor
+            .map(|c| PartitionedCursor::new(c, partition)),
+        lease_until: lease.lease_until,
+    }
+}
+
+fn unwrap_lease_ref<C: Clone>(lease: &PartitionLease<PartitionedCursor<C>>) -> PartitionLease<C> {
+    PartitionLease {
+        scope: lease.scope.clone(),
+        owner_id: lease.owner_id.clone(),
+        partition: lease.partition,
+        generation: lease.generation,
+        checkpoint_cursor: lease.checkpoint_cursor.as_ref().map(|c| c.inner().clone()),
+        lease_until: lease.lease_until,
+    }
+}
+
 /// Buffering policy for per-partition checkpoint flushes.
 ///
 /// `CoordinatedReader` collapses repeated `coordinator.checkpoint(...)` calls
@@ -183,6 +324,10 @@ pub struct CoordinatedReaderConfig {
     pub rebalance_interval: Duration,
     pub partition_slack: u32,
     pub checkpoint_flush: CheckpointFlushPolicy,
+    /// Per-lane buffer capacity wired through to the internal
+    /// `PartitionedReaderConfig`. Defaults match
+    /// `PartitionedReaderConfig::default().lane_capacity`.
+    pub lane_capacity: NonZeroUsize,
 }
 
 impl Default for CoordinatedReaderConfig {
@@ -195,6 +340,7 @@ impl Default for CoordinatedReaderConfig {
             rebalance_interval: Duration::from_secs(10),
             partition_slack: 0,
             checkpoint_flush: CheckpointFlushPolicy::default(),
+            lane_capacity: NonZeroUsize::new(128).unwrap(),
         }
     }
 }
@@ -242,12 +388,6 @@ pub(crate) struct PendingCheckpoint<C> {
 }
 
 pub(crate) type PendingCheckpoints<C> = Arc<Mutex<HashMap<u32, PendingCheckpoint<C>>>>;
-
-#[derive(Clone)]
-pub(crate) struct FlushContext<C: Cursor + Clone + Send + Sync + 'static> {
-    pending: PendingCheckpoints<C>,
-    policy: CheckpointFlushPolicy,
-}
 
 pub struct CoordinatedAcker<A, C, Coord> {
     inner: A,
@@ -375,7 +515,7 @@ async fn flush_pending_for<C, Coord>(
 async fn tick_interval_flush<C, Coord>(
     pending: &PendingCheckpoints<C>,
     coordinator: &Arc<Coord>,
-    owned: &HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)>,
+    owned: &HashMap<u32, PartitionLease<C>>,
     owner_id: &OwnerId,
     interval: Duration,
 ) where
@@ -399,7 +539,7 @@ async fn tick_interval_flush<C, Coord>(
             .collect()
     };
     for (partition_id, cursor) in due {
-        let Some((lease, _)) = owned.get(&partition_id) else {
+        let Some(lease) = owned.get(&partition_id) else {
             continue;
         };
         if let Err(e) = coordinator.checkpoint(lease, cursor).await {
@@ -498,7 +638,7 @@ fn target_partition_count(total: NonZeroU32, live: usize, slack: u32) -> u32 {
 }
 
 async fn release_owned_partitions_concurrent<C, Coord>(
-    owned: &mut HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)>,
+    owned: &mut HashMap<u32, PartitionLease<C>>,
     coordinator: &Arc<Coord>,
     pending: &PendingCheckpoints<C>,
     owner_id: &OwnerId,
@@ -507,8 +647,7 @@ async fn release_owned_partitions_concurrent<C, Coord>(
     C: Cursor + Clone + Send + Sync + 'static,
     Coord: PartitionCoordinator<C>,
 {
-    let releases = owned.drain().map(|(partition_id, (lease, handle))| {
-        handle.abort();
+    let releases = owned.drain().map(|(partition_id, lease)| {
         let coord = Arc::clone(coordinator);
         let pending = Arc::clone(pending);
         let owner_id = owner_id.clone();
@@ -529,82 +668,65 @@ async fn release_owned_partitions_concurrent<C, Coord>(
     }
 }
 
-#[allow(clippy::type_complexity)]
-async fn partition_worker<R, S, C, A, Coord, P>(
-    inner_reader: R,
-    coordinator: Arc<Coord>,
-    lease: PartitionLease<C>,
-    base_subscription: S,
-    start: StartFrom<C>,
-    tx: mpsc::Sender<Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>>,
-    flush: FlushContext<C>,
-) where
-    R: Reader<P, Subscription = S, Cursor = C, Acker = A>,
-    S: PartitionableSubscription<C>,
-    C: Cursor + Clone + Send + Sync + 'static,
-    A: Acker + Send + Sync + 'static,
-    Coord: PartitionCoordinator<C>,
-    P: Send + 'static,
-{
-    let inner_start = match &lease.checkpoint_cursor {
-        Some(cursor) => StartFrom::After(cursor.clone()),
-        None => start,
-    };
-    let inner_sub = base_subscription
-        .with_partition(lease.partition)
-        .with_start(inner_start);
-
-    let inner_stream = match inner_reader.read(inner_sub).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = tx.send(Err(e)).await;
-            return;
-        }
-    };
-    tokio::pin!(inner_stream);
-
-    while let Some(item) = inner_stream.next().await {
-        match item {
-            Ok(msg) => {
-                let (event, inner_acker, inner_cursor) = msg.into_parts();
-                let coord_acker = CoordinatedAcker::with_buffer(
-                    inner_acker,
-                    Arc::clone(&coordinator),
-                    lease.clone(),
-                    inner_cursor.clone(),
-                    Arc::clone(&flush.pending),
-                    flush.policy,
-                );
-                let coord_cursor = CoordinatedCursor::new(lease.partition, inner_cursor);
-                let out = Message::new(event, coord_acker, coord_cursor);
-                if tx.send(Ok(out)).await.is_err() {
-                    return;
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Err(e)).await;
-                return;
-            }
-        }
+/// Stop the pump (if any) by cancelling its token and awaiting the handle.
+/// Returns after the pump task has terminated.
+async fn stop_pump(pump: Option<(tokio::task::JoinHandle<()>, CancellationToken)>) {
+    if let Some((handle, cancel)) = pump {
+        cancel.cancel();
+        let _ = handle.await;
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_inner_starts<C: Cursor + Clone>(
+    owned: &HashMap<u32, PartitionLease<PartitionedCursor<C>>>,
+) -> Vec<StartFrom<PartitionedCursor<C>>> {
+    owned
+        .values()
+        .filter_map(|lease| {
+            lease
+                .checkpoint_cursor
+                .as_ref()
+                .map(|c| StartFrom::After(c.clone()))
+        })
+        .collect()
 }
 
 impl<R, S, C, A, Coord, P> Reader<P> for CoordinatedReader<R, Coord>
 where
     R: Reader<P, Subscription = S, Cursor = C, Acker = A> + Clone + Send + Sync + 'static,
-    S: PartitionableSubscription<C> + Send + 'static,
-    C: Cursor + Clone + Send + Sync + 'static,
-    A: Acker + Send + Sync + 'static,
+    S: PartitionableSubscription<C> + Clone + Send + Sync + 'static,
+    C: Cursor + HasPartition + Clone + Ord + Send + Sync + 'static,
+    A: Acker + Clone + Send + Sync + 'static,
+    R::Stream: Send + 'static,
     Coord: PartitionCoordinator<C>,
-    P: Send + 'static,
+    P: Clone + Send + Sync + 'static,
 {
     type Subscription = CoordinatedSubscription<S, C>;
-    type Acker = CoordinatedAcker<A, C, Coord>;
-    type Cursor = CoordinatedCursor<C>;
-    type Stream = CoordinatedStream<A, C, Coord, P>;
+    type Acker = CoordinatedAcker<
+        PartitionAcker<A, C, P>,
+        PartitionedCursor<C>,
+        PartitionedCoordAdapter<Coord, C>,
+    >;
+    type Cursor = CoordinatedCursor<PartitionedCursor<C>>;
+    type Stream = CoordinatedStream<
+        PartitionAcker<A, C, P>,
+        PartitionedCursor<C>,
+        PartitionedCoordAdapter<Coord, C>,
+        P,
+    >;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-        self.coordinator
+        // Wrap the user-supplied coordinator in the adapter so all interior
+        // calls operate on `PartitionedCursor<C>`. The adapter is cheap to
+        // clone (`Arc` underneath) and breaks the type-level recursion that
+        // would arise from a blanket `PartitionCoordinator<PartitionedCursor<C>>`
+        // impl on every `PartitionCoordinator<C>`.
+        let coordinator = Arc::new(PartitionedCoordAdapter::<Coord, C>::new(Arc::clone(
+            &self.coordinator,
+        )));
+
+        coordinator
             .heartbeat(
                 &subscription.scope,
                 &self.owner_id,
@@ -612,13 +734,10 @@ where
             )
             .await?;
 
-        let (tx, rx) = mpsc::channel::<
-            Result<Message<CoordinatedAcker<A, C, Coord>, CoordinatedCursor<C>, P>>,
-        >(16);
+        let (tx, rx) = mpsc::channel::<Result<Message<Self::Acker, Self::Cursor, P>>>(16);
         let shutdown = Arc::new(Notify::new());
 
         let inner_reader = self.inner.clone();
-        let coordinator = Arc::clone(&self.coordinator);
         let owner_id = self.owner_id.clone();
         let partition_count = subscription.partition_count;
         let scope = subscription.scope.clone();
@@ -631,12 +750,23 @@ where
         let rebalance_interval = self.config.rebalance_interval;
         let slack = self.config.partition_slack;
         let flush_policy = self.config.checkpoint_flush;
+        let lane_capacity = self.config.lane_capacity;
         let shutdown_notify = Arc::clone(&shutdown);
-        let pending_checkpoints: PendingCheckpoints<C> = Arc::new(Mutex::new(HashMap::new()));
+        let pending_checkpoints: PendingCheckpoints<PartitionedCursor<C>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // Per-partition high-water mark of cursors the pump has forwarded
+        // downstream. Survives pump rebuilds (the pump task is reset on every
+        // rebalance change) so the new pump can filter out events its
+        // predecessor already delivered. Without this, every rebuild reads
+        // the inner stream from `Earliest` and re-forwards already-delivered
+        // events.
+        let forward_high_water: Arc<Mutex<HashMap<u32, PartitionedCursor<C>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         tokio::spawn(async move {
-            let mut owned: HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)> =
-                HashMap::new();
+            let mut owned: HashMap<u32, PartitionLease<PartitionedCursor<C>>> = HashMap::new();
+            let mut pump: Option<(tokio::task::JoinHandle<()>, CancellationToken)> = None;
+            let mut needs_rebuild = false;
 
             let mut tick_duration = renew_interval.min(heartbeat_interval);
             if !flush_policy.max_pending_interval.is_zero() {
@@ -649,29 +779,45 @@ where
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(next_rebalance) => {
-                        let dead_partitions: Vec<u32> = owned
-                            .iter()
-                            .filter(|(_, (_, h))| h.is_finished())
-                            .map(|(id, _)| *id)
-                            .collect();
-                        for partition_id in dead_partitions {
-                            if let Some((lease, handle)) = owned.remove(&partition_id) {
-                                handle.abort();
-                                flush_pending_for(
-                                    &pending_checkpoints,
-                                    &coordinator,
-                                    &lease,
-                                    &owner_id,
-                                )
-                                .await;
-                                if let Err(e) = coordinator.release(&lease).await {
-                                    tracing::warn!(
-                                        owner = %owner_id,
-                                        partition = partition_id,
-                                        "coordinated reader: release of dead worker failed: {e}"
-                                    );
+                        // Detect pump death: if the pump handle has finished
+                        // (inner stream ended, fatal error, etc.) we have to
+                        // tear down the lease(s) cleanly and let the next
+                        // rebalance pass re-claim if appropriate.
+                        //
+                        // In practice this is rare: `PgReader` / `SqliteReader`
+                        // streams are continuous polling loops and don't end
+                        // while the connection is alive. Non-deliberate exits
+                        // we expect:
+                        //  - inner stream produced `Err(_)`: the error was
+                        //    forwarded to the downstream `tx` and the task
+                        //    returned. Re-fetching would only re-surface the
+                        //    same error; the downstream should drop the
+                        //    reader, which fires the shutdown branch.
+                        //  - downstream `tx.send` failed: caller dropped the
+                        //    stream, the reader is being torn down anyway.
+                        // Rebuilding on the next rebalance tick is therefore
+                        // intentional — there is no flow to interrupt.
+                        let pump_finished = pump
+                            .as_ref()
+                            .map(|(h, _)| h.is_finished())
+                            .unwrap_or(false);
+                        if pump_finished {
+                            stop_pump(pump.take()).await;
+                            let released_ids: Vec<u32> = owned.keys().copied().collect();
+                            release_owned_partitions_concurrent(
+                                &mut owned,
+                                &coordinator,
+                                &pending_checkpoints,
+                                &owner_id,
+                                "on pump exit",
+                            ).await;
+                            {
+                                let mut hw = forward_high_water.lock().await;
+                                for id in released_ids {
+                                    hw.remove(&id);
                                 }
                             }
+                            needs_rebuild = false;
                         }
 
                         let live = match coordinator.live_consumers(&scope).await {
@@ -710,19 +856,20 @@ where
                                     .await
                                 {
                                     Ok(Some(lease)) => {
-                                        let worker_handle = tokio::spawn(partition_worker(
-                                            inner_reader.clone(),
-                                            Arc::clone(&coordinator),
-                                            lease.clone(),
-                                            base_sub.clone(),
-                                            start.clone(),
-                                            tx.clone(),
-                                            FlushContext {
-                                                pending: Arc::clone(&pending_checkpoints),
-                                                policy: flush_policy,
-                                            },
-                                        ));
-                                        owned.insert(partition_id, (lease, worker_handle));
+                                        owned.insert(partition_id, lease);
+                                        // No need to stop the running pump
+                                        // immediately. The pump's inner
+                                        // subscription was built with
+                                        // `with_partitions(group)` over the
+                                        // previously owned set, so the backend
+                                        // SQL filter (`partition_id = ANY(...)`)
+                                        // physically cannot deliver events for
+                                        // this newly-claimed partition. The
+                                        // rebuild path below tears down the
+                                        // current pump and starts a fresh one
+                                        // whose filter includes the new
+                                        // partition.
+                                        needs_rebuild = true;
                                     }
                                     Ok(None) => {}
                                     Err(e) => {
@@ -739,25 +886,59 @@ where
                                 owned.keys().copied().collect();
                             to_release.sort_by(|a, b| b.cmp(a));
                             let surplus = owned.len() - target;
-                            for partition_id in to_release.into_iter().take(surplus) {
-                                if let Some((lease, handle)) = owned.remove(&partition_id) {
-                                    handle.abort();
-                                    flush_pending_for(
-                                        &pending_checkpoints,
-                                        &coordinator,
-                                        &lease,
-                                        &owner_id,
-                                    )
-                                    .await;
-                                    if let Err(e) = coordinator.release(&lease).await {
-                                        tracing::warn!(
-                                            owner = %owner_id,
-                                            partition = partition_id,
-                                            "coordinated reader: surplus release failed: {e}"
-                                        );
+                            let releasing: Vec<u32> =
+                                to_release.into_iter().take(surplus).collect();
+                            if !releasing.is_empty() {
+                                // Stop the current pump before draining
+                                // partitions; an active pump may hold
+                                // outstanding acks against these leases.
+                                stop_pump(pump.take()).await;
+                                for partition_id in &releasing {
+                                    if let Some(lease) = owned.remove(partition_id) {
+                                        flush_pending_for(
+                                            &pending_checkpoints,
+                                            &coordinator,
+                                            &lease,
+                                            &owner_id,
+                                        )
+                                        .await;
+                                        if let Err(e) = coordinator.release(&lease).await {
+                                            tracing::warn!(
+                                                owner = %owner_id,
+                                                partition = partition_id,
+                                                "coordinated reader: surplus release failed: {e}"
+                                            );
+                                        }
                                     }
+                                    forward_high_water.lock().await.remove(partition_id);
                                 }
+                                needs_rebuild = true;
                             }
+                        }
+
+                        if needs_rebuild {
+                            // Tear down the current pump (if any) and start
+                            // a fresh one over the new owned set. Idempotent
+                            // with the surplus-release branch above, which
+                            // already stopped the pump before draining
+                            // partitions; `stop_pump(None)` is a no-op.
+                            stop_pump(pump.take()).await;
+                            pump = build_pump(
+                                &inner_reader,
+                                &coordinator,
+                                &owner_id,
+                                &owned,
+                                partition_count,
+                                base_sub.clone(),
+                                start.clone(),
+                                lane_capacity,
+                                tx.clone(),
+                                &pending_checkpoints,
+                                &forward_high_water,
+                                flush_policy,
+                            )
+                            .await;
+                            needs_rebuild = false;
                         }
 
                         next_rebalance = tokio::time::Instant::now()
@@ -768,7 +949,7 @@ where
                         let partition_ids: Vec<u32> = owned.keys().copied().collect();
                         let mut lost: Vec<u32> = Vec::new();
                         for partition_id in partition_ids {
-                            if let Some((lease, _)) = owned.get(&partition_id) {
+                            if let Some(lease) = owned.get(&partition_id) {
                                 match coordinator
                                     .renew(lease, partition_lease_duration)
                                     .await
@@ -787,16 +968,38 @@ where
                                 }
                             }
                         }
-                        for partition_id in lost {
-                            tracing::info!(
-                                owner = %owner_id,
-                                partition = partition_id,
-                                "coordinated reader: partition ownership lost, stopping worker"
-                            );
-                            if let Some((_, handle)) = owned.remove(&partition_id) {
-                                handle.abort();
+                        if !lost.is_empty() {
+                            // Lost ownership: stop the pump so the inner
+                            // stream can't write further fenced checkpoints
+                            // for these partitions. Then drop the leases.
+                            stop_pump(pump.take()).await;
+                            for partition_id in &lost {
+                                tracing::info!(
+                                    owner = %owner_id,
+                                    partition = partition_id,
+                                    "coordinated reader: partition ownership lost"
+                                );
+                                owned.remove(partition_id);
+                                pending_checkpoints.lock().await.remove(partition_id);
+                                forward_high_water.lock().await.remove(partition_id);
                             }
-                            pending_checkpoints.lock().await.remove(&partition_id);
+                            if !owned.is_empty() {
+                                pump = build_pump(
+                                    &inner_reader,
+                                    &coordinator,
+                                    &owner_id,
+                                    &owned,
+                                    partition_count,
+                                    base_sub.clone(),
+                                    start.clone(),
+                                    lane_capacity,
+                                    tx.clone(),
+                                    &pending_checkpoints,
+                                    &forward_high_water,
+                                    flush_policy,
+                                )
+                                .await;
+                            }
                         }
                         if let Err(e) = coordinator
                             .heartbeat(&scope, &owner_id, consumer_lease_duration)
@@ -822,6 +1025,7 @@ where
                     }
 
                     _ = shutdown_notify.notified() => {
+                        stop_pump(pump.take()).await;
                         release_owned_partitions_concurrent(
                             &mut owned,
                             &coordinator,
@@ -840,6 +1044,7 @@ where
                 }
 
                 if tx.is_closed() {
+                    stop_pump(pump.take()).await;
                     release_owned_partitions_concurrent(
                         &mut owned,
                         &coordinator,
@@ -863,12 +1068,264 @@ where
     }
 }
 
+/// Spawn the inner-stream pump for the current `owned` set.
+///
+/// Returns `None` if `owned` is empty or if the inner reader fails to start.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+async fn build_pump<R, S, C, A, Coord, P>(
+    inner_reader: &R,
+    coordinator: &Arc<Coord>,
+    owner_id: &OwnerId,
+    owned: &HashMap<u32, PartitionLease<PartitionedCursor<C>>>,
+    partition_count: NonZeroU32,
+    base_sub: S,
+    start: StartFrom<C>,
+    lane_capacity: NonZeroUsize,
+    tx: mpsc::Sender<
+        Result<
+            Message<
+                CoordinatedAcker<PartitionAcker<A, C, P>, PartitionedCursor<C>, Coord>,
+                CoordinatedCursor<PartitionedCursor<C>>,
+                P,
+            >,
+        >,
+    >,
+    pending: &PendingCheckpoints<PartitionedCursor<C>>,
+    forward_high_water: &Arc<Mutex<HashMap<u32, PartitionedCursor<C>>>>,
+    flush_policy: CheckpointFlushPolicy,
+) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)>
+where
+    R: Reader<P, Subscription = S, Cursor = C, Acker = A> + Clone + Send + Sync + 'static,
+    S: PartitionableSubscription<C> + Clone + Send + Sync + 'static,
+    C: Cursor + HasPartition + Clone + Ord + Send + Sync + 'static,
+    A: Acker + Clone + Send + Sync + 'static,
+    R::Stream: Send + 'static,
+    Coord: PartitionCoordinator<PartitionedCursor<C>>,
+    P: Clone + Send + Sync + 'static,
+{
+    if owned.is_empty() {
+        return None;
+    }
+
+    let partitions: std::result::Result<Vec<Partition>, _> = owned
+        .keys()
+        .copied()
+        .map(|id| Partition::new(id, partition_count))
+        .collect();
+    let partitions = match partitions {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                owner = %owner_id,
+                "coordinated reader: failed to construct owned partition list: {e}"
+            );
+            return None;
+        }
+    };
+    let group = match PartitionGroup::new(partitions) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(
+                owner = %owner_id,
+                "coordinated reader: failed to build owned PartitionGroup: {e}"
+            );
+            return None;
+        }
+    };
+
+    let inner_sub = base_sub.with_partitions(group);
+
+    let scheduler = PartitionedReader::source_from_cursor(
+        inner_reader.clone(),
+        PartitionedReaderConfig {
+            partition_count,
+            lane_capacity,
+            ..PartitionedReaderConfig::default()
+        },
+    );
+
+    // Inner-stream start position:
+    //
+    // We can only express ONE start position for the shared SQL fetch. If
+    // every owned partition has a checkpoint, take the minimum of those as
+    // a sound lower bound (events below that are guaranteed acked on every
+    // owned partition). Otherwise fall back to the subscription's `start`:
+    // a partition with no checkpoint must see its earliest events, and a
+    // single global lower bound can't satisfy both "advance past checkpoint
+    // for some" and "include everything for the rest".
+    //
+    // The pump task additionally filters per-partition below to drop any
+    // event whose `order_key()` is <= that partition's checkpoint. The
+    // `PartitionedReader` source-cursor mode acks the inner reader on lane
+    // accept, so source-level progress still advances even for dropped
+    // events.
+    let all_partitions_checkpointed =
+        !owned.is_empty() && owned.values().all(|l| l.checkpoint_cursor.is_some());
+    let scheduler_sub: PartitionedSubscription<S, C> = if all_partitions_checkpointed {
+        let starts: Vec<StartFrom<PartitionedCursor<C>>> = build_inner_starts(owned);
+        PartitionedSubscription::new(inner_sub).with_starts(starts)
+    } else {
+        let outer_start: StartFrom<PartitionedCursor<C>> = match start {
+            StartFrom::Earliest => StartFrom::Earliest,
+            StartFrom::Latest => StartFrom::Latest,
+            StartFrom::Timestamp(t) => StartFrom::Timestamp(t),
+            // Untranslatable: a raw inner cursor without a partition. Fall
+            // back to Earliest; callers expressing this through
+            // `CoordinatedSubscription::start` should rely on per-partition
+            // checkpoints instead.
+            StartFrom::After(_) => StartFrom::Earliest,
+        };
+        PartitionedSubscription::new(inner_sub).with_start(outer_start)
+    };
+
+    let inner_stream = match scheduler.read(scheduler_sub).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(Err(e)).await;
+            return None;
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let pump_cancel = cancel.clone();
+    let coord = Arc::clone(coordinator);
+    let owner_id_for_pump = owner_id.clone();
+    let pending = Arc::clone(pending);
+    let high_water = Arc::clone(forward_high_water);
+    let leases_by_partition: HashMap<u32, PartitionLease<PartitionedCursor<C>>> = owned.clone();
+
+    let handle = tokio::spawn(async move {
+        tokio::pin!(inner_stream);
+        loop {
+            tokio::select! {
+                biased;
+                _ = pump_cancel.cancelled() => {
+                    return;
+                }
+                item = inner_stream.next() => {
+                    let Some(item) = item else { return; };
+                    match item {
+                        Ok(msg) => {
+                            let (event, inner_acker, inner_cursor) = msg.into_parts();
+                            let partition_id = inner_cursor.partition().id();
+                            let Some(lease) = leases_by_partition.get(&partition_id) else {
+                                // Inner stream produced a message for a
+                                // partition not in this pump's lease snapshot.
+                                // This is a teardown-race artifact: the
+                                // surplus-release / lost-ownership paths stop
+                                // the pump before mutating `owned`, but the
+                                // lane scheduler may still drain a few
+                                // in-flight items from its lanes after
+                                // cancellation. Ack the lane-scheduler acker
+                                // so its lane unblocks for teardown.
+                                //
+                                // The event is not lost: we never invoke the
+                                // coordinator-side acker, so this partition's
+                                // checkpoint is not advanced. If we reclaim
+                                // the partition on a later rebalance the next
+                                // pump re-fetches from the durable checkpoint;
+                                // if not, the partition is owned by another
+                                // consumer and the event is theirs to deliver.
+                                tracing::warn!(
+                                    owner = %owner_id_for_pump,
+                                    partition = partition_id,
+                                    "coordinated reader: dropping message for unowned partition"
+                                );
+                                let _ = inner_acker.ack().await;
+                                continue;
+                            };
+                            // Per-partition resume: the shared inner stream
+                            // is started from the minimum cursor across owned
+                            // partitions (the only thing a single SQL filter
+                            // can express). Events below this partition's
+                            // checkpoint must therefore be dropped here. The
+                            // inner acker was already invoked on lane accept,
+                            // so source-cursor progress is preserved.
+                            // Two-tier per-partition resume filter:
+                            //  1) `lease.checkpoint_cursor` — durable
+                            //     coordinator checkpoint at the time this
+                            //     lease was claimed. Events at or below
+                            //     this were acked by a prior owner.
+                            //  2) `forward_high_water[p]` — cursor of the
+                            //     highest event this owner has forwarded
+                            //     downstream across all previous pump
+                            //     incarnations. Survives pump rebuild.
+                            //
+                            // If either says "already delivered", drop the
+                            // event. Ack the lane-scheduler acker so the
+                            // lane unblocks (the in-flight slot must clear
+                            // before the next event in this lane can be
+                            // emitted).
+                            let mut skip = false;
+                            if let Some(checkpoint) = lease.checkpoint_cursor.as_ref()
+                                && inner_cursor.order_key() <= checkpoint.order_key()
+                            {
+                                skip = true;
+                            }
+                            if !skip
+                                && let Some(prev) = high_water.lock().await.get(&partition_id)
+                                && inner_cursor.order_key() <= prev.order_key()
+                            {
+                                skip = true;
+                            }
+                            if skip {
+                                if let Err(e) = inner_acker.ack().await {
+                                    tracing::warn!(
+                                        owner = %owner_id_for_pump,
+                                        partition = partition_id,
+                                        "coordinated reader: filter-ack on inner acker failed: {e}"
+                                    );
+                                }
+                                continue;
+                            }
+                            // Record this event as delivered before
+                            // forwarding so a subsequent rebuild sees the
+                            // updated high-water.
+                            {
+                                let mut hw = high_water.lock().await;
+                                let should_insert = hw
+                                    .get(&partition_id)
+                                    .map(|prev| inner_cursor.order_key() > prev.order_key())
+                                    .unwrap_or(true);
+                                if should_insert {
+                                    hw.insert(partition_id, inner_cursor.clone());
+                                }
+                            }
+                            let coord_acker = CoordinatedAcker::with_buffer(
+                                inner_acker,
+                                Arc::clone(&coord),
+                                lease.clone(),
+                                inner_cursor.clone(),
+                                Arc::clone(&pending),
+                                flush_policy,
+                            );
+                            let coord_cursor =
+                                CoordinatedCursor::new(lease.partition, inner_cursor);
+                            let out = Message::new(event, coord_acker, coord_cursor);
+                            if tx.send(Ok(out)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    Some((handle, cancel))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::io::acker::NoopAcker;
     use crate::io::position::StartableSubscription;
-    use crate::io::{ConsumerGroupId, NoCursor, StreamId};
+    use crate::io::{ConsumerGroupId, StreamId};
     use crate::partition::PartitionGroup;
     use futures::stream;
 
@@ -982,20 +1439,49 @@ mod tests {
         value: String,
     }
 
+    #[derive(
+        Debug,
+        Clone,
+        Copy,
+        Eq,
+        PartialEq,
+        Ord,
+        PartialOrd,
+        Hash,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    struct StampedCursor {
+        sequence: i64,
+        partition: Partition,
+    }
+
+    impl Cursor for StampedCursor {
+        fn order_key(&self) -> CursorOrder {
+            CursorOrder::from_i64(self.sequence)
+        }
+    }
+
+    impl HasPartition for StampedCursor {
+        fn partition(&self) -> Partition {
+            self.partition
+        }
+    }
+
     #[derive(Debug, Clone, Default)]
     struct TypedSubscription {
-        start: StartFrom<NoCursor>,
+        start: StartFrom<StampedCursor>,
         partition: Option<Partition>,
     }
 
-    impl StartableSubscription<NoCursor> for TypedSubscription {
-        fn with_start(mut self, start: StartFrom<NoCursor>) -> Self {
+    impl StartableSubscription<StampedCursor> for TypedSubscription {
+        fn with_start(mut self, start: StartFrom<StampedCursor>) -> Self {
             self.start = start;
             self
         }
     }
 
-    impl PartitionableSubscription<NoCursor> for TypedSubscription {
+    impl PartitionableSubscription<StampedCursor> for TypedSubscription {
         fn with_partitions(mut self, group: PartitionGroup) -> Self {
             self.partition = group.partitions().first().copied();
             self
@@ -1008,12 +1494,13 @@ mod tests {
     impl Reader<TestPayload> for TypedOneShotReader {
         type Subscription = TypedSubscription;
         type Acker = NoopAcker;
-        type Cursor = NoCursor;
-        type Stream =
-            Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor, TestPayload>>> + Send>>;
+        type Cursor = StampedCursor;
+        type Stream = Pin<
+            Box<dyn Stream<Item = Result<Message<NoopAcker, StampedCursor, TestPayload>>> + Send>,
+        >;
 
         async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
-            assert!(subscription.partition.is_some());
+            let partition = subscription.partition.expect("partition was set");
             let event = crate::Event::create(
                 "acme",
                 "/typed",
@@ -1024,7 +1511,14 @@ mod tests {
                 },
             )?;
             Ok(Box::pin(stream::once(async move {
-                Ok(Message::new(event, NoopAcker, NoCursor))
+                Ok(Message::new(
+                    event,
+                    NoopAcker,
+                    StampedCursor {
+                        sequence: 1,
+                        partition,
+                    },
+                ))
             })))
         }
     }
@@ -1040,7 +1534,7 @@ mod tests {
         owner_id: Option<OwnerId>,
         lease_until: Option<DateTime<Utc>>,
         generation: Generation,
-        checkpoint_cursor: Option<NoCursor>,
+        checkpoint_cursor: Option<StampedCursor>,
     }
 
     impl Default for TestPartitionState {
@@ -1073,7 +1567,7 @@ mod tests {
         }
     }
 
-    impl PartitionCoordinator<NoCursor> for TestCoordinator {
+    impl PartitionCoordinator<StampedCursor> for TestCoordinator {
         async fn heartbeat<'a>(
             &'a self,
             scope: &'a CheckpointScope,
@@ -1118,7 +1612,7 @@ mod tests {
             owner_id: &'a OwnerId,
             partition: Partition,
             lease_duration: Duration,
-        ) -> Result<Option<PartitionLease<NoCursor>>> {
+        ) -> Result<Option<PartitionLease<StampedCursor>>> {
             let now = Utc::now();
             let lease_until = now + lease_duration;
             let key = (scope.clone(), partition.id());
@@ -1146,7 +1640,7 @@ mod tests {
 
         async fn renew<'a>(
             &'a self,
-            lease: &'a PartitionLease<NoCursor>,
+            lease: &'a PartitionLease<StampedCursor>,
             lease_duration: Duration,
         ) -> Result<()> {
             let key = (lease.scope.clone(), lease.partition.id());
@@ -1166,7 +1660,7 @@ mod tests {
             }
         }
 
-        async fn release<'a>(&'a self, lease: &'a PartitionLease<NoCursor>) -> Result<()> {
+        async fn release<'a>(&'a self, lease: &'a PartitionLease<StampedCursor>) -> Result<()> {
             let key = (lease.scope.clone(), lease.partition.id());
             let mut state = self.state.lock().await;
             match state.partitions.get_mut(&key) {
@@ -1188,8 +1682,8 @@ mod tests {
 
         async fn checkpoint<'a>(
             &'a self,
-            lease: &'a PartitionLease<NoCursor>,
-            cursor: NoCursor,
+            lease: &'a PartitionLease<StampedCursor>,
+            cursor: StampedCursor,
         ) -> Result<()> {
             let key = (lease.scope.clone(), lease.partition.id());
             let mut state = self.state.lock().await;
@@ -1224,6 +1718,7 @@ mod tests {
                 consumer_heartbeat_interval: Duration::from_millis(100),
                 partition_slack: 0,
                 checkpoint_flush: CheckpointFlushPolicy::default(),
+                ..CoordinatedReaderConfig::default()
             },
         );
 
@@ -1526,12 +2021,8 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(40)).await;
 
-        let mut owned: HashMap<u32, (PartitionLease<CountCursor>, tokio::task::JoinHandle<()>)> =
-            HashMap::new();
-        owned.insert(
-            0,
-            (test_lease(), tokio::spawn(async move { /* idle worker */ })),
-        );
+        let mut owned: HashMap<u32, PartitionLease<CountCursor>> = HashMap::new();
+        owned.insert(0, test_lease());
 
         let owner = OwnerId::new("flush-owner").unwrap();
         tick_interval_flush(
@@ -1547,9 +2038,5 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(last, Some(CountCursor(7)));
         assert!(pending.lock().await.is_empty());
-
-        for (_, (_, handle)) in owned.into_iter() {
-            handle.abort();
-        }
     }
 }

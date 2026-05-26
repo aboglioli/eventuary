@@ -298,7 +298,7 @@ pub use concurrency_limit::{ConcurrencyLimitReader, LimitAcker};
 pub use coordinated::{
     CheckpointFlushPolicy, CoordinatedAcker, CoordinatedCursor, CoordinatedReader,
     CoordinatedReaderConfig, CoordinatedStream, CoordinatedSubscription, Generation,
-    PartitionCoordinator, PartitionLease,
+    PartitionCoordinator, PartitionLease, PartitionedCoordAdapter,
 };
 pub use decode::{DecodeErrorDisposition, DecodeReader, ReaderTypedExt};
 pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
