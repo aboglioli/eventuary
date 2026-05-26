@@ -322,6 +322,34 @@ fn target_partition_count(total: NonZeroU32, live: usize, slack: u32) -> u32 {
     base.saturating_add(slack).min(total)
 }
 
+async fn release_owned_partitions_concurrent<C, Coord>(
+    owned: &mut HashMap<u32, (PartitionLease<C>, tokio::task::JoinHandle<()>)>,
+    coordinator: &Arc<Coord>,
+    owner_id: &OwnerId,
+    reason: &'static str,
+) where
+    C: Cursor + Clone + Send + Sync + 'static,
+    Coord: PartitionCoordinator<C>,
+{
+    let releases = owned.drain().map(|(partition_id, (lease, handle))| {
+        handle.abort();
+        let coord = Arc::clone(coordinator);
+        async move {
+            let result = coord.release(&lease).await;
+            (partition_id, result)
+        }
+    });
+    for (partition_id, result) in futures::future::join_all(releases).await {
+        if let Err(e) = result {
+            tracing::warn!(
+                owner = %owner_id,
+                partition = partition_id,
+                "coordinated reader: release {reason} failed: {e}"
+            );
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 async fn partition_worker<R, S, C, A, Coord, P>(
     inner_reader: R,
@@ -579,16 +607,7 @@ where
                     }
 
                     _ = shutdown_notify.notified() => {
-                        for (partition_id, (lease, handle)) in owned.drain() {
-                            handle.abort();
-                            if let Err(e) = coordinator.release(&lease).await {
-                                tracing::warn!(
-                                    owner = %owner_id,
-                                    partition = partition_id,
-                                    "coordinated reader: release on shutdown failed: {e}"
-                                );
-                            }
-                        }
+                        release_owned_partitions_concurrent(&mut owned, &coordinator, &owner_id, "on shutdown").await;
                         if let Err(e) = coordinator.release_consumer(&scope, &owner_id).await {
                             tracing::warn!(
                                 owner = %owner_id,
@@ -600,16 +619,13 @@ where
                 }
 
                 if tx.is_closed() {
-                    for (partition_id, (lease, handle)) in owned.drain() {
-                        handle.abort();
-                        if let Err(e) = coordinator.release(&lease).await {
-                            tracing::warn!(
-                                owner = %owner_id,
-                                partition = partition_id,
-                                "coordinated reader: release on stream close failed: {e}"
-                            );
-                        }
-                    }
+                    release_owned_partitions_concurrent(
+                        &mut owned,
+                        &coordinator,
+                        &owner_id,
+                        "on stream close",
+                    )
+                    .await;
                     if let Err(e) = coordinator.release_consumer(&scope, &owner_id).await {
                         tracing::warn!(
                             owner = %owner_id,
