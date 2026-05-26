@@ -268,16 +268,20 @@ when predicate filtering should happen after delivery.
 - `All` (default) — no `partition_id` filter.
 - `One(Partition)` — single partition; set via `PartitionableSubscription::with_partition(p)`.
 - `Many(PartitionGroup)` — set of partitions sharing the same `partition_count`;
-  set via the backend-specific `with_partitions(group)` inherent method.
-  `PartitionGroup::new(Vec<Partition>)` validates non-empty + uniform count.
+  set via `PartitionableSubscription::with_partitions(group)`.
+  `PartitionGroup::new_from_iter` (and `PartitionGroup::singleton` for
+  the trivial case) validates non-empty + uniform count.
   Postgres emits `partition_id = ANY($::int[])`; SQLite emits
   `partition_id IN (?, ?, ...)`. Single round-trip per poll vs N for
   single-partition fan-out.
 
-`CoordinatedReader` still uses one-worker-per-lease (each worker reads with
-`PartitionSelection::One(p)`) so fenced checkpointing stays simple. `Many`
-is for callers that compose a partition-aware reader without coordination,
-or for future backends where multi-partition fetch maps naturally to the
+`CoordinatedReader` uses `Many` internally: per owner, it spawns a single
+inner reader with `PartitionSelection::Many(owned)` and pipes the
+resulting global-sequence stream through `PartitionedReader::source_from_cursor`
+so each event is routed onto the lane matching its persisted
+`partition_id`. The same composition is available to callers that wire a
+partition-aware reader outside `CoordinatedReader`, and it is the
+natural fit for future backends where multi-partition fetch maps to the
 protocol (e.g., Kafka consumer assignments).
 
 The `StartableSubscription<C>` trait abstracts `start: StartFrom<C>` so
@@ -425,20 +429,25 @@ single source. Cross-cutting concerns live in generic core wrappers in
 
 - `CoordinatedReader<R, Coord>` is the multi-instance distributed reader.
   It wraps a partition-aware source reader (any `R` whose `Subscription`
-  implements `PartitionableSubscription<C>`) with a
-  `PartitionCoordinator<C>` to provide Kafka-like consumer-group
-  semantics over SQL. It heartbeats the local owner into
-  `event_stream_consumers`, claims partitions in `event_stream_partitions`,
-  spawns one inner partition reader per owned lease and merges them into
-  one stream, renews leases in a shared background loop with bounded
-  jitter, writes fenced checkpoints via `Coord::checkpoint(&lease, cursor)`
-  on every ack, and rebalances when consumers join or owners disappear.
-  A stale `(owner_id, generation)` surfaces `Error::OwnershipLost` and the
-  worker stops. Type aliases: `PgCoordinatedReader`,
+  implements `PartitionableSubscription<C>` and whose `Cursor` implements
+  `HasPartition`) with a `PartitionCoordinator<C>` to provide Kafka-like
+  consumer-group semantics over SQL. It heartbeats the local owner into
+  `event_stream_consumers`, claims partitions in
+  `event_stream_partitions`, runs a single inner reader scoped to its
+  owned set via `PartitionSelection::Many(owned)`, and pipes that stream
+  through `PartitionedReader::source_from_cursor` so each event lands on
+  the lane matching its persisted `partition_id`. Lanes are merged into
+  one outer stream. Leases are renewed in a shared background loop with
+  bounded jitter; fenced checkpoints are written via
+  `Coord::checkpoint(&lease, cursor)` under the policy in
+  `CheckpointFlushPolicy`. Rebalances rebuild the inner reader with the
+  new owned set when consumers join or owners disappear. A stale
+  `(owner_id, generation)` surfaces `Error::OwnershipLost` and ownership
+  is released. Type aliases: `PgCoordinatedReader`,
   `SqliteCoordinatedReader`. Companion types: `CoordinatedAcker<A, C, Coord>`,
   `CoordinatedCursor<C>`, `CoordinatedSubscription<S, C>`,
-  `CoordinatedReaderConfig`. Checkpoints currently flush per ack;
-  contiguous-progress batching by count/interval is a planned addition.
+  `CoordinatedReaderConfig`, `CheckpointFlushPolicy`,
+  `PartitionedCoordAdapter`.
 
 - `PartitionCoordinator<C>` is the membership + lease + checkpoint trait.
   `heartbeat`, `live_consumers`, `claim`, `renew`, `release`, `checkpoint`
@@ -994,28 +1003,26 @@ Worth knowing when changing the codebase:
   small, lets the reader decide rebalance policy (target count, slack,
   release ordering), and makes `MemoryPartitionCoordinator` trivial to
   implement for tests.
-- **`CoordinatedReader` spawns one worker per claimed partition.** Each
-  worker calls `inner_reader.read(...)` with `PartitionSelection::One(p)`
-  set by `PartitionableSubscription::with_partition`, so N owned
-  partitions on one instance issue N polling loops and N SQL queries per
-  cycle. Trade: each worker holds its own `PartitionLease<C>` cleanly so
-  `coordinator.checkpoint(&lease, cursor)` fencing stays per-partition
-  without demuxing a shared stream. `PartitionSelection::Many(group)`
-  exists at the subscription layer but is not used by `CoordinatedReader`
-  in this cut — switching to a shared inner reader would require routing
-  each delivered message back to its lease before checkpoint, which is
-  deferred until DB load is shown to be the bottleneck.
-- **`PartitionSelection::Many(PartitionGroup)` is a subscription-layer
-  capability, not a coordinator capability.** `PartitionGroup::new`
-  validates the set is non-empty and that every partition shares the
-  same `count`, so SQL can emit a single `partition_count = $ AND
-  partition_id = ANY(...)` predicate. Useful for callers that compose a
-  partition-aware reader without `CoordinatedReader` (e.g., a single
-  instance reading a fixed lane set), and a natural fit for backends
-  whose native protocol already speaks in multi-partition assignments
-  (planned: Kafka). Not threaded through `PartitionableSubscription`
-  because that trait is the contract `CoordinatedReader` relies on
-  (`with_partition` returns one partition per worker).
+- **`CoordinatedReader` runs a single shared inner reader scoped to its
+  owned set.** It calls `inner_subscription.with_partitions(owned)` to
+  set `PartitionSelection::Many(owned)`, opens one stream, and routes
+  events onto per-partition lanes via
+  `PartitionedReader::source_from_cursor` — the cursor's `HasPartition`
+  bound guarantees lane index equals the persisted `partition_id`. One
+  SQL query per poll regardless of owned-partition count; one in-flight
+  per lane. Fencing stays per-partition because the per-lane acker
+  resolves the matching `PartitionLease<C>` from the cursor's `Partition`
+  before calling `coordinator.checkpoint(&lease, cursor)`. The shared-fetch
+  shape replaces the earlier one-worker-per-lease design.
+- **`PartitionSelection::Many(PartitionGroup)` is both the
+  subscription-layer capability and the SQL filter used by
+  `CoordinatedReader`.** `PartitionGroup::new_from_iter` validates that
+  the set is non-empty and uniform-count; `PartitionGroup::singleton`
+  builds the trivial one-partition case. SQL emits a single
+  `partition_count = $ AND partition_id = ANY(...)` predicate. The
+  `PartitionableSubscription` trait exposes both
+  `with_partition(p)` (singleton) and `with_partitions(group)`; the
+  default impl of one composes the other so backends ship one method.
 - **`PartitionCoordinator` lives with `CoordinatedReader`, not in its own
   module.** Same pattern as `CheckpointStore` in `io/reader/checkpoint.rs`,
   `BufferStore` in `io/reader/buffer.rs`, `DedupeStore` in
@@ -1035,7 +1042,7 @@ Worth knowing when changing the codebase:
   `io/position.rs`.** Sibling subscription-capability traits: both have the
   same `Self -> Self` builder shape and exist so wrappers can compose
   subscriptions generically (`CheckpointReader` calls `with_start`;
-  `CoordinatedReader` calls `with_partition`). Colocating them keeps the
+  `CoordinatedReader` calls `with_partitions`). Colocating them keeps the
   capability surface in one file and lets readers learn the available
   contracts at a glance.
 - **Backend `coordinated_reader.rs` is alias-only by design.**
@@ -1049,12 +1056,14 @@ Worth knowing when changing the codebase:
   `partition_coordinator`, `checkpoint_store`, …). It is the only
   pure-alias module today; future generic-only types will follow the
   same shape so the per-backend layout stays predictable.
-- **Checkpoint flush is per-ack in the first cut.** A batched
-  contiguous-progress flush by `checkpoint_flush_count` /
-  `checkpoint_flush_interval` is planned but deliberately deferred so the
-  first implementation matches `CheckpointReader`'s commit-on-ack
-  semantics; high-throughput deployments should add the buffer before
-  optimizing.
+- **Checkpoint flush is configurable via `CheckpointFlushPolicy`.**
+  `max_pending_acks: NonZeroUsize` and `max_pending_interval: Duration`
+  bound the per-partition pending-ack buffer; the flush fires when either
+  threshold is reached. The default
+  (`max_pending_acks = 1`, `max_pending_interval = ZERO`) preserves the
+  earlier commit-on-ack semantics. Raising either threshold reduces write
+  amplification but widens the redelivery window on owner crash; handlers
+  must already be idempotent for redelivery.
 - **Typed payloads are core-generic, durable boundary stays `Payload`.**
   `Event<P = Payload>`, `Reader<P = Payload>`, `Writer<P = Payload>`,
   `Handler<P = Payload>`, `Filter<P = Payload>`, and `Message<A, C, P =
@@ -1104,29 +1113,50 @@ Worth knowing when changing the codebase:
   single-instance parallelism stack.** 1 SQL query per poll, N in-memory
   lanes, per-lane checkpointing, concurrent handler execution. One in-flight
   per lane — ack releases the lane slot; nack requeues at lane head.
-  `PartitionedReader::source` mode acks the inner `PgCursorAcker` on lane
-  accept so the source cursor advances immediately and the lane scheduler
-  controls delivery.
+  `PartitionedReader::source` (key-hash routing) or
+  `PartitionedReader::source_from_cursor` (cursor-partition routing —
+  preferred when the inner source already carries a `Partition`) acks the
+  inner source's cursor acker on lane accept so the source cursor advances
+  immediately and the lane scheduler controls delivery.
 - **`CoordinatedReader` + `BackgroundConsumer` is the multi-instance
-  equivalent.** Replaces both `PartitionedReader` and `CheckpointReader`
-  for the distributed case. Does its own partition routing (SQL-side
-  `WHERE partition_id = $X` per worker) and its own fenced checkpointing
-  (via `PartitionCoordinator`). One in-flight per partition — `PgReader`
-  blocks internally until ack, then the worker fetches the next event from
-  that partition. Requires partition columns in the DB.
-- **Both stacks provide the same concurrency model:** per-partition ordering,
-  cross-partition parallelism, one in-flight per partition. The difference
-  is deployment topology (single-process vs distributed) and SQL query
-  count (1 vs N per poll cycle). `CoordinatedReader` is not a complement to
-  `PartitionedReader` — it is the multi-instance replacement. They do not
-  compose (type system prevents it, and it would be redundant).
-- **`PartitionSelection::Many` is a batch-fetch optimization, not a
-  concurrency mechanism.** It fetches from multiple partitions in one SQL
-  query (`partition_id = ANY($1::int[])`), but the PgReader delivers events
-  in global sequence order with a single blocking loop — no per-partition
-  concurrency. Not wired into `CoordinatedReader` or `PartitionedReader`;
-  intended for callers composing partition-aware readers outside the
-  coordinator path.
+  equivalent.** Replaces `CheckpointReader` for the distributed case.
+  Internally composes `PartitionedReader::source_from_cursor` over a
+  single shared inner reader with `PartitionSelection::Many(owned)` —
+  one SQL query per poll regardless of owned-partition count, one
+  in-memory lane per owned partition, one in-flight per lane. Owns lease
+  coordination, ownership-driven SQL filtering, and fenced durable
+  checkpointing via the `PartitionCoordinator` trait under the configured
+  `CheckpointFlushPolicy`. Requires partition columns in the DB.
+- **Both stacks share the same concurrency model and the same scheduler
+  implementation:** per-partition ordering, cross-partition parallelism,
+  one in-flight per lane. The differences are the data source (a
+  non-partition-aware reader routed by `event.key()` hash vs a
+  partition-aware reader routed by the persisted `partition_id`) and
+  where durable progress is persisted (`consumer_offsets` vs
+  `event_stream_partitions`). `CoordinatedReader` is not a complement to
+  `PartitionedReader` — it is the multi-instance replacement at the
+  application level. Internally `CoordinatedReader` **uses**
+  `PartitionedReader::source_from_cursor` as its data plane, so the two
+  readers are composed inside the library, not by the application.
+  Applications pick one or the other at the top level.
+- **`PartitionSelection::Many` is the SQL-level filter that
+  `CoordinatedReader` uses to fetch only its owned partitions in one
+  query (`partition_id = ANY($1::int[])`).** Paired with
+  `PartitionedReader::source_from_cursor`, it turns the resulting
+  global-sequence stream into concurrent per-partition lanes — the lane
+  scheduler converts the bare reader's blocking-per-event delivery into
+  true per-partition concurrency. Applications composing partition-aware
+  readers outside the coordinator path can use the same pairing
+  directly; the type system enforces this via the `HasPartition` bound
+  on the cursor.
+- **`HasPartition` is the capability trait that lets a lane scheduler
+  trust the persisted partition** instead of re-deriving it from
+  `event.key()`. Implemented on `PgCursor`, `SqliteCursor`, and
+  `PartitionedCursor<C>` (blanket); bounds the
+  `PartitionedReader::source_from_cursor` constructor. Use it whenever
+  you compose a lane scheduler over a partition-aware source — the
+  writer's `PartitionKeyResolver` + `PartitionHasher` is honored by
+  construction with zero reader-side configuration.
 
 ## Releasing
 

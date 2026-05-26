@@ -428,20 +428,22 @@ SQL subscriptions also expose `partitions: PartitionSelection`:
 
 - `All` (default) — fetch every partition.
 - `One(Partition)` — fetch a single partition; set via
-  `subscription.with_partition(p)` (the `PartitionableSubscription` trait
-  method that `CoordinatedReader` relies on).
+  `subscription.with_partition(p)` (the convenience default on the
+  `PartitionableSubscription` trait).
 - `Many(PartitionGroup)` — fetch a validated set of partitions sharing the
-  same `partition_count`; set via `subscription.with_partitions(group)`.
+  same `partition_count`; set via `subscription.with_partitions(group)`
+  (the primary `PartitionableSubscription` trait method that
+  `CoordinatedReader` uses to push its owned set into the inner reader).
   PostgreSQL emits `partition_id = ANY($::int[])`, SQLite emits
   `partition_id IN (?, ?, ...)`, so the reader serves all selected lanes
   in one SQL round-trip per poll instead of one round-trip per lane.
 
 ```rust
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use eventuary::partition::{Partition, PartitionGroup};
 use eventuary::sqlite::reader::SqliteSubscription;
 
-let count = NonZeroU16::new(8).unwrap();
+let count = NonZeroU32::new(8).unwrap();
 let group = PartitionGroup::new(vec![
     Partition::new(1, count)?,
     Partition::new(4, count)?,
@@ -450,10 +452,12 @@ let group = PartitionGroup::new(vec![
 let subscription = SqliteSubscription::default().with_partitions(group);
 ```
 
-`CoordinatedReader` itself still uses one inner worker per claimed lease
-(each with `PartitionSelection::One`), so `Many` is intended for callers
-that compose a partition-aware reader outside the coordinator path or for
-future backends whose native protocol assigns partition sets directly.
+`CoordinatedReader` uses `Many` internally — it composes
+`PartitionedReader::source_from_cursor` over a shared inner reader
+filtered by `PartitionSelection::Many(owned)`. The same pairing is
+available to callers that compose a partition-aware reader outside the
+coordinator path, and it is the natural fit for future backends whose
+native protocol assigns partition sets directly (e.g., Kafka).
 
 ## Checkpointing SQL Readers
 
@@ -569,6 +573,23 @@ Source mode acks the inner source when a message is accepted into a lane and
 handles downstream `nack` by requeueing the event in memory. Delivery mode keeps
 the inner acker until downstream `ack`/`nack`, preserving broker semantics.
 
+When the inner source is **partition-aware** (its cursor implements
+`HasPartition` — true for `PgReader` and `SqliteReader`), prefer
+`PartitionedReader::source_from_cursor`. It routes each event onto the
+lane matching the persisted `partition_id` carried in the cursor rather
+than re-hashing `event.key()`, so the writer's `PartitionKeyResolver` +
+`PartitionHasher` choice is honored automatically. `CoordinatedReader`
+uses this constructor internally. Use the original `source` constructor
+for non-partition-aware sources (in-memory channels, transformed streams
+without persisted partition columns) where the lane index must be
+derived from the event key.
+
+`HasPartition` is the capability trait for any cursor type carrying a
+resolved `Partition`. It is implemented by `PgCursor`, `SqliteCursor`,
+and `PartitionedCursor<C: HasPartition>` (via blanket impl), and it
+bounds `PartitionedReader::source_from_cursor` so only partition-aware
+sources can be wired into cursor-driven lane routing.
+
 ## Multi-Instance Coordinated Readers
 
 ### SQL partitioning prerequisite
@@ -581,12 +602,12 @@ or rows that have been backfilled.
 PostgreSQL example:
 
 ```rust,ignore
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 
 use eventuary::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary::postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
 
-let partition_count = NonZeroU16::new(1024).unwrap();
+let partition_count = NonZeroU32::new(1024).unwrap();
 let writer = PgWriter::new_with_config(
     pool.clone(),
     PgWriterConfig {
@@ -602,11 +623,9 @@ let writer = PgWriter::new_with_config(
 
 SQLite uses the same shape with `SqlitePartitioningConfig` and `SqliteWriter`.
 
-For existing PostgreSQL rows, run `PgPartitionBackfill` with the same resolver,
-hasher, and partition count before starting coordinated readers. SQLite does not
-yet expose a backfill helper; backfill SQLite rows during your migration with the
-same FNV-1a resolver/hasher strategy used by the writer, or rewrite historical
-events through an inline-partitioned writer in a controlled maintenance window.
+For existing rows, run `PgPartitionBackfill` (PostgreSQL) or
+`SqlitePartitionBackfill` (SQLite) with the same resolver, hasher, and
+partition count before starting coordinated readers.
 
 
 `PartitionedReader` distributes partitions inside one process. To distribute
@@ -619,9 +638,12 @@ and a `PartitionCoordinator<C>`.
 - heartbeats this instance into `event_stream_consumers` for the
   `(consumer_group_id, stream_id)` scope,
 - claims free, expired, or released partitions from `event_stream_partitions`,
-- spawns one inner partition reader per owned lease, merges them into one stream,
+- spawns one inner `PartitionedReader::source_from_cursor` over a single
+  shared `PgReader` filtered by `PartitionSelection::Many(owned)`, with
+  one in-memory lane per owned partition; lanes are merged into a single
+  stream,
 - renews leases in a shared background loop with bounded jitter,
-- writes monotonic checkpoints fenced by `(owner_id, generation)` on every ack;
+- writes monotonic checkpoints fenced by `(owner_id, generation)`;
   a stale owner's checkpoint update affects zero rows and surfaces
   `Error::OwnershipLost`,
 - rebalances when new instances heartbeat in or owners disappear,
@@ -636,14 +658,13 @@ The backend crates expose this as thin type aliases over the core generic:
 | memory | — (use the core generic directly) | `MemoryPartitionCoordinator` |
 
 ```rust,ignore
-use std::num::NonZeroU16;
+use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
 
 use eventuary::StartFrom;
 use eventuary::io::{ConsumerGroupId, OwnerId, StreamId};
 use eventuary::io::reader::{CheckpointScope, CoordinatedReaderConfig, CoordinatedSubscription};
-use eventuary::postgres::coordinated_reader::{PgCoordinatedReader, PgCoordinatedReaderConfig};
+use eventuary::postgres::coordinated_reader::PgCoordinatedReader;
 use eventuary::postgres::partition_coordinator::PgPartitionCoordinator;
 use eventuary::postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
 
@@ -654,14 +675,7 @@ let reader = PgCoordinatedReader::new(
     source,
     Arc::clone(&coordinator),
     OwnerId::generate(),
-    CoordinatedReaderConfig {
-        partition_lease_duration: Duration::from_secs(60),
-        partition_renew_interval: Duration::from_secs(15),
-        consumer_lease_duration: Duration::from_secs(30),
-        consumer_heartbeat_interval: Duration::from_secs(10),
-        rebalance_interval: Duration::from_secs(10),
-        partition_slack: 0,
-    },
+    CoordinatedReaderConfig::default(),
 );
 
 let subscription = CoordinatedSubscription {
@@ -670,7 +684,7 @@ let subscription = CoordinatedSubscription {
         ConsumerGroupId::new("orders-projection-v1")?,
         StreamId::new("orders-events")?,
     ),
-    partition_count: NonZeroU16::new(1024).unwrap(),
+    partition_count: NonZeroU32::new(1024).unwrap(),
     start: StartFrom::Earliest,
 };
 ```
@@ -684,9 +698,13 @@ their own ownership and checkpoint progress.
 intentionally prefer fewer releases during churn over immediate even
 distribution.
 
-Checkpoints currently flush on every ack. High-throughput deployments should
-plan for a future contiguous-progress flush buffer; the API does not yet expose
-`checkpoint_flush_count` / `checkpoint_flush_interval`.
+Checkpoint flush is configurable via
+`CheckpointFlushPolicy { max_pending_acks, max_pending_interval }`.
+The default is per-ack flush (`max_pending_acks = 1`,
+`max_pending_interval = Duration::ZERO`) for parity with prior versions;
+raise either threshold to reduce write amplification at the cost of
+widening the redelivery window on owner crash. The pending-ack buffer is
+per-partition; fencing semantics are unchanged.
 
 ## Reader Wrappers
 
@@ -905,21 +923,36 @@ PgReader (1 SQL query, fetches all rows)
 ### Multi-instance stack
 
 ```
-CoordinatedReader (N partition workers, each with its own PgReader)
-  └── BackgroundConsumer::spawn(handler, concurrency=N)
+CoordinatedReader (lease + heartbeat + fenced checkpoint)
+  └── PartitionedReader::source_from_cursor (N in-memory lanes, one in-flight each)
+        └── PgReader { selection: PartitionSelection::Many(owned) } (1 SQL query)
+              └── BackgroundConsumer::spawn(handler, concurrency=N)
 ```
 
-- N SQL queries per poll cycle (one per owned partition). Each worker
-  reads a single partition via `PartitionSelection::One`.
-- `CoordinatedReader` replaces both `PartitionedReader` and
-  `CheckpointReader` for the multi-instance case: it does its own
-  partition routing (SQL-side `WHERE partition_id = $X`) and its own
-  fenced checkpointing via the `PartitionCoordinator` trait.
-- Lease-based ownership with heartbeat, renewal, and rebalance so
-  partitions are distributed across instances dynamically.
+- **1 SQL query per poll cycle**, regardless of how many partitions the
+  owner holds. The inner `PgReader` uses `PartitionSelection::Many(owned)`
+  to fetch all owned partitions in a single
+  `partition_id = ANY($1::int[])` query.
+- `CoordinatedReader` replaces `CheckpointReader` for the multi-instance
+  case: it owns lease coordination, partition routing (via SQL filter on
+  the inner `PgReader`), and fenced durable checkpointing via the
+  `PartitionCoordinator` trait. Internally it composes
+  `PartitionedReader::source_from_cursor` over the inner `PgReader` for
+  lane scheduling — applications do not stack these readers manually.
+- Lane routing trusts the persisted `partition_id` column via the
+  `HasPartition` capability trait on the cursor, so the writer's
+  `PartitionKeyResolver` + `PartitionHasher` choice is honored by
+  construction.
+- Lease-based ownership with heartbeat, renewal, and rebalance. The
+  owned set is propagated into the inner `PgReader`'s
+  `PartitionSelection::Many` on every rebalance so partitions
+  redistribute across instances dynamically.
+- `CoordinatedReader<R, Coord>` is generic over both the source reader
+  and the coordinator, so backends can be mixed at the composition layer
+  (e.g., a `PgReader` source paired with a future Redis coordinator).
 - **Requires partition columns in the DB** — the writer must use
-  `PgPartitioningConfig::Inline` (or run `PgPartitionBackfill` on
-  existing rows).
+  `PgPartitioningConfig::Inline` (or run `PgPartitionBackfill` /
+  `SqlitePartitionBackfill` on existing rows).
 
 ### How concurrency works in both stacks
 
@@ -928,25 +961,40 @@ mechanism differs:
 
 | Stack | Flow control | Nack redelivery |
 |---|---|---|
-| Single-instance | `PartitionedReader` lane scheduler: one in-flight per lane, ack releases slot | Requeue at lane head |
-| Multi-instance | `PgReader` internal blocking: blocks until ack, then delivers next event | SQL re-fetch via `pending_nack` |
+| Single-instance | `PartitionedReader` lane scheduler over a non-partition-aware source: one in-flight per lane, ack releases slot, lane index from key hash | Requeue at lane head |
+| Multi-instance | `PartitionedReader::source_from_cursor` lane scheduler over a partition-aware `PgReader`: one in-flight per lane, ack releases slot, lane index from persisted partition column | Requeue at lane head; durable resume from fenced checkpoint on owner crash |
 
 In both cases the next event from partition X cannot enter the stream
 until the current one is acked. `BackgroundConsumer` processes events from
 different partitions concurrently (`for_each_concurrent`), but no two
 events from the same partition are ever in-flight simultaneously.
 
+Both stacks share the **same** lane-scheduler implementation. The only
+differences are the data source (a non-partition-aware reader hashed on
+`event.key()` vs a partition-aware `PgReader` routed by the persisted
+`partition_id`) and where durable progress is persisted
+(`consumer_offsets` vs `event_stream_partitions`).
+
 ### Partition count guidelines
 
 | Scenario | Recommended |
 |---|---|
-| Single-instance stack | 8–128 (1 SQL query regardless, safe up to thousands) |
-| Multi-instance stack | 4–32 per instance (N queries per poll, keep total ≤ 100) |
+| Single-instance stack | 8–128 (one SQL query regardless of lane count) |
+| Multi-instance stack, moderate scale (≤10 instances, ≤10K events/sec) | 64–256 |
+| Multi-instance stack, high scale (>10 instances or >10K events/sec) | 256–1024 |
+| Strong per-entity ordering with many distinct entities | up to 1024+ — choose by hash-collision tolerance |
 
-More partitions than concurrent handlers doesn't help throughput — the
-bottleneck is SQL, not parallelism. `PartitionedReader` is the better
-choice for in-process parallelism because it does 1 query instead of N.
-Use `CoordinatedReader` only when you need distribution across instances.
+`partition_count` is a `NonZeroU32`, so there is no practical upper bound
+from the type system; pick by domain rather than infrastructure budget.
+
+More partitions than concurrent handlers does not increase throughput —
+the bottleneck remains handler concurrency, not SQL. Both stacks now
+issue one SQL query per poll regardless of partition count. Use
+`PartitionedReader` for single-process parallelism; use
+`CoordinatedReader` when you need ownership distribution across
+instances. Partition count is decoupled from the number of consumer
+instances and from infra cost — pick it by domain (entity-routing
+granularity, ordering parallelism).
 
 ## SQL Relations and Migrations
 
