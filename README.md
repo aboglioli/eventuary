@@ -878,6 +878,76 @@ For fully independent subscriber progress, use backend-native isolation: one
 SQL `CheckpointScope` per subscriber, one Kafka consumer group per subscriber,
 or one SQS queue per subscriber.
 
+## Parallelism and Concurrency
+
+Two stacks provide per-partition ordering with cross-partition parallel
+handler execution. Pick based on deployment topology.
+
+### Single-instance stack
+
+```
+PgReader (1 SQL query, fetches all rows)
+  └── PartitionedReader::source (N in-memory lanes, one in-flight each)
+        └── CheckpointReader (per-lane durable cursor)
+              └── BackgroundConsumer::spawn(handler, concurrency=N)
+```
+
+- 1 SQL query per poll cycle regardless of partition count.
+- `PartitionedReader` routes events into N lanes in memory by hashing
+  `event.key()`.  Each lane is FIFO — per-key ordering is preserved.
+- `CheckpointReader` persists per-lane `PartitionedCursor<PgCursor>` so the
+  consumer resumes from the last acked event in each lane.
+- `BackgroundConsumer` processes up to `concurrency` events in parallel.
+  Set `concurrency` to match the lane count for full parallelism.
+- **No partition columns needed on the writer.** Partition assignment is
+  computed from the event key in memory.
+
+### Multi-instance stack
+
+```
+CoordinatedReader (N partition workers, each with its own PgReader)
+  └── BackgroundConsumer::spawn(handler, concurrency=N)
+```
+
+- N SQL queries per poll cycle (one per owned partition). Each worker
+  reads a single partition via `PartitionSelection::One`.
+- `CoordinatedReader` replaces both `PartitionedReader` and
+  `CheckpointReader` for the multi-instance case: it does its own
+  partition routing (SQL-side `WHERE partition_id = $X`) and its own
+  fenced checkpointing via the `PartitionCoordinator` trait.
+- Lease-based ownership with heartbeat, renewal, and rebalance so
+  partitions are distributed across instances dynamically.
+- **Requires partition columns in the DB** — the writer must use
+  `PgPartitioningConfig::Inline` (or run `PgPartitionBackfill` on
+  existing rows).
+
+### How concurrency works in both stacks
+
+Both stacks deliver **at most one in-flight event per partition**. The
+mechanism differs:
+
+| Stack | Flow control | Nack redelivery |
+|---|---|---|
+| Single-instance | `PartitionedReader` lane scheduler: one in-flight per lane, ack releases slot | Requeue at lane head |
+| Multi-instance | `PgReader` internal blocking: blocks until ack, then delivers next event | SQL re-fetch via `pending_nack` |
+
+In both cases the next event from partition X cannot enter the stream
+until the current one is acked. `BackgroundConsumer` processes events from
+different partitions concurrently (`for_each_concurrent`), but no two
+events from the same partition are ever in-flight simultaneously.
+
+### Partition count guidelines
+
+| Scenario | Recommended |
+|---|---|
+| Single-instance stack | 8–128 (1 SQL query regardless, safe up to thousands) |
+| Multi-instance stack | 4–32 per instance (N queries per poll, keep total ≤ 100) |
+
+More partitions than concurrent handlers doesn't help throughput — the
+bottleneck is SQL, not parallelism. `PartitionedReader` is the better
+choice for in-process parallelism because it does 1 query instead of N.
+Use `CoordinatedReader` only when you need distribution across instances.
+
 ## SQL Relations and Migrations
 
 Relation names are validated before being rendered into SQL. PostgreSQL supports

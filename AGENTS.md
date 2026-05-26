@@ -1100,6 +1100,33 @@ Worth knowing when changing the codebase:
   completion state, never the payload. Keeping the trait monomorphic
   lets a single store back multiplexers over multiple payload types
   with isolated subscriber-id namespaces.
+- **`PartitionedReader` + `CheckpointReader` + `BackgroundConsumer` is the
+  single-instance parallelism stack.** 1 SQL query per poll, N in-memory
+  lanes, per-lane checkpointing, concurrent handler execution. One in-flight
+  per lane — ack releases the lane slot; nack requeues at lane head.
+  `PartitionedReader::source` mode acks the inner `PgCursorAcker` on lane
+  accept so the source cursor advances immediately and the lane scheduler
+  controls delivery.
+- **`CoordinatedReader` + `BackgroundConsumer` is the multi-instance
+  equivalent.** Replaces both `PartitionedReader` and `CheckpointReader`
+  for the distributed case. Does its own partition routing (SQL-side
+  `WHERE partition_id = $X` per worker) and its own fenced checkpointing
+  (via `PartitionCoordinator`). One in-flight per partition — `PgReader`
+  blocks internally until ack, then the worker fetches the next event from
+  that partition. Requires partition columns in the DB.
+- **Both stacks provide the same concurrency model:** per-partition ordering,
+  cross-partition parallelism, one in-flight per partition. The difference
+  is deployment topology (single-process vs distributed) and SQL query
+  count (1 vs N per poll cycle). `CoordinatedReader` is not a complement to
+  `PartitionedReader` — it is the multi-instance replacement. They do not
+  compose (type system prevents it, and it would be redundant).
+- **`PartitionSelection::Many` is a batch-fetch optimization, not a
+  concurrency mechanism.** It fetches from multiple partitions in one SQL
+  query (`partition_id = ANY($1::int[])`), but the PgReader delivers events
+  in global sequence order with a single blocking loop — no per-partition
+  concurrency. Not wired into `CoordinatedReader` or `PartitionedReader`;
+  intended for callers composing partition-aware readers outside the
+  coordinator path.
 
 ## Releasing
 
