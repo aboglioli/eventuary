@@ -1,3 +1,5 @@
+pub use crate::reader_config::KafkaReaderConfig;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +17,6 @@ use eventuary_core::{Error, Event, Result, SerializedEvent, StartFrom, Startable
 
 use crate::flusher::KafkaFlusher;
 use crate::flusher::KafkaOffsetToken;
-use crate::reader_config::KafkaReaderConfig;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KafkaCursor {
