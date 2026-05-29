@@ -613,29 +613,29 @@ async fn fetch_batch(
             };
             let partition_id: Option<i64> = row.get("partition_id");
             let partition_count: Option<i64> = row.get("partition_count");
-            let partition = match (partition_id, partition_count) {
-                (Some(id), Some(count)) => {
-                    let id_u32 = u32::try_from(id)
-                        .map_err(|_| Error::Store(format!("partition_id {id} exceeds u32::MAX")))?;
-                    let count_u32 = u32::try_from(count).map_err(|_| {
-                        Error::Store(format!("partition_count {count} exceeds u32::MAX"))
-                    })?;
-                    let count = NonZeroU32::new(count_u32).ok_or_else(|| {
-                        Error::Store("partition_count must be positive".to_owned())
-                    })?;
-                    Partition::new(id_u32, count)
-                        .map_err(|e| Error::Store(format!("invalid partition: {e}")))?
-                }
-                _ => {
-                    return Err(Error::Store(
-                        "event has NULL partition columns — run partition backfill first"
-                            .to_owned(),
-                    ));
-                }
-            };
+            let partition = decode_partition(partition_id, partition_count)?;
             Ok((serialized, sequence, partition))
         })
         .collect()
+}
+
+fn decode_partition(partition_id: Option<i64>, partition_count: Option<i64>) -> Result<Partition> {
+    match (partition_id, partition_count) {
+        (Some(id), Some(count)) => {
+            let id = u32::try_from(id)
+                .map_err(|_| Error::Store(format!("partition_id {id} exceeds u32::MAX")))?;
+            let count = u32::try_from(count)
+                .map_err(|_| Error::Store(format!("partition_count {count} exceeds u32::MAX")))?;
+            let count = NonZeroU32::new(count)
+                .ok_or_else(|| Error::Store("partition_count must be positive".to_owned()))?;
+            Partition::new(id, count).map_err(|e| Error::Store(format!("invalid partition: {e}")))
+        }
+        (None, None) => Ok(Partition::new(0, NonZeroU32::new(1).unwrap())
+            .expect("synthetic single partition is valid")),
+        _ => Err(Error::Store(
+            "event has incomplete partition columns — run partition backfill first".to_owned(),
+        )),
+    }
 }
 
 fn parse_pg_timestamp(s: &str) -> std::result::Result<DateTime<Utc>, chrono::ParseError> {
