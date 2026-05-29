@@ -472,7 +472,19 @@ where
                     return;
                 }
             }
-
+            let mut buf = pending_flushes.lock().await;
+            for (cursor_id, entry) in buf.drain() {
+                let key = CheckpointKey {
+                    scope: scope_for_stream.clone(),
+                    cursor_id,
+                };
+                if let Err(e) = store_for_stream.commit(&key, entry.cursor).await {
+                    tracing::warn!(
+                        "checkpoint reader: flush on stream completion failed for {:?}: {e}",
+                        key.cursor_id
+                    );
+                }
+            }
         });
 
         Ok(SpawnedStream::new(rx, handle))
@@ -490,7 +502,38 @@ mod tests {
     use crate::payload::Payload;
     use futures::{Stream, StreamExt};
     use std::pin::Pin;
+    use std::task::{Context, Poll};
     use tokio::sync::Mutex as TokioMutex;
+
+    struct MpscStream<T> {
+        rx: tokio::sync::mpsc::Receiver<T>,
+    }
+
+    impl<T> Stream for MpscStream<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+            self.rx.poll_recv(cx)
+        }
+    }
+
+    type InnerRx = tokio::sync::mpsc::Receiver<Result<Message<NoopAcker, TestCursor>>>;
+
+    struct ChannelReader {
+        rx: std::sync::Mutex<Option<InnerRx>>,
+    }
+
+    impl Reader for ChannelReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: TestSub) -> Result<Self::Stream> {
+            let rx = self.rx.lock().unwrap().take().unwrap();
+            Ok(Box::pin(MpscStream { rx }))
+        }
+    }
 
     #[test]
     fn pending_state_advances_contiguously_in_order() {
@@ -1059,7 +1102,11 @@ mod tests {
 
         let msg2 = stream.next().await.unwrap().unwrap();
         msg2.ack().await.unwrap();
-        assert_eq!(store.committed().len(), 1, "second ack should trigger flush");
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "second ack should trigger flush"
+        );
     }
 
     #[tokio::test]
@@ -1111,18 +1158,95 @@ mod tests {
 
         let msg1 = stream.next().await.unwrap().unwrap();
         msg1.ack().await.unwrap();
-        assert_eq!(
-            store.committed().len(),
-            1,
-            "default flushes on first ack"
-        );
+        assert_eq!(store.committed().len(), 1, "default flushes on first ack");
 
         let msg2 = stream.next().await.unwrap().unwrap();
         msg2.ack().await.unwrap();
+        assert_eq!(store.committed().len(), 2, "default flushes on second ack");
+    }
+
+    #[tokio::test]
+    async fn flush_on_stream_drop_drains_buffered_cursors() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(10).unwrap(),
+                max_pending_interval: Duration::from_secs(3600),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        tx.send(Ok(Message::new(ev("a"), NoopAcker, TestCursor(1))))
+            .await
+            .unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert!(
+            store.committed().is_empty(),
+            "should buffer under high flush threshold"
+        );
+
+        drop(stream);
+        drop(tx);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
         assert_eq!(
             store.committed().len(),
-            2,
-            "default flushes on second ack"
+            1,
+            "drop should drain buffered cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_loop_drain_commits_buffered_cursors_on_natural_end() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(10).unwrap(),
+                max_pending_interval: Duration::from_secs(3600),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        tx.send(Ok(Message::new(ev("a"), NoopAcker, TestCursor(1))))
+            .await
+            .unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert!(
+            store.committed().is_empty(),
+            "should buffer under high flush threshold"
+        );
+
+        drop(tx);
+
+        assert!(stream.next().await.is_none(), "stream should end naturally");
+
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "natural end should drain buffered cursor"
         );
     }
 }
