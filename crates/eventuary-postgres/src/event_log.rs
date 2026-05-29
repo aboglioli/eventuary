@@ -48,8 +48,8 @@ const EVENT_LOG_MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 #[derive(Debug, Clone)]
-pub struct PgEventLogSchemaConfig {
-    pub events_relation: PgRelationName,
+pub(crate) struct PgEventLogSchemaConfig {
+    pub(crate) events_relation: PgRelationName,
 }
 
 impl Default for PgEventLogSchemaConfig {
@@ -60,14 +60,14 @@ impl Default for PgEventLogSchemaConfig {
     }
 }
 
-pub struct PgEventLogSchema;
+pub(crate) struct PgEventLogSchema;
 
 impl PgEventLogSchema {
-    pub fn schema_sql(config: &PgEventLogSchemaConfig) -> String {
+    pub(crate) fn schema_sql(config: &PgEventLogSchemaConfig) -> String {
         crate::schema::render_schema_sql(EVENT_LOG_MIGRATIONS, &replacements(config))
     }
 
-    pub async fn prepare(pool: &PgPool, config: &PgEventLogSchemaConfig) -> Result<()> {
+    pub(crate) async fn prepare(pool: &PgPool, config: &PgEventLogSchemaConfig) -> Result<()> {
         crate::schema::apply_schema(pool, EVENT_LOG_MIGRATIONS, &replacements(config)).await
     }
 }

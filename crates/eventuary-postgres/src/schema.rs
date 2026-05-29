@@ -7,18 +7,18 @@ use eventuary_core::{Error, Result};
 use crate::relation::PgRelationName;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Migration {
-    pub name: &'static str,
-    pub sql: &'static str,
+pub(crate) struct Migration {
+    pub(crate) name: &'static str,
+    pub(crate) sql: &'static str,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct RelationReplacement<'a> {
-    pub token: &'static str,
-    pub relation: &'a PgRelationName,
+pub(crate) struct RelationReplacement<'a> {
+    pub(crate) token: &'static str,
+    pub(crate) relation: &'a PgRelationName,
 }
 
-pub fn render_migration_sql(
+pub(crate) fn render_migration_sql(
     migration: &Migration,
     replacements: &[RelationReplacement<'_>],
 ) -> String {
@@ -29,7 +29,7 @@ pub fn render_migration_sql(
     sql
 }
 
-pub fn render_schema_sql(
+pub(crate) fn render_schema_sql(
     migrations: &[Migration],
     replacements: &[RelationReplacement<'_>],
 ) -> String {
@@ -57,7 +57,7 @@ fn render_schema_creation_sql(replacements: &[RelationReplacement<'_>]) -> Strin
     sql
 }
 
-pub async fn apply_schema(
+pub(crate) async fn apply_schema(
     pool: &PgPool,
     migrations: &[Migration],
     replacements: &[RelationReplacement<'_>],

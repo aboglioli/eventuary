@@ -9,46 +9,24 @@
 //! `eventuary_core::io::reader::CheckpointReader`. Checkpoints are keyed by
 //! `(consumer_group_id, stream_id, cursor_id)` and store the full cursor as JSON.
 //!
-//! Schema setup is component-owned. `PgWriter::connect(pool, config).await`
-//! prepares only the event-log table, while
-//! `PgDedupeStore::connect(pool, config).await` prepares only the dedupe table.
-//! `PgDatabase::connect(...)` only opens a pool and does not create Eventuary
-//! tables.
+//! Schema setup is component-owned. Use each component's `Component::schema_sql(config)`
+//! method (`PgWriter::schema_sql`, `PgReader::schema_sql`, `PgCheckpointStore::schema_sql`, …)
+//! to generate DDL, and the corresponding `Component::connect(pool, config).await` or
+//! `Component::prepare_schema(pool, config).await` to apply it.
 //!
-//! Also ships postgres-backed implementations of the IO store traits:
-//! - [`PgMultiplexerStore`]
-//! - [`PgBufferStore`]
-//! - [`PgDedupeStore`]
-//! - [`PgCheckpointStore`]
-//! - [`PgWatermarkStore`]
+//! `PgDatabase::connect(...)` only opens a pool and does not create Eventuary tables.
 
-pub mod buffer_store;
-pub mod checkpoint_store;
-pub mod claim_buffer_store;
-pub mod coordinated_reader;
+pub mod buffer;
+pub mod checkpoint;
+pub mod claim_buffer;
+pub mod coordinator;
 pub mod database;
-pub mod dedupe_store;
-pub mod event_log;
-pub mod multiplexer_store;
-pub mod partition_backfill;
-pub mod partition_coordinator;
+pub mod dedupe;
+mod event_log;
+pub mod multiplexer;
+pub mod partitioning;
 pub mod reader;
 pub mod relation;
-pub mod schema;
-pub mod watermark_store;
+mod schema;
+pub mod watermark;
 pub mod writer;
-
-pub use buffer_store::{PgBufferStore, PgBufferStoreConfig, PgBufferStoreId};
-pub use checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
-pub use claim_buffer_store::{PgClaimedBufferStore, PgClaimedBufferStoreConfig};
-pub use coordinated_reader::{
-    PgCoordinatedAcker, PgCoordinatedCursor, PgCoordinatedReader, PgCoordinatedReaderConfig,
-    PgCoordinatedStream, PgCoordinatedSubscription,
-};
-pub use dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
-pub use event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
-pub use multiplexer_store::{PgMultiplexerStore, PgMultiplexerStoreConfig};
-pub use partition_backfill::{BackfillReport, PgPartitionBackfill, PgPartitionBackfillConfig};
-pub use partition_coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
-pub use watermark_store::{PgWatermarkStore, PgWatermarkStoreConfig};
-pub use writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};

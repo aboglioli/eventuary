@@ -3,9 +3,9 @@ use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
-use eventuary_postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+use eventuary_postgres::checkpoint::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::dedupe_store::{PgDedupeStore, PgDedupeStoreConfig};
+use eventuary_postgres::dedupe::{PgDedupeStore, PgDedupeStoreConfig};
 use eventuary_postgres::reader::PgCursor;
 use eventuary_postgres::writer::{PgWriter, PgWriterConfig};
 

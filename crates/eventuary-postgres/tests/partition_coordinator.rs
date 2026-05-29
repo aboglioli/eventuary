@@ -9,8 +9,8 @@ use eventuary_core::Partition;
 use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::reader::PartitionCoordinator;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, StreamId};
+use eventuary_postgres::coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

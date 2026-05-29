@@ -17,7 +17,7 @@ use eventuary_core::io::reader::{
 use eventuary_core::io::{Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
-use eventuary_postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+use eventuary_postgres::checkpoint::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
 use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};

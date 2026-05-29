@@ -14,12 +14,12 @@ use eventuary_core::io::{
     reader::{CheckpointKey, CheckpointScope},
 };
 use eventuary_core::{Event, EventId, Payload};
+use eventuary_postgres::buffer::{PgBufferStore, PgBufferStoreConfig};
+use eventuary_postgres::checkpoint::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::{
-    PgBufferStore, PgBufferStoreConfig, PgCheckpointStore, PgCheckpointStoreConfig, PgDedupeStore,
-    PgDedupeStoreConfig, PgMultiplexerStore, PgMultiplexerStoreConfig, PgWatermarkStore,
-    PgWatermarkStoreConfig,
-};
+use eventuary_postgres::dedupe::{PgDedupeStore, PgDedupeStoreConfig};
+use eventuary_postgres::multiplexer::{PgMultiplexerStore, PgMultiplexerStoreConfig};
+use eventuary_postgres::watermark::{PgWatermarkStore, PgWatermarkStoreConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

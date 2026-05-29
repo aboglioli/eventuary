@@ -10,7 +10,7 @@ use eventuary_core::io::Writer;
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, Payload};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::{PgPartitioningConfig, PgWriter, PgWriterConfig};
+use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

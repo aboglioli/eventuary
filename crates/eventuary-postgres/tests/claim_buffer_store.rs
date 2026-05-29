@@ -9,8 +9,8 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use eventuary_core::io::OwnerId;
 use eventuary_core::io::reader::claim_buffer::ClaimedBufferStore;
 use eventuary_core::{Event, Payload};
+use eventuary_postgres::claim_buffer::{PgClaimedBufferStore, PgClaimedBufferStoreConfig};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::{PgClaimedBufferStore, PgClaimedBufferStoreConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")
