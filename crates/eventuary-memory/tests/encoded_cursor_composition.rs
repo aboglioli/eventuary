@@ -15,7 +15,7 @@ use eventuary_core::io::{
     ConsumerGroupId, Cursor, Message, Reader, StartFrom, StartableSubscription, StreamId,
 };
 use eventuary_core::{Event, Payload, Result};
-use eventuary_memory::checkpoint_store::MemoryCheckpointStore;
+use eventuary_memory::checkpoint::MemoryCheckpointStore;
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 struct SeqCursor(i64);

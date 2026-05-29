@@ -14,14 +14,13 @@ use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Error, Event, Payload, StartFrom};
-use eventuary_postgres::coordinated_reader::PgCoordinatedStream;
+use eventuary_postgres::coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
-use eventuary_postgres::{
-    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedSubscription,
-    PgPartitionCoordinator, PgPartitionCoordinatorConfig, PgPartitioningConfig, PgWriter,
-    PgWriterConfig,
+use eventuary_postgres::reader::{
+    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedStream, PgCoordinatedSubscription,
+    PgReader, PgReaderConfig, PgSubscription,
 };
+use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

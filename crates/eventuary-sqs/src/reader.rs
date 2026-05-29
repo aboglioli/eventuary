@@ -1,3 +1,5 @@
+pub use crate::reader_config::SqsReaderConfig;
+
 use std::time::Duration;
 
 use aws_sdk_sqs::Client;
@@ -8,7 +10,6 @@ use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
 use crate::flusher::SqsFlusher;
-use crate::reader_config::SqsReaderConfig;
 
 #[derive(Debug, Clone)]
 pub struct SqsSubscription {

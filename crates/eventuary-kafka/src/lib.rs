@@ -18,5 +18,5 @@
 
 pub mod flusher;
 pub mod reader;
-pub mod reader_config;
+mod reader_config;
 pub mod writer;

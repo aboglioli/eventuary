@@ -4,33 +4,15 @@
 //! channels. Events emit `Message<NoopAcker, NoCursor>`, so ack/nack are no-ops. Suitable
 //! for development, tests, and single-process use.
 //!
-//! Also ships in-memory implementations of the IO store traits:
-//! - [`MemoryMultiplexerStore`]
-//! - [`MemoryBufferStore`]
-//! - [`MemoryDedupeStore`]
-//! - [`MemoryWatermarkStore`]
-//! - [`MemoryCheckpointStore`]
-//! - [`MemoryPartitionCoordinator`]
-//! - [`MemorySubscriberWorkStore`]
+//! All store implementations are exposed through their role modules.
 
-pub mod buffer_store;
-pub mod checkpoint_store;
-pub mod claim_buffer_store;
-pub mod dedupe_store;
-pub mod multiplexer_store;
-pub mod partition_coordinator;
+pub mod buffer;
+pub mod checkpoint;
+pub mod claim_buffer;
+pub mod coordinator;
+pub mod dedupe;
+pub mod multiplexer;
 pub mod reader;
-pub mod subscriber_work_store;
-pub mod watermark_store;
+pub mod subscriber_work;
+pub mod watermark;
 pub mod writer;
-
-pub use buffer_store::{MemoryBufferStore, MemoryBufferStoreId};
-pub use checkpoint_store::MemoryCheckpointStore;
-pub use claim_buffer_store::MemoryClaimedBufferStore;
-pub use dedupe_store::MemoryDedupeStore;
-pub use multiplexer_store::MemoryMultiplexerStore;
-pub use partition_coordinator::MemoryPartitionCoordinator;
-pub use reader::MemoryReader;
-pub use subscriber_work_store::MemorySubscriberWorkStore;
-pub use watermark_store::MemoryWatermarkStore;
-pub use writer::MemoryWriter;

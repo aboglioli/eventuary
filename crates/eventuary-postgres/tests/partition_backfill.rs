@@ -12,11 +12,11 @@ use eventuary_core::partition::{
 };
 use eventuary_core::{Error, Event, Payload};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::relation::PgRelationName;
-use eventuary_postgres::{
-    BackfillReport, PgPartitionBackfill, PgPartitionBackfillConfig, PgPartitioningConfig, PgWriter,
-    PgWriterConfig,
+use eventuary_postgres::partitioning::{
+    BackfillReport, PgPartitionBackfill, PgPartitionBackfillConfig,
 };
+use eventuary_postgres::relation::PgRelationName;
+use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
 
 async fn start_postgres() -> (ContainerAsync<GenericImage>, PgPool) {
     let container = GenericImage::new("postgres", "18-alpine")

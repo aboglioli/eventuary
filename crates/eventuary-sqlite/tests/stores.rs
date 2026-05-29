@@ -3,12 +3,11 @@ use chrono::Utc;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore, SubscriberId};
 use eventuary_core::io::reader::{BufferStore, DedupeStore, WatermarkStore};
 use eventuary_core::{Event, EventId, Payload};
+use eventuary_sqlite::buffer::{SqliteBufferStore, SqliteBufferStoreConfig};
 use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
-use eventuary_sqlite::{
-    SqliteBufferStore, SqliteBufferStoreConfig, SqliteDedupeStore, SqliteDedupeStoreConfig,
-    SqliteMultiplexerStore, SqliteMultiplexerStoreConfig, SqliteWatermarkStore,
-    SqliteWatermarkStoreConfig,
-};
+use eventuary_sqlite::dedupe::{SqliteDedupeStore, SqliteDedupeStoreConfig};
+use eventuary_sqlite::multiplexer::{SqliteMultiplexerStore, SqliteMultiplexerStoreConfig};
+use eventuary_sqlite::watermark::{SqliteWatermarkStore, SqliteWatermarkStoreConfig};
 
 fn prepare_test_schema(conn: &SqliteConn) {
     SqliteMultiplexerStore::prepare_schema(conn, &SqliteMultiplexerStoreConfig::default()).unwrap();

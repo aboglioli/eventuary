@@ -44,7 +44,7 @@ Backend implementation types live under their owning backend module:
 ```rust
 use eventuary::postgres::reader::{PgReader, PgSubscription, PgReaderConfig};
 use eventuary::postgres::writer::{PgWriter, PgWriterConfig};
-use eventuary::postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+use eventuary::postgres::checkpoint::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
 use eventuary::postgres::relation::PgRelationName;
 ```
@@ -80,10 +80,7 @@ Layering rules:
 - Backend crates depend on `eventuary-core`, not on the umbrella crate.
 - The umbrella crate contains no original implementation code; it only re-exports
   `eventuary-core` and optional backend crates.
-- Backend implementation types have canonical module paths such as
-  `eventuary::sqlite::reader::SqliteReader`. Some backend crates also expose
-  selected convenience re-exports from their crate root; prefer module paths
-  when showing which role a type plays.
+- Backend crate roots expose role modules only. Import concrete backend implementations through their role module paths (`reader`, `writer`, `checkpoint`, `coordinator`, etc.). This keeps the backend API consistent across memory, SQLite, PostgreSQL, SQS, and Kafka.
 
 ## Core Event Model
 
@@ -399,8 +396,8 @@ Common subscription/config types:
 - `memory::reader::MemorySubscription { limit }`
 - `sqlite::reader::SqliteSubscription { start, stop_at, filter, partitions, batch_size, limit }`
 - `postgres::reader::PgSubscription { start, stop_at, filter, partitions, batch_size, limit }`
-- `sqs::reader_config::SqsReaderConfig`
-- `kafka::reader_config::KafkaReaderConfig`
+- `sqs::reader::SqsReaderConfig`
+- `kafka::reader::KafkaReaderConfig`
 
 `StartFrom<C>` controls where replay begins. SQL subscriptions also support
 `StopAt<C>` so callers can choose live tailing (`StopAt::Never`, the default), a
@@ -471,7 +468,7 @@ use eventuary::io::{ConsumerGroupId, Reader, StreamId};
 use eventuary::io::reader::{
     CheckpointReader, CheckpointScope, CheckpointSubscription,
 };
-use eventuary::sqlite::checkpoint_store::{
+use eventuary::sqlite::checkpoint::{
     SqliteCheckpointStore, SqliteCheckpointStoreConfig,
 };
 use eventuary::sqlite::database::SqliteDatabase;
@@ -529,7 +526,7 @@ use eventuary::io::reader::{
     CheckpointReader, CheckpointScope, CheckpointSubscription, PartitionedCursor,
     PartitionedReader, PartitionedReaderConfig, PartitionedSubscription,
 };
-use eventuary::sqlite::checkpoint_store::{
+use eventuary::sqlite::checkpoint::{
     SqliteCheckpointStore, SqliteCheckpointStoreConfig,
 };
 use eventuary::sqlite::database::SqliteDatabase;
@@ -664,8 +661,8 @@ use std::sync::Arc;
 use eventuary::StartFrom;
 use eventuary::io::{ConsumerGroupId, OwnerId, StreamId};
 use eventuary::io::reader::{CheckpointScope, CoordinatedReaderConfig, CoordinatedSubscription};
-use eventuary::postgres::coordinated_reader::PgCoordinatedReader;
-use eventuary::postgres::partition_coordinator::PgPartitionCoordinator;
+use eventuary::postgres::reader::PgCoordinatedReader;
+use eventuary::postgres::coordinator::PgPartitionCoordinator;
 use eventuary::postgres::reader::{PgReader, PgReaderConfig, PgSubscription};
 
 let source = PgReader::new(pool.clone(), PgReaderConfig::default());
@@ -860,7 +857,7 @@ use std::num::NonZeroUsize;
 
 use eventuary::io::filter::EventFilter;
 use eventuary::io::handler::Multiplexer;
-use eventuary::memory::multiplexer_store::MemoryMultiplexerStore;
+use eventuary::memory::multiplexer::MemoryMultiplexerStore;
 
 let multiplexer = Multiplexer::builder()
     .route("orders-projection", EventFilter::default(), orders_projection)?

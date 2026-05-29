@@ -6,11 +6,11 @@ use eventuary_core::partition::{
 };
 use eventuary_core::{Error, Event, Payload};
 use eventuary_sqlite::database::SqliteDatabase;
-use eventuary_sqlite::relation::SqliteRelationName;
-use eventuary_sqlite::{
+use eventuary_sqlite::partitioning::{
     BackfillReport, SqlitePartitionBackfill, SqlitePartitionBackfillConfig,
-    SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig,
 };
+use eventuary_sqlite::relation::SqliteRelationName;
+use eventuary_sqlite::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
 
 fn event_with_key(key: &str) -> Event {
     Event::builder(

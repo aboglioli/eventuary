@@ -11,6 +11,11 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
+use eventuary_core::io::reader::{
+    CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
+    CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
+    PartitionedCursor,
+};
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{HasPartition, Partition, PartitionGroup, PartitionSelection};
@@ -19,6 +24,7 @@ use eventuary_core::{
     StartableSubscription, StopAt,
 };
 
+use crate::coordinator::PgPartitionCoordinator;
 use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
@@ -349,6 +355,28 @@ impl Reader for PgReader {
         Ok(SpawnedStream::new(rx, handle))
     }
 }
+
+pub type PgPartitionedCursor = PartitionedCursor<PgCursor>;
+pub type PgCoordinatedReaderConfig = CoordinatedReaderConfig;
+pub type PgCoordinatedSubscription = CoordinatedSubscription<PgSubscription, PgCursor>;
+pub type PgCoordinatedReader = CoordinatedReader<PgReader, PgPartitionCoordinator>;
+/// Standalone `PartitionLease`-fenced acker over the raw `PgCursor`. This
+/// alias matches the simple shape used by code paths that wire a coordinator
+/// outside of `CoordinatedReader::read`. The stream-emitted acker after the
+/// shared-fetch rewrite is [`PgCoordinatedStreamAcker`].
+pub type PgCoordinatedAcker = CoordinatedAcker<PgCursorAcker, PgCursor, PgPartitionCoordinator>;
+/// Acker carried on every message emitted by [`PgCoordinatedReader`].
+pub type PgCoordinatedStreamAcker = CoordinatedAcker<
+    PartitionAcker<PgCursorAcker, PgCursor>,
+    PartitionedCursor<PgCursor>,
+    PartitionedCoordAdapter<PgPartitionCoordinator, PgCursor>,
+>;
+pub type PgCoordinatedCursor = CoordinatedCursor<PartitionedCursor<PgCursor>>;
+pub type PgCoordinatedStream = CoordinatedStream<
+    PartitionAcker<PgCursorAcker, PgCursor>,
+    PartitionedCursor<PgCursor>,
+    PartitionedCoordAdapter<PgPartitionCoordinator, PgCursor>,
+>;
 
 async fn resolve_initial_position(
     pool: &PgPool,

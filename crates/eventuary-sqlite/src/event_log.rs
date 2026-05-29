@@ -48,8 +48,8 @@ const EVENT_LOG_MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 #[derive(Debug, Clone)]
-pub struct SqliteEventLogSchemaConfig {
-    pub events_relation: SqliteRelationName,
+pub(crate) struct SqliteEventLogSchemaConfig {
+    pub(crate) events_relation: SqliteRelationName,
 }
 
 impl Default for SqliteEventLogSchemaConfig {
@@ -60,14 +60,14 @@ impl Default for SqliteEventLogSchemaConfig {
     }
 }
 
-pub struct SqliteEventLogSchema;
+pub(crate) struct SqliteEventLogSchema;
 
 impl SqliteEventLogSchema {
-    pub fn schema_sql(config: &SqliteEventLogSchemaConfig) -> String {
+    pub(crate) fn schema_sql(config: &SqliteEventLogSchemaConfig) -> String {
         crate::schema::render_schema_sql(EVENT_LOG_MIGRATIONS, &replacements(config))
     }
 
-    pub fn prepare(conn: &Connection, config: &SqliteEventLogSchemaConfig) -> Result<()> {
+    pub(crate) fn prepare(conn: &Connection, config: &SqliteEventLogSchemaConfig) -> Result<()> {
         crate::schema::apply_schema(conn, EVENT_LOG_MIGRATIONS, &replacements(config))
     }
 }
