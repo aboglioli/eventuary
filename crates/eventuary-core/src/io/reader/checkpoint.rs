@@ -25,6 +25,10 @@ use futures::StreamExt;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
+use std::num::NonZeroUsize;
+use std::time::Duration;
+use tokio::time::Instant;
+
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
 use crate::io::acker::NackContext;
@@ -92,15 +96,53 @@ pub enum InvalidCursorPolicy {
     Error,
 }
 
+/// Buffering policy for per‑CursorId checkpoint flushes.
+///
+/// `CheckpointReader` collapses repeated `store.commit(...)` calls per
+/// `CursorId` into a single flush, controlled by either a count or a time
+/// threshold. The default policy (`max_pending_acks = 1`,
+/// `max_pending_interval = ZERO`) flushes on every ack, matching the
+/// historical behavior.
+///
+/// Events acked between flushes will be redelivered on crash. Handlers
+/// must already be idempotent for redelivery.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointFlushPolicy {
+    pub max_pending_acks: NonZeroUsize,
+    pub max_pending_interval: Duration,
+}
+
+impl Default for CheckpointFlushPolicy {
+    fn default() -> Self {
+        Self {
+            max_pending_acks: NonZeroUsize::new(1).unwrap(),
+            max_pending_interval: Duration::ZERO,
+        }
+    }
+}
+
+/// Per‑CursorId flush entry tracking the highest advanced cursor,
+/// the number of un-flushed acks since the last flush, and the
+/// timestamp of the first un-flushed ack.
+struct PendingFlush<C> {
+    cursor: C,
+    count: usize,
+    first_pending_at: Instant,
+}
+
+type PendingFlushes<C> = Arc<Mutex<HashMap<CursorId, PendingFlush<C>>>>;
+
 #[derive(Debug, Clone)]
 pub struct CheckpointReaderConfig {
     pub max_pending_per_key: usize,
+    pub flush_policy: CheckpointFlushPolicy,
 }
 
 impl Default for CheckpointReaderConfig {
     fn default() -> Self {
         Self {
             max_pending_per_key: 1024,
+            flush_policy: CheckpointFlushPolicy::default(),
         }
     }
 }
@@ -587,6 +629,7 @@ mod tests {
             store,
             CheckpointReaderConfig {
                 max_pending_per_key: 2,
+                ..Default::default()
             },
         );
         let scope = CheckpointScope::new(
