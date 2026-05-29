@@ -7,7 +7,7 @@ Eventuary started life as `orchy-events` inside the [orchy](https://github.com/a
 project and was extracted as a standalone library so other Rust projects can
 reuse the same event-sourcing primitives and reader/writer abstractions.
 
-> **Status:** Stable (`0.1.0`).
+> **Status:** Stable (`0.2.0`).
 
 ## What Eventuary Provides
 
@@ -35,7 +35,7 @@ The top-level `eventuary` crate is an **umbrella facade**: it re-exports
 feature flag. Typical consumers add a single line to their `Cargo.toml`:
 
 ```toml
-eventuary = { version = "0.1.0", features = ["postgres"] }
+eventuary = { version = "0.2.0", features = ["postgres"] }
 ```
 
 …and import `eventuary::Event`, `eventuary::postgres::reader::PgReader`, etc.
@@ -1212,7 +1212,7 @@ to [trusted publishing] is a future improvement.
 # 1. Bump workspace.package.version in the root Cargo.toml
 # 2. Commit + push (maintainer)
 # 3. Create and publish a GitHub Release targeting main.
-#    Use tag v0.1.0 and title v0.1.0.
+#    Use tag v0.2.0 and title v0.2.0.
 # 4. Publish workflow runs automatically from the release event.
 ```
 
