@@ -14,7 +14,7 @@ use eventuary_core::io::reader::{
 use eventuary_core::io::{CursorId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt};
-use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
+use eventuary_sqlite::checkpoint::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
 use eventuary_sqlite::reader::{
     SqliteCursor, SqliteReader, SqliteReaderConfig, SqliteSubscription,

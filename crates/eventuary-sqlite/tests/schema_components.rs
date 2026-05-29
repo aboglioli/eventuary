@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use eventuary_sqlite::checkpoint_store::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
+use eventuary_sqlite::checkpoint::{SqliteCheckpointStore, SqliteCheckpointStoreConfig};
 use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
-use eventuary_sqlite::dedupe_store::{SqliteDedupeStore, SqliteDedupeStoreConfig};
+use eventuary_sqlite::dedupe::{SqliteDedupeStore, SqliteDedupeStoreConfig};
 use eventuary_sqlite::reader::SqliteCursor;
 use eventuary_sqlite::writer::{SqliteWriter, SqliteWriterConfig};
 

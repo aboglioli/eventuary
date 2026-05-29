@@ -10,15 +10,15 @@ use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, Payload, StartFrom};
-use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
-use eventuary_sqlite::partition_coordinator::{
+use eventuary_sqlite::coordinator::{
     SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig,
 };
-use eventuary_sqlite::reader::{SqliteReader, SqliteReaderConfig, SqliteSubscription};
-use eventuary_sqlite::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
-use eventuary_sqlite::{
+use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
+use eventuary_sqlite::reader::{
     SqliteCoordinatedReader, SqliteCoordinatedReaderConfig, SqliteCoordinatedSubscription,
+    SqliteReader, SqliteReaderConfig, SqliteSubscription,
 };
+use eventuary_sqlite::writer::{SqlitePartitioningConfig, SqliteWriter, SqliteWriterConfig};
 
 fn prepare_test_schema(conn: &SqliteConn) {
     SqliteWriter::prepare_schema(conn, &SqliteWriterConfig::default()).unwrap();

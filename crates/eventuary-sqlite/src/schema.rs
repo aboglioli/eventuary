@@ -5,18 +5,18 @@ use eventuary_core::{Error, Result};
 use crate::relation::SqliteRelationName;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Migration {
-    pub name: &'static str,
-    pub sql: &'static str,
+pub(crate) struct Migration {
+    pub(crate) name: &'static str,
+    pub(crate) sql: &'static str,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct RelationReplacement<'a> {
-    pub token: &'static str,
-    pub relation: &'a SqliteRelationName,
+pub(crate) struct RelationReplacement<'a> {
+    pub(crate) token: &'static str,
+    pub(crate) relation: &'a SqliteRelationName,
 }
 
-pub fn render_migration_sql(
+pub(crate) fn render_migration_sql(
     migration: &Migration,
     replacements: &[RelationReplacement<'_>],
 ) -> String {
@@ -27,7 +27,7 @@ pub fn render_migration_sql(
     sql
 }
 
-pub fn render_schema_sql(
+pub(crate) fn render_schema_sql(
     migrations: &[Migration],
     replacements: &[RelationReplacement<'_>],
 ) -> String {
@@ -41,7 +41,7 @@ pub fn render_schema_sql(
     sql
 }
 
-pub fn apply_schema(
+pub(crate) fn apply_schema(
     conn: &Connection,
     migrations: &[Migration],
     replacements: &[RelationReplacement<'_>],

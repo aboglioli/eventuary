@@ -11,6 +11,11 @@ use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
 use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
+use eventuary_core::io::reader::{
+    CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
+    CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
+    PartitionedCursor,
+};
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
 use eventuary_core::partition::{HasPartition, Partition, PartitionGroup, PartitionSelection};
@@ -18,6 +23,8 @@ use eventuary_core::{
     Error, PartitionableSubscription, Result, SerializedEvent, SerializedPayload, StartFrom,
     StartableSubscription, StopAt,
 };
+
+use crate::coordinator::SqlitePartitionCoordinator;
 
 use crate::database::SqliteConn;
 use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
@@ -697,6 +704,45 @@ async fn fetch_batch(
     .await
     .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
 }
+
+/// SQLite coordinated reader: thin alias over the generic core type.
+///
+/// Why these aliases live here:
+///
+/// `CoordinatedReader<R, Coord>` is fully generic in `eventuary-core` — it
+/// composes any partition-aware `Reader<R>` with any `PartitionCoordinator<C>`
+/// and contains no SQLite-specific code. Every backend therefore only needs
+/// `pub type` aliases to specialize the generic with its own reader and
+/// coordinator (`SqliteReader` + `SqlitePartitionCoordinator`). The same
+/// module path shape is preserved across backends so users learn one structure
+/// once.
+///
+/// These aliases shorten call sites — `SqliteCoordinatedReader` reads better
+/// than `CoordinatedReader<SqliteReader, SqlitePartitionCoordinator>` — and
+/// give the umbrella a canonical, discoverable path next to `writer` and
+/// `coordinator` modules.
+pub type SqlitePartitionedCursor = PartitionedCursor<SqliteCursor>;
+pub type SqliteCoordinatedReaderConfig = CoordinatedReaderConfig;
+pub type SqliteCoordinatedSubscription = CoordinatedSubscription<SqliteSubscription, SqliteCursor>;
+pub type SqliteCoordinatedReader = CoordinatedReader<SqliteReader, SqlitePartitionCoordinator>;
+/// Standalone `PartitionLease`-fenced acker over the raw `SqliteCursor`.
+/// This alias matches the simple shape used by code paths that wire a
+/// coordinator outside of `CoordinatedReader::read`. The stream-emitted
+/// acker after the shared-fetch rewrite is [`SqliteCoordinatedStreamAcker`].
+pub type SqliteCoordinatedAcker =
+    CoordinatedAcker<SqliteCursorAcker, SqliteCursor, SqlitePartitionCoordinator>;
+/// Acker carried on every message emitted by [`SqliteCoordinatedReader`].
+pub type SqliteCoordinatedStreamAcker = CoordinatedAcker<
+    PartitionAcker<SqliteCursorAcker, SqliteCursor>,
+    PartitionedCursor<SqliteCursor>,
+    PartitionedCoordAdapter<SqlitePartitionCoordinator, SqliteCursor>,
+>;
+pub type SqliteCoordinatedCursor = CoordinatedCursor<PartitionedCursor<SqliteCursor>>;
+pub type SqliteCoordinatedStream = CoordinatedStream<
+    PartitionAcker<SqliteCursorAcker, SqliteCursor>,
+    PartitionedCursor<SqliteCursor>,
+    PartitionedCoordAdapter<SqlitePartitionCoordinator, SqliteCursor>,
+>;
 
 #[cfg(test)]
 mod tests {
