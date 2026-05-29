@@ -511,11 +511,10 @@ leaves the checkpoint untouched.
 
 Default partitioning hashes `Event::key()` with FNV-1a. Because `key` is required, all default reader and writer partitioning paths are deterministic by stream/entity identity. Use custom `PartitionKeyResolver` implementations when partitioning by organization, topic, namespace, metadata, or a composite key.
 
-`PartitionedReader` is an in-process lane scheduler over any reader. It routes
-events into logical lanes using `PartitionRouteStrategy<P>`: the default
-`EventCompatibility` strategy hashes `Event::key()` with FNV-1a; the
-`ResolverHasher` strategy plugs in a custom `PartitionKeyResolver<P>` +
-`PartitionHasher`.
+`PartitionedReader` is an in-process lane scheduler over any reader. By default,
+it routes events by resolving `event.key()` with `EventKeyPartitionKeyResolver`
+and hashing with `Fnv1a64PartitionHasher`. Customize routing through
+`PartitionedReaderConfig::with_router(resolver, hasher)`.
 
 Use source mode for source-cursor readers such as PostgreSQL and SQLite:
 
@@ -595,6 +594,28 @@ SQL partitioned and coordinated readers filter on persisted `partition_count`
 and `partition_id` columns. The default SQL writers leave those columns `NULL`,
 so coordinated readers only see events written with inline partitioning enabled
 or rows that have been backfilled.
+
+Enable inline partitioning when the rows will be consumed by
+`CoordinatedReader` or by `PartitionedReader::source_from_cursor`.
+
+Raw SQL readers can read rows whose partition columns are `NULL` when
+`PartitionSelection::All` is used. Those rows receive a synthetic cursor
+partition `(id = 0, count = 1)` so default writer/default reader flows keep
+working without partitioning.
+
+Partition-filtered reads (`PartitionSelection::One` / `Many`),
+`PartitionedReader::source_from_cursor`, and `CoordinatedReader` require real
+partition columns. Use inline writer partitioning or run the backend partition
+backfill before using those flows.
+
+> **Footgun:** Switching from a default writer (`NULL` partition columns) to
+> inline partitioning over an existing event log without running
+> `PgPartitionBackfill` / `SqlitePartitionBackfill` produces a mixed log where
+> raw `PartitionSelection::All` reads split checkpoint state between the
+> synthetic `(0, 1)` cursor and real `(id, count)` cursors. `CheckpointReader`
+> tracks progress per cursor id, so the two lanes resume independently and can
+> redeliver or skip events at the cutover. Always backfill before enabling
+> inline partitioning on a non-empty log.
 
 PostgreSQL example:
 
