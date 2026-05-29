@@ -743,25 +743,6 @@ pub type SqliteCoordinatedStream = CoordinatedStream<
     PartitionedCoordAdapter<SqlitePartitionCoordinator, SqliteCursor>,
 >;
 
-fn decode_partition(partition_id: Option<i64>, partition_count: Option<i64>) -> Result<Partition> {
-    match (partition_id, partition_count) {
-        (Some(pid), Some(pcount)) => {
-            let id = u32::try_from(pid)
-                .map_err(|_| Error::Store(format!("partition_id {pid} exceeds u32::MAX")))?;
-            let count = u32::try_from(pcount)
-                .map_err(|_| Error::Store(format!("partition_count {pcount} exceeds u32::MAX")))?;
-            let count = NonZeroU32::new(count)
-                .ok_or_else(|| Error::Store("partition_count must be positive".to_owned()))?;
-            Partition::new(id, count).map_err(|e| Error::Store(format!("invalid partition: {e}")))
-        }
-        (None, None) => Ok(Partition::new(0, NonZeroU32::new(1).unwrap())
-            .expect("synthetic single partition is valid")),
-        _ => Err(Error::Store(
-            "event has incomplete partition columns — run partition backfill first".to_owned(),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
