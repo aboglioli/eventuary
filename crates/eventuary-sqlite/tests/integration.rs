@@ -7,10 +7,12 @@ use tokio::time::timeout;
 
 use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::{Reader, Writer};
-use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
+use eventuary_core::partition::{
+    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionSelection,
+};
 use eventuary_core::{
-    Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt, Topic,
-    TopicPattern,
+    Event, EventId, Namespace, NamespacePattern, OrganizationId, Partition, Payload, StartFrom,
+    StopAt, Topic, TopicPattern,
 };
 use eventuary_sqlite::database::SqliteDatabase;
 use eventuary_sqlite::reader::{SqliteReader, SqliteReaderConfig, SqliteSubscription};
@@ -486,4 +488,109 @@ async fn stop_at_never_waits_for_future_events() {
         .unwrap()
         .unwrap();
     assert_eq!(msg.event().key().as_str(), "future");
+}
+
+#[tokio::test]
+async fn default_writer_rows_are_readable_by_default_reader() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
+
+    let writer = SqliteWriter::new(db.conn());
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "default-writer-row"))
+        .await
+        .unwrap();
+
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut stream = reader
+        .read(SqliteSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            ..SqliteSubscription::default()
+        })
+        .await
+        .unwrap();
+
+    let msg = stream.next().await.unwrap().unwrap();
+    assert_eq!(msg.event().key().as_str(), "default-writer-row");
+    assert_eq!(msg.cursor().partition().id(), 0);
+    assert_eq!(msg.cursor().partition().count(), 1);
+    msg.ack().await.unwrap();
+
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn one_partition_reader_ignores_unpartitioned_rows() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
+
+    let unpartitioned_writer = SqliteWriter::new(db.conn());
+    unpartitioned_writer
+        .write(&ev("acme", "/x", "thing.happened", "unpartitioned-row"))
+        .await
+        .unwrap();
+
+    let partitioned_writer = SqliteWriter::new_with_config(db.conn(), writer_config());
+    partitioned_writer
+        .write(&ev("acme", "/x", "thing.happened", "partitioned-row"))
+        .await
+        .unwrap();
+
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut stream = reader
+        .read(SqliteSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            partitions: PartitionSelection::One(
+                Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap(),
+            ),
+            ..SqliteSubscription::default()
+        })
+        .await
+        .unwrap();
+
+    while let Some(item) = stream.next().await {
+        let msg = item.unwrap();
+        assert_ne!(msg.event().key().as_str(), "unpartitioned-row");
+        msg.ack().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn many_partition_reader_ignores_unpartitioned_rows() {
+    let db = SqliteDatabase::open_in_memory().unwrap();
+    SqliteWriter::prepare_schema(&db.conn(), &SqliteWriterConfig::default()).unwrap();
+
+    let unpartitioned_writer = SqliteWriter::new(db.conn());
+    unpartitioned_writer
+        .write(&ev("acme", "/x", "thing.happened", "unpartitioned-row"))
+        .await
+        .unwrap();
+
+    let partitioned_writer = SqliteWriter::new_with_config(db.conn(), writer_config());
+    partitioned_writer
+        .write(&ev("acme", "/x", "thing.happened", "partitioned-row"))
+        .await
+        .unwrap();
+
+    let partition = Partition::new(0, NonZeroU32::new(4).unwrap()).unwrap();
+    let reader = SqliteReader::new(db.conn(), fast_config());
+    let mut stream = reader
+        .read(SqliteSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            partitions: PartitionSelection::Many(
+                eventuary_core::partition::PartitionGroup::singleton(partition),
+            ),
+            ..SqliteSubscription::default()
+        })
+        .await
+        .unwrap();
+
+    while let Some(item) = stream.next().await {
+        let msg = item.unwrap();
+        assert_ne!(msg.event().key().as_str(), "unpartitioned-row");
+        msg.ack().await.unwrap();
+    }
 }
