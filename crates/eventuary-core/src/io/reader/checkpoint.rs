@@ -7,9 +7,16 @@
 //! impl picks the smallest `After(c)`; wrappers like `PartitionedReader`
 //! filter by compatibility first. Records each delivered cursor
 //! in contiguous delivered order per `CursorId`. On downstream `ack`,
-//! calls the inner ack first, then commits the cursor to the store
-//! **synchronously** — store commit errors propagate to the caller and
-//! to consumers of the stream.
+//! calls the inner ack first, then buffers the cursor progress and
+//! commits to the store according to the configured
+//! [`CheckpointFlushPolicy`] (immediate flush by default). Store commit
+//! errors propagate to the caller and to consumers of the stream.
+//!
+//! When `max_pending_interval > 0`, a background timer task flushes
+//! expired entries even if no further acks arrive. The returned
+//! [`CheckpointStream`] also exposes [`CheckpointStream::flush`] for
+//! explicit on-demand drain, which graceful-shutdown paths should call
+//! before dropping the stream.
 //!
 //! The checkpoint store persists the same cursor type the inner reader
 //! emits. `CheckpointReader` uses `Cursor::id()` only to build the
@@ -18,18 +25,25 @@
 //! persisted value is `PartitionedCursor<R::Cursor>`.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::future::Future;
+use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
+use futures::Stream;
 use futures::StreamExt;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::error::{Error, Result};
 use crate::io::ConsumerGroupId;
 use crate::io::acker::NackContext;
 use crate::io::position::{StartFrom, StartableSubscription};
-use crate::io::stream::SpawnedStream;
 use crate::io::stream_id::StreamId;
 use crate::io::{Acker, Cursor, CursorId, Message, Reader};
 
@@ -92,15 +106,41 @@ pub enum InvalidCursorPolicy {
     Error,
 }
 
-#[derive(Debug, Clone)]
+/// Buffering policy for per-CursorId checkpoint flushes.
+///
+/// `CheckpointReader` collapses repeated `store.commit(...)` calls per
+/// `CursorId` into a single flush, controlled by either a count or a time
+/// threshold. The default policy (`max_pending_acks = 1`,
+/// `max_pending_interval = ZERO`) flushes on every ack, matching the
+/// historical behavior.
+///
+/// Events acked between flushes will be redelivered on crash. Handlers
+/// must already be idempotent for redelivery.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointFlushPolicy {
+    pub max_pending_acks: NonZeroUsize,
+    pub max_pending_interval: Duration,
+}
+
+impl Default for CheckpointFlushPolicy {
+    fn default() -> Self {
+        Self {
+            max_pending_acks: NonZeroUsize::new(1).unwrap(),
+            max_pending_interval: Duration::ZERO,
+        }
+    }
+}
+
 pub struct CheckpointReaderConfig {
     pub max_pending_per_key: usize,
+    pub flush_policy: CheckpointFlushPolicy,
 }
 
 impl Default for CheckpointReaderConfig {
     fn default() -> Self {
         Self {
             max_pending_per_key: 1024,
+            flush_policy: CheckpointFlushPolicy::default(),
         }
     }
 }
@@ -134,23 +174,29 @@ impl<S> CheckpointSubscription<S> {
     }
 }
 
-use std::collections::VecDeque;
-
 struct Pending<C> {
     cursor: C,
     completed: bool,
 }
 
-struct PendingState<C> {
+/// Per-`CursorId` state combining contiguous-ack tracking and flush
+/// accounting under a single lock.
+struct PerCursorState<C> {
     queue: VecDeque<Pending<C>>,
     offset: usize,
+    pending_cursor: Option<C>,
+    pending_count: usize,
+    first_pending_at: Option<Instant>,
 }
 
-impl<C: Clone> PendingState<C> {
+impl<C: Clone> PerCursorState<C> {
     fn new() -> Self {
         Self {
             queue: VecDeque::new(),
             offset: 0,
+            pending_cursor: None,
+            pending_count: 0,
+            first_pending_at: None,
         }
     }
 
@@ -174,20 +220,94 @@ impl<C: Clone> PendingState<C> {
         latest
     }
 
-    fn pending_count(&self) -> usize {
+    fn pending_queue_count(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Advance the buffered flush cursor and return it if a flush
+    /// threshold has been crossed. Caller should commit the returned
+    /// cursor outside the lock.
+    fn advance_and_check_flush(
+        &mut self,
+        cursor: C,
+        policy: &CheckpointFlushPolicy,
+        now: Instant,
+    ) -> Option<C> {
+        if self.first_pending_at.is_none() {
+            self.first_pending_at = Some(now);
+        }
+        self.pending_cursor = Some(cursor);
+        self.pending_count += 1;
+
+        let count_hit = self.pending_count >= policy.max_pending_acks.get();
+        let interval_hit = !policy.max_pending_interval.is_zero()
+            && self
+                .first_pending_at
+                .map(|t| now.duration_since(t) >= policy.max_pending_interval)
+                .unwrap_or(false);
+
+        if count_hit || interval_hit {
+            self.take_pending()
+        } else {
+            None
+        }
+    }
+
+    /// Take the buffered flush cursor and reset flush accounting.
+    fn take_pending(&mut self) -> Option<C> {
+        self.pending_count = 0;
+        self.first_pending_at = None;
+        self.pending_cursor.take()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty() && self.pending_cursor.is_none()
+    }
+
+    fn flush_deadline(&self, policy: &CheckpointFlushPolicy) -> Option<Instant> {
+        if policy.max_pending_interval.is_zero() {
+            return None;
+        }
+        self.first_pending_at
+            .map(|t| t + policy.max_pending_interval)
     }
 }
 
-type PendingMap<C> = Arc<Mutex<HashMap<CursorId, PendingState<C>>>>;
+type StateMap<C> = Arc<Mutex<HashMap<CursorId, PerCursorState<C>>>>;
+
+/// Notifies the background flush timer that pending state changed
+/// (new entry, threshold crossing, drop). Atomic flag avoids busy-wait
+/// when the timer is parked between deadlines.
+#[derive(Clone)]
+struct FlushSignal {
+    notify: Arc<Notify>,
+}
+
+impl FlushSignal {
+    fn new() -> Self {
+        Self {
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn wake(&self) {
+        self.notify.notify_one();
+    }
+
+    async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
 
 pub struct CheckpointAcker<A: Acker, C, S: CheckpointStore<C>> {
     inner: A,
     scope: CheckpointScope,
     cursor_id: CursorId,
     index: usize,
-    state: PendingMap<C>,
+    state: StateMap<C>,
     store: S,
+    flush_policy: CheckpointFlushPolicy,
+    flush_signal: FlushSignal,
 }
 
 impl<A, C, S> Acker for CheckpointAcker<A, C, S>
@@ -198,18 +318,25 @@ where
 {
     async fn ack(&self) -> Result<()> {
         self.inner.ack().await?;
-        let advanced = {
+        let to_commit = {
             let mut state = self.state.lock().await;
             let entry = state
                 .entry(self.cursor_id.clone())
-                .or_insert_with(PendingState::new);
-            let cursor = entry.complete(self.index);
-            if entry.pending_count() == 0 {
+                .or_insert_with(PerCursorState::new);
+            let advanced = entry.complete(self.index);
+            let commit = match advanced {
+                Some(cursor) => {
+                    entry.advance_and_check_flush(cursor, &self.flush_policy, Instant::now())
+                }
+                None => None,
+            };
+            if entry.is_empty() {
                 state.remove(&self.cursor_id);
             }
-            cursor
+            commit
         };
-        if let Some(cursor) = advanced {
+        self.flush_signal.wake();
+        if let Some(cursor) = to_commit {
             let key = CheckpointKey {
                 scope: self.scope.clone(),
                 cursor_id: self.cursor_id.clone(),
@@ -228,8 +355,175 @@ where
     }
 }
 
-pub type CheckpointStream<A, C, S, P = crate::payload::Payload> =
-    SpawnedStream<CheckpointAcker<A, C, S>, C, P>;
+type CheckpointStreamRx<A, C, S, P> =
+    mpsc::Receiver<Result<Message<CheckpointAcker<A, C, S>, C, P>>>;
+
+/// Stream returned by [`CheckpointReader::read`]. Delegates [`Stream`]
+/// to an internal mpsc receiver and exposes [`flush`](Self::flush) for
+/// on-demand drain of buffered checkpoints.
+pub struct CheckpointStream<A, C, S, P = crate::payload::Payload>
+where
+    A: Acker + Send + Sync + 'static,
+    C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
+    P: Send + Sync + 'static,
+{
+    rx: CheckpointStreamRx<A, C, S, P>,
+    controller: Arc<FlushController<C, S>>,
+    producer: Option<tokio::task::JoinHandle<()>>,
+    timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl<A, C, S, P> CheckpointStream<A, C, S, P>
+where
+    A: Acker + Send + Sync + 'static,
+    C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
+    P: Send + Sync + 'static,
+{
+    /// Commits all buffered checkpoints synchronously. Use on graceful
+    /// shutdown before dropping the stream. Errors from the store
+    /// surface as `Error::Store`.
+    pub async fn flush(&self) -> Result<()> {
+        self.controller.flush().await
+    }
+}
+
+impl<A, C, S, P> Stream for CheckpointStream<A, C, S, P>
+where
+    A: Acker + Send + Sync + 'static,
+    C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
+    P: Send + Sync + 'static,
+{
+    type Item = Result<Message<CheckpointAcker<A, C, S>, C, P>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+impl<A, C, S, P> Drop for CheckpointStream<A, C, S, P>
+where
+    A: Acker + Send + Sync + 'static,
+    C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
+    P: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        // Close receiver so producer notices via tx.closed() and drains.
+        self.rx.close();
+        // Wake timer so it observes shutdown signal and exits.
+        self.controller.shutdown();
+        // Detach handles; tasks self-terminate via signals above.
+        drop(self.producer.take());
+        drop(self.timer.take());
+    }
+}
+
+/// Shared flush state visible to acker, producer loop, timer task, and
+/// the public `flush()` API. Holds the per-`CursorId` state map, scope,
+/// store handle, and shutdown signal.
+struct FlushController<C, S: CheckpointStore<C>> {
+    scope: CheckpointScope,
+    state: StateMap<C>,
+    store: S,
+    flush_policy: CheckpointFlushPolicy,
+    flush_signal: FlushSignal,
+    shutdown: Arc<tokio::sync::Notify>,
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<C, S> FlushController<C, S>
+where
+    C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
+{
+    fn shutdown(&self) {
+        self.shutdown_flag
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.shutdown.notify_waiters();
+        self.flush_signal.wake();
+    }
+
+    fn is_shutting_down(&self) -> bool {
+        self.shutdown_flag
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Drain all pending flush cursors and commit them. Aggregates the
+    /// first store error and continues so all cursors are attempted.
+    async fn flush(&self) -> Result<()> {
+        let drained: Vec<(CursorId, C)> = {
+            let mut state = self.state.lock().await;
+            let mut out = Vec::new();
+            let mut empty_ids = Vec::new();
+            for (id, entry) in state.iter_mut() {
+                if let Some(cursor) = entry.take_pending() {
+                    out.push((id.clone(), cursor));
+                }
+                if entry.is_empty() {
+                    empty_ids.push(id.clone());
+                }
+            }
+            for id in empty_ids {
+                state.remove(&id);
+            }
+            out
+        };
+        let mut first_err: Option<Error> = None;
+        for (cursor_id, cursor) in drained {
+            let key = CheckpointKey {
+                scope: self.scope.clone(),
+                cursor_id: cursor_id.clone(),
+            };
+            if let Err(e) = self.store.commit(&key, cursor).await
+                && first_err.is_none()
+            {
+                tracing::warn!("checkpoint reader: explicit flush failed for {cursor_id:?}: {e}");
+                first_err = Some(e);
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Best-effort drain used on producer-task exit (stream end or
+    /// consumer drop). Only commits already-buffered flushes; does not
+    /// clear in-flight queue entries because outstanding acks from the
+    /// consumer side still need to advance them. Errors are logged but
+    /// not propagated since no caller is awaiting a result.
+    async fn drain_best_effort(&self, source: &'static str) {
+        let drained: Vec<(CursorId, C)> = {
+            let mut state = self.state.lock().await;
+            let mut out = Vec::new();
+            let mut empty_ids = Vec::new();
+            for (id, entry) in state.iter_mut() {
+                if let Some(cursor) = entry.take_pending() {
+                    out.push((id.clone(), cursor));
+                }
+                if entry.is_empty() {
+                    empty_ids.push(id.clone());
+                }
+            }
+            for id in empty_ids {
+                state.remove(&id);
+            }
+            out
+        };
+        for (cursor_id, cursor) in drained {
+            let key = CheckpointKey {
+                scope: self.scope.clone(),
+                cursor_id: cursor_id.clone(),
+            };
+            if let Err(e) = self.store.commit(&key, cursor).await {
+                tracing::warn!("checkpoint reader: {source} drain failed for {cursor_id:?}: {e}");
+            }
+        }
+    }
+}
 
 /// Wraps a `Reader` with durable consumer progress backed by a
 /// `CheckpointStore`.
@@ -327,30 +621,59 @@ where
             }
             Err(e) => return Err(e),
         };
-        let state: PendingMap<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
+
+        let state: StateMap<R::Cursor> = Arc::new(Mutex::new(HashMap::new()));
         let max_pending = self.config.max_pending_per_key;
+        let flush_policy = self.config.flush_policy;
+        let flush_signal = FlushSignal::new();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let controller = Arc::new(FlushController {
+            scope: scope.clone(),
+            state: Arc::clone(&state),
+            store: store.clone(),
+            flush_policy,
+            flush_signal: flush_signal.clone(),
+            shutdown: Arc::clone(&shutdown),
+            shutdown_flag: Arc::clone(&shutdown_flag),
+        });
+
         let (tx, rx) = mpsc::channel::<
             Result<Message<CheckpointAcker<R::Acker, R::Cursor, S>, R::Cursor, P>>,
         >(64);
         let known = Arc::new(known);
 
-        let state_for_stream = Arc::clone(&state);
-        let scope_for_stream = scope.clone();
-        let known_for_stream = Arc::clone(&known);
-        let store_for_stream = store.clone();
-        let handle = tokio::spawn(async move {
+        // Cancel-safe producer loop. Selects between inner-stream items
+        // and tx.closed() so consumer drop terminates the task even if
+        // the inner reader is blocked in next().
+        let producer_controller = Arc::clone(&controller);
+        let producer_state = Arc::clone(&state);
+        let producer_scope = scope.clone();
+        let producer_known = Arc::clone(&known);
+        let producer_signal = flush_signal.clone();
+        let producer_tx = tx.clone();
+        let producer = tokio::spawn(async move {
             let mut inner_stream = Box::pin(inner_stream);
-            while let Some(item) = inner_stream.next().await {
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    _ = producer_tx.closed() => break,
+                    item = inner_stream.next() => item,
+                };
+                let Some(item) = item else { break };
                 let msg = match item {
                     Ok(m) => m,
                     Err(e) => {
-                        let _ = tx.send(Err(e)).await;
+                        if producer_tx.send(Err(e)).await.is_err() {
+                            break;
+                        }
                         continue;
                     }
                 };
                 let cursor_id: CursorId = msg.cursor().id();
                 let cursor = msg.cursor().clone();
-                if let Some(stored_cursor) = known_for_stream.get(&cursor_id)
+                if let Some(stored_cursor) = producer_known.get(&cursor_id)
                     && cursor <= *stored_cursor
                 {
                     let _ = msg.ack().await;
@@ -358,40 +681,141 @@ where
                 }
                 let (event, inner_acker, _cursor) = msg.into_parts();
                 let index = {
-                    let mut state_guard = state_for_stream.lock().await;
+                    let mut state_guard = producer_state.lock().await;
                     let pending_now = state_guard
                         .get(&cursor_id)
-                        .map(|s| s.pending_count())
+                        .map(|s| s.pending_queue_count())
                         .unwrap_or(0);
                     if pending_now >= max_pending {
-                        let _ = tx
+                        let _ = producer_tx
                             .send(Err(Error::Store(format!(
                                 "checkpoint reader: max_pending_per_key ({max_pending}) reached for cursor id {cursor_id:?}"
                             ))))
                             .await;
-                        return;
+                        break;
                     }
                     let entry = state_guard
                         .entry(cursor_id.clone())
-                        .or_insert_with(PendingState::new);
+                        .or_insert_with(PerCursorState::new);
                     entry.record(cursor.clone())
                 };
                 let acker: CheckpointAcker<R::Acker, R::Cursor, S> = CheckpointAcker {
                     inner: inner_acker,
-                    scope: scope_for_stream.clone(),
+                    scope: producer_scope.clone(),
                     cursor_id: cursor_id.clone(),
                     index,
-                    state: Arc::clone(&state_for_stream),
-                    store: store_for_stream.clone(),
+                    state: Arc::clone(&producer_state),
+                    store: store.clone(),
+                    flush_policy,
+                    flush_signal: producer_signal.clone(),
                 };
                 let out = Message::new(event, acker, cursor);
-                if tx.send(Ok(out)).await.is_err() {
-                    return;
+                if producer_tx.send(Ok(out)).await.is_err() {
+                    break;
+                }
+            }
+            producer_controller.drain_best_effort("producer exit").await;
+        });
+
+        // Background flush timer. Wakes on flush_signal (any ack /
+        // shutdown), recomputes earliest deadline across the state
+        // map, parks until that deadline or another wakeup, then
+        // flushes expired entries.
+        let timer_controller = Arc::clone(&controller);
+        let timer = tokio::spawn(async move {
+            if timer_controller.flush_policy.max_pending_interval.is_zero() {
+                // Pure count-based policy — no timer needed.
+                timer_controller.shutdown.notified().await;
+                return;
+            }
+            loop {
+                if timer_controller.is_shutting_down() {
+                    break;
+                }
+                let next_deadline = {
+                    let state = timer_controller.state.lock().await;
+                    let mut earliest: Option<Instant> = None;
+                    for entry in state.values() {
+                        if let Some(deadline) = entry.flush_deadline(&timer_controller.flush_policy)
+                            && earliest.map(|e| deadline < e).unwrap_or(true)
+                        {
+                            earliest = Some(deadline);
+                        }
+                    }
+                    earliest
+                };
+                match next_deadline {
+                    None => {
+                        tokio::select! {
+                            biased;
+                            _ = timer_controller.shutdown.notified() => break,
+                            _ = timer_controller.flush_signal.wait() => {}
+                        }
+                    }
+                    Some(deadline) => {
+                        let sleep = tokio::time::sleep_until(deadline);
+                        tokio::pin!(sleep);
+                        tokio::select! {
+                            biased;
+                            _ = timer_controller.shutdown.notified() => break,
+                            _ = &mut sleep => {
+                                timer_controller.flush_expired().await;
+                            }
+                            _ = timer_controller.flush_signal.wait() => {}
+                        }
+                    }
                 }
             }
         });
 
-        Ok(SpawnedStream::new(rx, handle))
+        Ok(CheckpointStream {
+            rx,
+            controller,
+            producer: Some(producer),
+            timer: Some(timer),
+        })
+    }
+}
+
+impl<C, S> FlushController<C, S>
+where
+    C: Clone + Send + Sync + 'static,
+    S: CheckpointStore<C>,
+{
+    /// Flush all entries whose `first_pending_at + max_pending_interval`
+    /// has already elapsed. Used by the background timer.
+    async fn flush_expired(&self) {
+        let now = Instant::now();
+        let drained: Vec<(CursorId, C)> = {
+            let mut state = self.state.lock().await;
+            let mut out = Vec::new();
+            let mut empty_ids = Vec::new();
+            for (id, entry) in state.iter_mut() {
+                let expired = entry
+                    .flush_deadline(&self.flush_policy)
+                    .map(|d| d <= now)
+                    .unwrap_or(false);
+                if expired && let Some(cursor) = entry.take_pending() {
+                    out.push((id.clone(), cursor));
+                }
+                if entry.is_empty() {
+                    empty_ids.push(id.clone());
+                }
+            }
+            for id in empty_ids {
+                state.remove(&id);
+            }
+            out
+        };
+        for (cursor_id, cursor) in drained {
+            let key = CheckpointKey {
+                scope: self.scope.clone(),
+                cursor_id: cursor_id.clone(),
+            };
+            if let Err(e) = self.store.commit(&key, cursor).await {
+                tracing::warn!("checkpoint reader: timer flush failed for {cursor_id:?}: {e}");
+            }
+        }
     }
 }
 
@@ -404,23 +828,54 @@ mod tests {
     use crate::io::acker::NoopAcker;
     use crate::io::position::{StartFrom, StartableSubscription};
     use crate::payload::Payload;
-    use futures::Stream;
+    use futures::{Stream, StreamExt};
     use std::pin::Pin;
+    use std::task::{Context, Poll};
     use tokio::sync::Mutex as TokioMutex;
+
+    struct MpscStream<T> {
+        rx: tokio::sync::mpsc::Receiver<T>,
+    }
+
+    impl<T> Stream for MpscStream<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+            self.rx.poll_recv(cx)
+        }
+    }
+
+    type InnerRx = tokio::sync::mpsc::Receiver<Result<Message<NoopAcker, TestCursor>>>;
+
+    struct ChannelReader {
+        rx: std::sync::Mutex<Option<InnerRx>>,
+    }
+
+    impl Reader for ChannelReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = TestCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, TestCursor>>> + Send>>;
+
+        async fn read(&self, _: TestSub) -> Result<Self::Stream> {
+            let rx = self.rx.lock().unwrap().take().unwrap();
+            Ok(Box::pin(MpscStream { rx }))
+        }
+    }
 
     #[test]
     fn pending_state_advances_contiguously_in_order() {
-        let mut s: PendingState<i64> = PendingState::new();
+        let mut s: PerCursorState<i64> = PerCursorState::new();
         let i0 = s.record(10);
         let i1 = s.record(20);
         assert_eq!(s.complete(i0), Some(10));
         assert_eq!(s.complete(i1), Some(20));
-        assert_eq!(s.pending_count(), 0);
+        assert_eq!(s.pending_queue_count(), 0);
     }
 
     #[test]
     fn pending_state_does_not_advance_past_unacked_predecessor() {
-        let mut s: PendingState<i64> = PendingState::new();
+        let mut s: PerCursorState<i64> = PerCursorState::new();
         let i0 = s.record(10);
         let i1 = s.record(20);
         let i2 = s.record(30);
@@ -431,18 +886,18 @@ mod tests {
             Some(30),
             "completes whole prefix to highest"
         );
-        assert_eq!(s.pending_count(), 0);
+        assert_eq!(s.pending_queue_count(), 0);
     }
 
     #[test]
     fn pending_state_returns_highest_in_prefix() {
-        let mut s: PendingState<i64> = PendingState::new();
+        let mut s: PerCursorState<i64> = PerCursorState::new();
         let i0 = s.record(10);
         let i1 = s.record(20);
         let _i2 = s.record(30);
         assert_eq!(s.complete(i0), Some(10));
         assert_eq!(s.complete(i1), Some(20));
-        assert_eq!(s.pending_count(), 1);
+        assert_eq!(s.pending_queue_count(), 1);
     }
 
     #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -544,10 +999,27 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct MemStore {
-        rows: std::sync::Arc<TokioMutex<Vec<(CheckpointKey, TestCursor)>>>,
+        rows: Arc<TokioMutex<Vec<(CheckpointKey, TestCursor)>>>,
+        committed: Arc<std::sync::Mutex<Vec<(CursorId, TestCursor)>>>,
     }
+
+    impl Default for MemStore {
+        fn default() -> Self {
+            Self {
+                rows: Arc::new(TokioMutex::new(Vec::new())),
+                committed: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl MemStore {
+        fn committed(&self) -> Vec<(CursorId, TestCursor)> {
+            self.committed.lock().unwrap().clone()
+        }
+    }
+
     impl CheckpointStore<TestCursor> for MemStore {
         async fn load(&self, _: &CheckpointKey) -> Result<Option<TestCursor>> {
             Ok(None)
@@ -557,8 +1029,19 @@ mod tests {
         }
         async fn commit(&self, key: &CheckpointKey, cursor: TestCursor) -> Result<()> {
             self.rows.lock().await.push((key.clone(), cursor));
+            self.committed
+                .lock()
+                .unwrap()
+                .push((key.cursor_id.clone(), cursor));
             Ok(())
         }
+    }
+
+    fn test_scope() -> CheckpointScope {
+        CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        )
     }
 
     fn ev(key: &str) -> Event {
@@ -587,6 +1070,7 @@ mod tests {
             store,
             CheckpointReaderConfig {
                 max_pending_per_key: 2,
+                ..Default::default()
             },
         );
         let scope = CheckpointScope::new(
@@ -916,6 +1400,307 @@ mod tests {
             .read(CheckpointSubscription::new(TestSub, scope))
             .await
             .unwrap();
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn flush_policy_count_triggers_after_n_acks() {
+        let store = MemStore::default();
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("a"), ev("b"), ev("c")])),
+        };
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(2).unwrap(),
+                max_pending_interval: Duration::ZERO,
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert!(
+            store.committed().is_empty(),
+            "first ack should buffer, not flush"
+        );
+
+        let msg2 = stream.next().await.unwrap().unwrap();
+        msg2.ack().await.unwrap();
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "second ack should trigger flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_policy_interval_triggers_after_duration() {
+        let store = MemStore::default();
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("a"), ev("b")])),
+        };
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(100).unwrap(),
+                max_pending_interval: Duration::from_millis(50),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert!(
+            store.committed().is_empty(),
+            "should buffer, high count threshold not hit"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let msg2 = stream.next().await.unwrap().unwrap();
+        msg2.ack().await.unwrap();
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "interval should trigger flush on next ack"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_flush_policy_commits_on_every_ack() {
+        let store = MemStore::default();
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(vec![ev("a"), ev("b")])),
+        };
+        let cr = CheckpointReader::new(reader, store.clone());
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert_eq!(store.committed().len(), 1, "default flushes on first ack");
+
+        let msg2 = stream.next().await.unwrap().unwrap();
+        msg2.ack().await.unwrap();
+        assert_eq!(store.committed().len(), 2, "default flushes on second ack");
+    }
+
+    #[tokio::test]
+    async fn flush_on_stream_drop_drains_buffered_cursors() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(10).unwrap(),
+                max_pending_interval: Duration::from_secs(3600),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        tx.send(Ok(Message::new(ev("a"), NoopAcker, TestCursor(1))))
+            .await
+            .unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert!(
+            store.committed().is_empty(),
+            "should buffer under high flush threshold"
+        );
+
+        drop(stream);
+        drop(tx);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "drop should drain buffered cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_loop_drain_commits_buffered_cursors_on_natural_end() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(10).unwrap(),
+                max_pending_interval: Duration::from_secs(3600),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let mut stream = cr.read(sub).await.unwrap();
+
+        tx.send(Ok(Message::new(ev("a"), NoopAcker, TestCursor(1))))
+            .await
+            .unwrap();
+
+        let msg1 = stream.next().await.unwrap().unwrap();
+        msg1.ack().await.unwrap();
+        assert!(
+            store.committed().is_empty(),
+            "should buffer under high flush threshold"
+        );
+
+        drop(tx);
+
+        assert!(stream.next().await.is_none(), "stream should end naturally");
+
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "natural end should drain buffered cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_timer_flushes_without_further_acks() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(100).unwrap(),
+                max_pending_interval: Duration::from_millis(50),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+        let mut stream = cr.read(sub).await.unwrap();
+
+        tx.send(Ok(Message::new(ev("a"), NoopAcker, TestCursor(1))))
+            .await
+            .unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        msg.ack().await.unwrap();
+
+        assert!(
+            store.committed().is_empty(),
+            "below count threshold, interval not yet elapsed"
+        );
+
+        // Advance time past the interval — background timer must flush
+        // even though no further acks arrive.
+        tokio::time::sleep(Duration::from_millis(75)).await;
+
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "background timer should flush expired entry without further acks"
+        );
+    }
+
+    /// Producer task remains blocked on inner stream forever. Consumer
+    /// drops the stream — producer must exit instead of leaking.
+    #[tokio::test]
+    async fn drop_aborts_producer_blocked_on_inner_stream() {
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let cr = CheckpointReader::new(reader, store.clone());
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+
+        let stream = cr.read(sub).await.unwrap();
+        // Producer is awaiting inner_stream.next(). Dropping stream
+        // must signal producer via tx.closed() so it exits.
+        drop(stream);
+
+        // Give the runtime a tick to schedule the producer's select! arm.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // If the producer were leaked, this test would still pass — the
+        // real assertion is that no panic / hang occurs and the runtime
+        // shuts down cleanly when the test ends. The previous version
+        // before cancel-safety would leak the producer task.
+    }
+
+    #[tokio::test]
+    async fn explicit_flush_drains_buffered_cursors_synchronously() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(2);
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let config = CheckpointReaderConfig {
+            flush_policy: CheckpointFlushPolicy {
+                max_pending_acks: NonZeroUsize::new(100).unwrap(),
+                max_pending_interval: Duration::from_secs(3600),
+            },
+            ..Default::default()
+        };
+        let cr = CheckpointReader::with_config(reader, store.clone(), config);
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+        let mut stream = cr.read(sub).await.unwrap();
+
+        tx.send(Ok(Message::new(ev("a"), NoopAcker, TestCursor(1))))
+            .await
+            .unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        msg.ack().await.unwrap();
+
+        assert!(
+            store.committed().is_empty(),
+            "buffered, neither threshold hit yet"
+        );
+
+        // Explicit flush — must commit synchronously.
+        stream.flush().await.unwrap();
+
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "explicit flush should drain immediately"
+        );
+
+        // Second flush with no pending state is a no-op.
+        stream.flush().await.unwrap();
+        assert_eq!(store.committed().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_timer_does_not_spin_when_interval_is_zero() {
+        // Sanity: with default policy (interval=0), the timer task
+        // parks on shutdown notify and never wakes for sleeps. Just
+        // confirm no panics / hangs when default config runs against
+        // an empty channel and is dropped.
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Result<Message<NoopAcker, TestCursor>>>(1);
+        let reader = ChannelReader {
+            rx: std::sync::Mutex::new(Some(rx)),
+        };
+        let store = MemStore::default();
+        let cr = CheckpointReader::new(reader, store.clone());
+        let sub = CheckpointSubscription::new(TestSub, test_scope());
+        let stream = cr.read(sub).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
         drop(stream);
     }
 }
