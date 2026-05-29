@@ -10,9 +10,7 @@ use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{Event, Payload, StartFrom};
-use eventuary_sqlite::coordinator::{
-    SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig,
-};
+use eventuary_sqlite::coordinator::{SqlitePartitionCoordinator, SqlitePartitionCoordinatorConfig};
 use eventuary_sqlite::database::{SqliteConn, SqliteDatabase};
 use eventuary_sqlite::reader::{
     SqliteCoordinatedReader, SqliteCoordinatedReaderConfig, SqliteCoordinatedSubscription,

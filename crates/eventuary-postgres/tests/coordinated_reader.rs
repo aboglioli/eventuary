@@ -17,8 +17,8 @@ use eventuary_core::{Error, Event, Payload, StartFrom};
 use eventuary_postgres::coordinator::{PgPartitionCoordinator, PgPartitionCoordinatorConfig};
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{
-    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedStream,
-    PgCoordinatedSubscription, PgReader, PgReaderConfig, PgSubscription,
+    PgCoordinatedReader, PgCoordinatedReaderConfig, PgCoordinatedStream, PgCoordinatedSubscription,
+    PgReader, PgReaderConfig, PgSubscription,
 };
 use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
 

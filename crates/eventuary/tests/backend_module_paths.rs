@@ -14,7 +14,9 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::memory::reader::MemorySubscription>();
     assert_type::<eventuary::memory::writer::MemoryWriter>();
     assert_type::<eventuary::memory::checkpoint::MemoryCheckpointStore<eventuary::io::NoCursor>>();
-    assert_type::<eventuary::memory::coordinator::MemoryPartitionCoordinator<eventuary::io::NoCursor>>();
+    assert_type::<
+        eventuary::memory::coordinator::MemoryPartitionCoordinator<eventuary::io::NoCursor>,
+    >();
     assert_type::<eventuary::memory::buffer::MemoryBufferStore<eventuary::io::NoCursor>>();
     assert_type::<eventuary::memory::claim_buffer::MemoryClaimedBufferStore>();
     assert_type::<eventuary::memory::dedupe::MemoryDedupeStore>();
@@ -38,14 +40,20 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::sqlite::writer::SqliteWriter>();
     assert_type::<eventuary::sqlite::writer::SqliteWriterConfig>();
     assert_type::<eventuary::sqlite::writer::SqlitePartitioningConfig>();
-    assert_type::<eventuary::sqlite::checkpoint::SqliteCheckpointStore<eventuary::sqlite::reader::SqliteCursor>>();
+    assert_type::<
+        eventuary::sqlite::checkpoint::SqliteCheckpointStore<
+            eventuary::sqlite::reader::SqliteCursor,
+        >,
+    >();
     assert_type::<eventuary::sqlite::checkpoint::SqliteCheckpointStoreConfig>();
     assert_type::<eventuary::sqlite::coordinator::SqlitePartitionCoordinator>();
     assert_type::<eventuary::sqlite::coordinator::SqlitePartitionCoordinatorConfig>();
     assert_type::<eventuary::sqlite::database::SqliteDatabase>();
     assert_type::<eventuary::sqlite::database::SqliteDatabaseConfig>();
     assert_type::<eventuary::sqlite::relation::SqliteRelationName>();
-    assert_type::<eventuary::sqlite::buffer::SqliteBufferStore<eventuary::sqlite::reader::SqliteCursor>>();
+    assert_type::<
+        eventuary::sqlite::buffer::SqliteBufferStore<eventuary::sqlite::reader::SqliteCursor>,
+    >();
     assert_type::<eventuary::sqlite::buffer::SqliteBufferStoreConfig>();
     assert_type::<eventuary::sqlite::buffer::SqliteBufferStoreId>();
     assert_type::<eventuary::sqlite::dedupe::SqliteDedupeStore>();
@@ -74,7 +82,9 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::postgres::writer::PgWriter>();
     assert_type::<eventuary::postgres::writer::PgWriterConfig>();
     assert_type::<eventuary::postgres::writer::PgPartitioningConfig>();
-    assert_type::<eventuary::postgres::checkpoint::PgCheckpointStore<eventuary::postgres::reader::PgCursor>>();
+    assert_type::<
+        eventuary::postgres::checkpoint::PgCheckpointStore<eventuary::postgres::reader::PgCursor>,
+    >();
     assert_type::<eventuary::postgres::checkpoint::PgCheckpointStoreConfig>();
     assert_type::<eventuary::postgres::coordinator::PgPartitionCoordinator>();
     assert_type::<eventuary::postgres::coordinator::PgPartitionCoordinatorConfig>();
@@ -82,7 +92,8 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::postgres::database::PgDatabaseConfig>();
     assert_type::<eventuary::postgres::database::PgConnectOptions>();
     assert_type::<eventuary::postgres::relation::PgRelationName>();
-    assert_type::<eventuary::postgres::buffer::PgBufferStore<eventuary::postgres::reader::PgCursor>>();
+    assert_type::<eventuary::postgres::buffer::PgBufferStore<eventuary::postgres::reader::PgCursor>>(
+    );
     assert_type::<eventuary::postgres::buffer::PgBufferStoreConfig>();
     assert_type::<eventuary::postgres::buffer::PgBufferStoreId>();
     assert_type::<eventuary::postgres::claim_buffer::PgClaimedBufferStore>();
