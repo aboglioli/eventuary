@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-05-29
 
 ### Breaking changes
 
@@ -38,6 +38,26 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Low-level migration helpers (`Migration`, `RelationReplacement`,
   `render_migration_sql`, `render_schema_sql`, `apply_schema`) are no longer
   part of the public API. Each backend component owns its own schema lifecycle.
+
+### Fixed
+
+- Raw `PgReader` and `SqliteReader` with `PartitionSelection::All` now decode
+  rows whose `partition_id` / `partition_count` columns are `NULL` to a
+  synthetic cursor partition `(id = 0, count = 1)` instead of erroring with
+  `event has NULL partition columns`. This lets default-writer rows be read
+  back without enabling inline partitioning.
+- Partition-filtered reads (`PartitionSelection::One` / `Many`),
+  `PartitionedReader::source_from_cursor`, and `CoordinatedReader` still
+  require real partition columns: use inline writer partitioning or run
+  `PgPartitionBackfill` / `SqlitePartitionBackfill` before relying on those
+  flows. Mixed `NULL` / real partition rows on the same log split
+  `CheckpointReader` state between the synthetic and real cursors; always
+  backfill before enabling inline partitioning on a non-empty log.
+
+### Documentation
+
+- README and AGENTS updated to describe the current `PartitionedReaderConfig<P>`
+  resolver/hasher pipeline and the SQL null-partition semantics.
 
 ## [0.1.0] - 2026-02-12
 

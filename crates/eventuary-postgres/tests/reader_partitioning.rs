@@ -9,8 +9,8 @@ use tokio::time::timeout;
 
 use eventuary_core::io::{Acker, Reader, Writer};
 use eventuary_core::partition::{
-    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionHasher, PartitionKey,
-    PartitionSelection,
+    EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, PartitionGroup, PartitionHasher,
+    PartitionKey, PartitionSelection,
 };
 use eventuary_core::{Event, Partition, Payload, StartFrom, StopAt};
 use eventuary_postgres::database::PgDatabase;
@@ -157,5 +157,90 @@ async fn pg_reader_one_filters_to_single_partition() {
             chosen_partition,
             "event key {key} maps to wrong partition"
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_reader_one_ignores_unpartitioned_rows() {
+    let (_c, pool) = start_postgres().await;
+
+    let unpartitioned_writer = PgWriter::new(pool.clone());
+    unpartitioned_writer
+        .write(&event_with_key("unpartitioned-row"))
+        .await
+        .unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            NonZeroU32::new(PARTITION_COUNT).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let partitioned_writer = PgWriter::new_with_config(pool.clone(), writer_config);
+    partitioned_writer
+        .write(&event_with_key("partitioned-row"))
+        .await
+        .unwrap();
+
+    let reader = PgReader::new(pool.clone(), PgReaderConfig::default());
+    let mut stream = reader
+        .read(PgSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            partitions: PartitionSelection::One(
+                Partition::new(0, NonZeroU32::new(PARTITION_COUNT).unwrap()).unwrap(),
+            ),
+            ..PgSubscription::default()
+        })
+        .await
+        .unwrap();
+
+    while let Ok(Some(Ok(msg))) = timeout(std::time::Duration::from_secs(5), stream.next()).await {
+        assert_ne!(msg.event().key().as_str(), "unpartitioned-row");
+        msg.ack().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pg_reader_many_ignores_unpartitioned_rows() {
+    let (_c, pool) = start_postgres().await;
+
+    let unpartitioned_writer = PgWriter::new(pool.clone());
+    unpartitioned_writer
+        .write(&event_with_key("unpartitioned-row"))
+        .await
+        .unwrap();
+
+    let writer_config = PgWriterConfig {
+        partitioning: PgPartitioningConfig::inline(
+            NonZeroU32::new(PARTITION_COUNT).unwrap(),
+            EventKeyPartitionKeyResolver::new(),
+            Fnv1a64PartitionHasher,
+        ),
+        ..PgWriterConfig::default()
+    };
+    let partitioned_writer = PgWriter::new_with_config(pool.clone(), writer_config);
+    partitioned_writer
+        .write(&event_with_key("partitioned-row"))
+        .await
+        .unwrap();
+
+    let partition = Partition::new(0, NonZeroU32::new(PARTITION_COUNT).unwrap()).unwrap();
+    let reader = PgReader::new(pool.clone(), PgReaderConfig::default());
+    let mut stream = reader
+        .read(PgSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            partitions: PartitionSelection::Many(PartitionGroup::singleton(partition)),
+            ..PgSubscription::default()
+        })
+        .await
+        .unwrap();
+
+    while let Ok(Some(Ok(msg))) = timeout(std::time::Duration::from_secs(5), stream.next()).await {
+        assert_ne!(msg.event().key().as_str(), "unpartitioned-row");
+        msg.ack().await.unwrap();
     }
 }

@@ -7,7 +7,7 @@ Eventuary started life as `orchy-events` inside the [orchy](https://github.com/a
 project and was extracted as a standalone library so other Rust projects can
 reuse the same event-sourcing primitives and reader/writer abstractions.
 
-> **Status:** Stable (`0.1.0`).
+> **Status:** Stable (`0.2.0`).
 
 ## What Eventuary Provides
 
@@ -35,7 +35,7 @@ The top-level `eventuary` crate is an **umbrella facade**: it re-exports
 feature flag. Typical consumers add a single line to their `Cargo.toml`:
 
 ```toml
-eventuary = { version = "0.1.0", features = ["postgres"] }
+eventuary = { version = "0.2.0", features = ["postgres"] }
 ```
 
 …and import `eventuary::Event`, `eventuary::postgres::reader::PgReader`, etc.
@@ -357,8 +357,9 @@ audit, and side-channel flows are not hardcoded into handlers.
   for any `P`. `Partition` and `fnv1a_u64` live in `event_key.rs`; the
   full resolver/hasher API lives in the `partition` module. The Kafka
   writer reuses the same FNV-1a hash for record-key partition selection,
-  and `PartitionedReader` routes lanes either via the resolver/hasher
-  pipeline or the equivalent inline default (`EventCompatibility`).
+  and `PartitionedReader` routes lanes via the resolver/hasher pipeline
+  carried by `PartitionedReaderConfig<P>` (defaults:
+  `EventKeyPartitionKeyResolver` + `Fnv1a64PartitionHasher`).
 
   Default partitioning hashes `Event::key()` with FNV-1a. Because `key` is required, all default reader and writer partitioning paths are deterministic by stream/entity identity. Use custom `PartitionKeyResolver` implementations when partitioning by organization, topic, namespace, metadata, or a composite key.
 
@@ -373,8 +374,10 @@ single source. Cross-cutting concerns live in generic core wrappers in
 **Core composition wrappers:**
 
 - `PartitionedReader<R, P>` is an in-process lane scheduler. It routes
-  inner messages into `Partition`s derived from `PartitionRouteStrategy<P>`
-  (default `EventCompatibility`: FNV-1a over `event.key()` bytes),
+  inner messages into `Partition`s using the resolver/hasher pair carried
+  by `PartitionedReaderConfig<P>` (the default pair routes by FNV-1a over
+  `event.key()` bytes; customize via
+  `PartitionedReaderConfig::with_router(resolver, hasher)`),
   buffers each lane up to `lane_capacity`,
   and exposes one merged stream. Two constructors pick the inner-ack
   semantics:
@@ -603,6 +606,15 @@ Migration SQL lives inline in the Rust module for the component that owns the ta
 - Store implementations: `SqliteMultiplexerStore`, `SqliteBufferStore`,
   `SqliteDedupeStore`, `SqliteWatermarkStore`, and `SqliteCheckpointStore`.
 - Polling reader: `batch_size` + `poll_interval`.
+- Default SQL writers leave partition columns `NULL`; raw readers with
+  `PartitionSelection::All` tolerate those rows with a synthetic `(0, 1)`
+  cursor partition. Partition-filtered reads (`One` / `Many`),
+  `PartitionedReader::source_from_cursor`, and `CoordinatedReader` require
+  inline partitioning or backfilled rows. Do not enable inline partitioning
+  over a non-empty default-writer log without running
+  `SqlitePartitionBackfill` first — mixed `NULL`/real rows split
+  `CheckpointReader` progress between the synthetic `(0, 1)` cursor and the
+  real partition cursors.
 
 ### postgres
 
@@ -627,6 +639,14 @@ Migration SQL lives inline in the Rust module for the component that owns the ta
 - Store implementations: `PgMultiplexerStore`, `PgBufferStore`,
   `PgDedupeStore`, `PgWatermarkStore`, and `PgCheckpointStore`.
 - Integration tests use `testcontainers` with `postgres:18-alpine`.
+- Default SQL writers leave partition columns `NULL`; raw readers with
+  `PartitionSelection::All` tolerate those rows with a synthetic `(0, 1)`
+  cursor partition. Partition-filtered reads (`One` / `Many`),
+  `PartitionedReader::source_from_cursor`, and `CoordinatedReader` require
+  inline partitioning or backfilled rows. Do not enable inline partitioning
+  over a non-empty default-writer log without running `PgPartitionBackfill`
+  first — mixed `NULL`/real rows split `CheckpointReader` progress between
+  the synthetic `(0, 1)` cursor and the real partition cursors.
 
 ### sqs
 
@@ -1095,13 +1115,15 @@ Worth knowing when changing the codebase:
   `TopicPartitionKeyResolver`, `NamespacePartitionKeyResolver`,
   `MetadataPartitionKeyResolver`, `CompositePartitionKeyResolver<P>`) work
   for any `P` because they only read identity / topic / namespace /
-  metadata, never the payload. `PartitionedReaderConfig<P>` and
-  `PartitionRouteStrategy<P>` thread `P` through; the default
-  `EventCompatibility` route inlines the same FNV-1a routing
-  (`event.key()` bytes) and is available for every `P`. The legacy inherent
-  partitioning helpers on `Event` and `EventKey` were intentionally removed
-  during the typed-payload follow-ups; callers go through the resolver/hasher
-  pipeline directly or rely on `EventCompatibility`.
+  metadata, never the payload. `PartitionedReaderConfig<P>` carries the
+  resolver/hasher pipeline directly:
+  `key_resolver: Arc<dyn PartitionKeyResolver<P>>` and
+  `hasher: Arc<dyn PartitionHasher>`. Defaults are
+  `EventKeyPartitionKeyResolver` and `Fnv1a64PartitionHasher`, which route
+  by `event.key()`. Use `PartitionedReaderConfig::with_router(resolver, hasher)`
+  for custom routing. The legacy inherent partitioning helpers on `Event`
+  and `EventKey` were intentionally removed during the typed-payload
+  follow-ups; callers go through the resolver/hasher pipeline.
 - **`MultiplexerStore` is intentionally NOT generic over `P`.** The
   store keys on `(event_id, subscriber_id)` only — the value stored is
   completion state, never the payload. Keeping the trait monomorphic
@@ -1190,7 +1212,7 @@ to [trusted publishing] is a future improvement.
 # 1. Bump workspace.package.version in the root Cargo.toml
 # 2. Commit + push (maintainer)
 # 3. Create and publish a GitHub Release targeting main.
-#    Use tag v0.1.0 and title v0.1.0.
+#    Use tag v0.2.0 and title v0.2.0.
 # 4. Publish workflow runs automatically from the release event.
 ```
 

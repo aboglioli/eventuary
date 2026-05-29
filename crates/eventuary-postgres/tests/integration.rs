@@ -100,6 +100,35 @@ async fn write_read_roundtrip() {
     assert!(msg.cursor().sequence() > 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_writer_rows_are_readable_by_default_reader() {
+    let (_c, pool) = start_postgres().await;
+
+    let writer = PgWriter::new(pool.clone());
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "default-writer-row"))
+        .await
+        .unwrap();
+
+    let reader = PgReader::new(pool.clone(), fast_config());
+    let mut stream = reader
+        .read(PgSubscription {
+            start: StartFrom::Earliest,
+            stop_at: StopAt::CurrentEnd,
+            ..PgSubscription::default()
+        })
+        .await
+        .unwrap();
+
+    let msg = stream.next().await.unwrap().unwrap();
+    assert_eq!(msg.event().key().as_str(), "default-writer-row");
+    assert_eq!(msg.cursor().partition().id(), 0);
+    assert_eq!(msg.cursor().partition().count(), 1);
+    msg.ack().await.unwrap();
+
+    assert!(stream.next().await.is_none());
+}
+
 #[tokio::test]
 async fn reader_roundtrips_lineage_fields() {
     let (_c, pool) = start_postgres().await;
