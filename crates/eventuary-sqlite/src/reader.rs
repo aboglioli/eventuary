@@ -659,27 +659,7 @@ async fn fetch_batch(
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
                 .map(|d| d.with_timezone(&Utc))
                 .map_err(|e| Error::Serialization(format!("decode timestamp: {e}")))?;
-            let partition = match (partition_id, partition_count) {
-                (Some(pid), Some(pcount)) => {
-                    let id_u32 = u32::try_from(pid).map_err(|_| {
-                        Error::Store(format!("partition_id {pid} exceeds u32::MAX"))
-                    })?;
-                    let count_u32 = u32::try_from(pcount).map_err(|_| {
-                        Error::Store(format!("partition_count {pcount} exceeds u32::MAX"))
-                    })?;
-                    let count = NonZeroU32::new(count_u32).ok_or_else(|| {
-                        Error::Store("partition_count must be positive".to_owned())
-                    })?;
-                    Partition::new(id_u32, count)
-                        .map_err(|e| Error::Store(format!("invalid partition: {e}")))?
-                }
-                _ => {
-                    return Err(Error::Store(
-                        "event has NULL partition columns — run partition backfill first"
-                            .to_owned(),
-                    ));
-                }
-            };
+            let partition = decode_partition(partition_id, partition_count)?;
             out.push((
                 SerializedEvent {
                     id,
@@ -743,6 +723,25 @@ pub type SqliteCoordinatedStream = CoordinatedStream<
     PartitionedCursor<SqliteCursor>,
     PartitionedCoordAdapter<SqlitePartitionCoordinator, SqliteCursor>,
 >;
+
+fn decode_partition(partition_id: Option<i64>, partition_count: Option<i64>) -> Result<Partition> {
+    match (partition_id, partition_count) {
+        (Some(pid), Some(pcount)) => {
+            let id = u32::try_from(pid)
+                .map_err(|_| Error::Store(format!("partition_id {pid} exceeds u32::MAX")))?;
+            let count = u32::try_from(pcount)
+                .map_err(|_| Error::Store(format!("partition_count {pcount} exceeds u32::MAX")))?;
+            let count = NonZeroU32::new(count)
+                .ok_or_else(|| Error::Store("partition_count must be positive".to_owned()))?;
+            Partition::new(id, count).map_err(|e| Error::Store(format!("invalid partition: {e}")))
+        }
+        (None, None) => Ok(Partition::new(0, NonZeroU32::new(1).unwrap())
+            .expect("synthetic single partition is valid")),
+        _ => Err(Error::Store(
+            "event has incomplete partition columns — run partition backfill first".to_owned(),
+        )),
+    }
+}
 
 #[cfg(test)]
 mod tests {
