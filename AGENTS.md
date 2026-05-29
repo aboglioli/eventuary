@@ -38,7 +38,7 @@ feature flag. Typical consumers add a single line to their `Cargo.toml`:
 eventuary = { version = "0.1.0", features = ["postgres"] }
 ```
 
-…and import `eventuary::Event`, `eventuary::postgres::PgReader`, etc.
+…and import `eventuary::Event`, `eventuary::postgres::reader::PgReader`, etc.
 without ever depending on the sub-crates directly.
 
 There is **no opinionated server, no broker, no transport**. Eventuary is
@@ -773,7 +773,7 @@ Each crate exposes its base abstractions and cross-cutting value types at the to
 |---|---|---|
 | All implementation and auxiliary types | submodule path | `eventuary_postgres::reader::PgReader`, `eventuary_postgres::reader::PgCursor`, `eventuary_kafka::flusher::KafkaOffsetToken`, `eventuary_sqlite::writer::SqliteWriterConfig` |
 
-Backend `lib.rs` files declare role modules (`reader`, `writer`, `checkpoint_store`, `database`, `relation`, `flusher`, `reader_config`, and store modules). Module paths remain the canonical learning surface, even when a backend crate also re-exports selected public store types at its root for convenience. `eventuary-core` keeps flat re-exports for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
+Backend `lib.rs` files declare role modules (`reader`, `writer`, `checkpoint`, `coordinator`, `database`, `relation`, `flusher`, `buffer`, `claim_buffer`, `dedupe`, `multiplexer`, `watermark`, `subscriber_work`, `partitioning`). Module paths are the only public surface — backend crate roots expose no convenience re-exports of implementation types. `eventuary-core` keeps flat re-exports for domain values (`eventuary_core::Event`, `eventuary_core::Topic`, …) and IO base abstractions (`eventuary_core::io::Reader`, `eventuary_core::io::Acker`, …).
 
 ### Import Paths Mental Model
 
@@ -800,11 +800,11 @@ use eventuary::io::filter::{EventFilter, AllFilter, AndFilter};
 // Backend types — feature-gated, canonical module paths
 use eventuary::postgres::reader::{PgReader, PgCursor, PgSubscription, PgReaderConfig};
 use eventuary::postgres::writer::{PgWriter, PgWriterConfig};
-use eventuary::postgres::checkpoint_store::{PgCheckpointStore, PgCheckpointStoreConfig};
+use eventuary::postgres::checkpoint::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary::postgres::database::{PgDatabase, PgDatabaseConfig};
 use eventuary::postgres::relation::PgRelationName;
-use eventuary::postgres::multiplexer_store::PgMultiplexerStore;
-use eventuary::memory::multiplexer_store::MemoryMultiplexerStore;
+use eventuary::postgres::multiplexer::PgMultiplexerStore;
+use eventuary::memory::multiplexer::MemoryMultiplexerStore;
 ```
 
 **Through sub-crates (backend authoring or alternative facades):**
@@ -826,7 +826,7 @@ The two routes are interchangeable — the umbrella does `pub use eventuary_core
 | `<crate>::Type` | Domain value | `Event`, `Topic`, `Payload` |
 | `<crate>::io::Type` | IO base abstraction | `Reader`, `Acker`, `Message` |
 | `<crate>::io::<module>::Type` | IO wrapper or its aux | `io::reader::CheckpointReader`, `io::writer::FanoutWriter`, `io::handler::RetryPolicy` |
-| `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor`, `memory::multiplexer_store::MemoryMultiplexerStore` |
+| `<crate>::<backend>::<module>::Type` | Backend implementation or auxiliary | `postgres::reader::PgReader`, `postgres::reader::PgCursor`, `memory::multiplexer::MemoryMultiplexerStore` |
 
 No `prelude` module is provided by design — importing through these paths is the learning surface for the structure. Once the layering is understood, users may write personal preludes in their own crates.
 
@@ -1045,17 +1045,15 @@ Worth knowing when changing the codebase:
   `CoordinatedReader` calls `with_partitions`). Colocating them keeps the
   capability surface in one file and lets readers learn the available
   contracts at a glance.
-- **Backend `coordinated_reader.rs` is alias-only by design.**
+- **`CoordinatedReader` aliases live in the `reader` role module by design.**
   `CoordinatedReader<R, Coord>` carries zero backend-specific code, so
-  each backend ships a tiny module with `pub type PgCoordinatedReader =
-  CoordinatedReader<PgReader, PgPartitionCoordinator>` (and siblings).
-  The file exists for two reasons: (1) shorter call-site names than
-  `CoordinatedReader<PgReader, PgPartitionCoordinator>`, and (2) a
-  canonical module path (`eventuary::postgres::coordinated_reader::*`)
-  matching every other role-named module (`reader`, `writer`,
-  `partition_coordinator`, `checkpoint_store`, …). It is the only
-  pure-alias module today; future generic-only types will follow the
-  same shape so the per-backend layout stays predictable.
+  each backend ships type aliases with `pub type PgCoordinatedReader =
+  CoordinatedReader<PgReader, PgPartitionCoordinator>` (and siblings)
+  in its `reader` module. This gives shorter call-site names than the full
+  generic and keeps all reader-facing types under
+  `eventuary::postgres::reader::*`, matching every other role-named module
+  (`writer`, `checkpoint`, `coordinator`, …). Future generic-only types
+  will follow the same shape so the per-backend layout stays predictable.
 - **Checkpoint flush is configurable via `CheckpointFlushPolicy`.**
   `max_pending_acks: NonZeroUsize` and `max_pending_interval: Duration`
   bound the per-partition pending-ack buffer; the flush fires when either
