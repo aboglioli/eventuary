@@ -10,7 +10,7 @@ use crate::payload::Payload;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
-pub(crate) fn fnv1a_u64(bytes: &[u8]) -> u64 {
+fn fnv1a_u64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
     })

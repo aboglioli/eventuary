@@ -15,7 +15,23 @@ pub struct MapReader<R, F, P = Payload, Q = Payload> {
     _payload: PhantomData<fn(P) -> Q>,
 }
 
+pub struct TryMapReader<R, F, P = Payload, Q = Payload> {
+    inner: R,
+    f: F,
+    _payload: PhantomData<fn(P) -> Q>,
+}
+
 impl<R, F, P, Q> MapReader<R, F, P, Q> {
+    pub fn new(inner: R, f: F) -> Self {
+        Self {
+            inner,
+            f,
+            _payload: PhantomData,
+        }
+    }
+}
+
+impl<R, F, P, Q> TryMapReader<R, F, P, Q> {
     pub fn new(inner: R, f: F) -> Self {
         Self {
             inner,
@@ -51,7 +67,39 @@ where
     }
 }
 
+impl<R, F, P, Q> Reader<Q> for TryMapReader<R, F, P, Q>
+where
+    R: Reader<P> + Send + Sync + 'static,
+    R::Subscription: Send + 'static,
+    R::Acker: Send + Sync + 'static,
+    R::Cursor: Send + Sync + 'static,
+    R::Stream: 'static,
+    F: Fn(Event<P>) -> Result<Event<Q>> + Clone + Unpin + Send + Sync + 'static,
+    P: Send + 'static,
+    Q: Send + 'static,
+{
+    type Subscription = R::Subscription;
+    type Acker = R::Acker;
+    type Cursor = R::Cursor;
+    type Stream = TryMapStream<R, F, P, Q>;
+
+    async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        let inner = self.inner.read(subscription).await?;
+        Ok(TryMapStream {
+            inner: Box::pin(inner),
+            f: self.f.clone(),
+            _payload: PhantomData,
+        })
+    }
+}
+
 pub struct MapStream<R: Reader<P>, F, P = Payload, Q = Payload> {
+    inner: Pin<Box<R::Stream>>,
+    f: F,
+    _payload: PhantomData<fn(P) -> Q>,
+}
+
+pub struct TryMapStream<R: Reader<P>, F, P = Payload, Q = Payload> {
     inner: Pin<Box<R::Stream>>,
     f: F,
     _payload: PhantomData<fn(P) -> Q>,
@@ -70,6 +118,30 @@ where
                 let f = &self.f;
                 let mapped = msg.map_event(f);
                 Poll::Ready(Some(Ok(mapped)))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<R, F, P, Q> Stream for TryMapStream<R, F, P, Q>
+where
+    R: Reader<P>,
+    F: Fn(Event<P>) -> Result<Event<Q>> + Unpin,
+{
+    type Item = Result<Message<R::Acker, R::Cursor, Q>>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(msg))) => {
+                let (event, acker, cursor) = msg.into_parts();
+                let f = &self.f;
+                match f(event) {
+                    Ok(mapped) => Poll::Ready(Some(Ok(Message::new(mapped, acker, cursor)))),
+                    Err(e) => Poll::Ready(Some(Err(e))),
+                }
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
@@ -169,5 +241,39 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         assert!(err.to_string().contains("inner failed"));
+    }
+
+    #[tokio::test]
+    async fn try_map_reader_passes_ok() {
+        let reader = VecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                ev("a.b"),
+                NoopAcker,
+                TestCursor(1),
+            ))])),
+        };
+        let mapped = TryMapReader::new(reader, |_event: Event| {
+            Ok(Event::create("org", "/x", "out", "thing-1", Payload::from_string("p")).unwrap())
+        });
+        let mut stream = mapped.read(()).await.unwrap();
+        let msg = stream.next().await.unwrap().unwrap();
+        assert_eq!(msg.event().topic().as_str(), "out");
+    }
+
+    #[tokio::test]
+    async fn try_map_reader_propagates_err() {
+        let reader = VecReader {
+            items: Mutex::new(Some(vec![Ok(Message::new(
+                ev("a.b"),
+                NoopAcker,
+                TestCursor(1),
+            ))])),
+        };
+        let mapped = TryMapReader::new(reader, |_event: Event| -> Result<Event> {
+            Err(Error::Store("mapping failed".into()))
+        });
+        let mut stream = mapped.read(()).await.unwrap();
+        let result = stream.next().await.unwrap();
+        assert!(result.is_err());
     }
 }
