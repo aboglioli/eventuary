@@ -11,7 +11,7 @@ impl EventKeyPartitionKeyResolver {
     }
 }
 
-impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for EventKeyPartitionKeyResolver {
+impl<P> PartitionKeyResolver<P> for EventKeyPartitionKeyResolver {
     fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         PartitionKey::new(event.key().as_str())
     }

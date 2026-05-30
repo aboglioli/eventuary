@@ -5,7 +5,7 @@ use crate::event::Event;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OrganizationPartitionKeyResolver;
 
-impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for OrganizationPartitionKeyResolver {
+impl<P> PartitionKeyResolver<P> for OrganizationPartitionKeyResolver {
     fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         PartitionKey::new(event.organization().as_str())
     }

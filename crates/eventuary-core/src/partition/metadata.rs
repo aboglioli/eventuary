@@ -14,7 +14,7 @@ impl MetadataPartitionKeyResolver {
     }
 }
 
-impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for MetadataPartitionKeyResolver {
+impl<P> PartitionKeyResolver<P> for MetadataPartitionKeyResolver {
     fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         match event.metadata().get(&self.field) {
             Some(value) => PartitionKey::new(value),

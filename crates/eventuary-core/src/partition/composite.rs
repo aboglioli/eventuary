@@ -24,7 +24,7 @@ impl<P> CompositePartitionKeyResolver<P> {
     }
 }
 
-impl<P: Send + Sync + 'static> PartitionKeyResolver<P> for CompositePartitionKeyResolver<P> {
+impl<P: 'static> PartitionKeyResolver<P> for CompositePartitionKeyResolver<P> {
     fn partition_key(&self, event: &Event<P>) -> Result<PartitionKey> {
         let segments = self
             .parts

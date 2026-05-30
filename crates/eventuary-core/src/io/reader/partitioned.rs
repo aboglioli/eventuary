@@ -106,7 +106,7 @@ impl<P> fmt::Debug for PartitionedReaderConfig<P> {
     }
 }
 
-impl<P: Send + Sync + 'static> Default for PartitionedReaderConfig<P> {
+impl<P> Default for PartitionedReaderConfig<P> {
     fn default() -> Self {
         Self {
             partition_count: NonZeroU32::new(64).unwrap(),
