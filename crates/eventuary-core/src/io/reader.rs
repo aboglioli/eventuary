@@ -282,7 +282,6 @@ pub mod rate_limit;
 pub mod recover;
 pub mod replay_then_live;
 pub mod timeout;
-pub mod try_map;
 pub mod watermark;
 pub mod window;
 
@@ -305,7 +304,7 @@ pub use dedupe::{DedupeAcker, DedupeReader, DedupeStore};
 pub use encoded_cursor::{EncodedCursorReader, EncodedCursorSubscription};
 pub use filtered::{FilteredReader, FilteredStream};
 pub use inspect::{InspectAcker, InspectHooks, InspectReader, InspectStream};
-pub use map::{MapReader, MapStream};
+pub use map::{MapReader, MapStream, TryMapReader, TryMapStream};
 pub use merge::{MergeAcker, MergeCursor, MergeReader, MergeStrategy};
 pub use outcome_router::{
     DeliveryDisposition, NackDisposition, OutcomeRouterAcker, OutcomeRouterReader,
@@ -321,6 +320,5 @@ pub use replay_then_live::{
     ReplayThenLiveStream, ReplayThenLiveSubscription,
 };
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
-pub use try_map::{TryMapReader, TryMapStream};
 pub use watermark::{WatermarkAcker, WatermarkReader, WatermarkStore};
 pub use window::WindowReader;
