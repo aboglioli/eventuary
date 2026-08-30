@@ -4,6 +4,7 @@ members = [
     "crates/eventuary",
     "crates/eventuary-core",
     "crates/eventuary-memory",
+    "crates/eventuary-fs",
     "crates/eventuary-sqlite",
     "crates/eventuary-postgres",
     "crates/eventuary-aws",
@@ -21,6 +22,7 @@ repository = "https://github.com/aboglioli/eventuary"
 eventuary = { path = "crates/eventuary", version = "0.2.0" }
 eventuary-core = { path = "crates/eventuary-core", version = "0.2.0" }
 eventuary-memory = { path = "crates/eventuary-memory", version = "0.2.0" }
+eventuary-fs = { path = "crates/eventuary-fs", version = "0.2.0" }
 eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.2.0" }
 eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.2.0" }
 eventuary-aws = { path = "crates/eventuary-aws", version = "0.2.0" }
