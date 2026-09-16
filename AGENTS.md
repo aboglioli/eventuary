@@ -1260,12 +1260,25 @@ to [trusted publishing] is a future improvement.
 ### Release procedure
 
 ```bash
-# 1. Bump workspace.package.version in the root Cargo.toml
-# 2. Commit + push (maintainer)
-# 3. Create and publish a GitHub Release targeting main.
+# 1. Bump the version in the root Cargo.toml. Both places must match:
+#    - workspace.package.version
+#    - every workspace.dependencies pin for an eventuary crate
+#    A pin left behind fails the publish partway through, after the earlier
+#    crates are already on crates.io and immutable.
+# 2. Run `cargo check` so Cargo.lock records the new version.
+# 3. Commit + push (maintainer)
+# 4. Create and publish a GitHub Release targeting main.
 #    Use tag v0.3.0-rc.1 and title v0.3.0-rc.1.
-# 4. Publish workflow runs automatically from the release event.
+#    For a pre-release, tick "Set as a pre-release"; the workflow listens on
+#    `published`, which fires for pre-releases too.
+# 5. Publish workflow runs automatically from the release event.
 ```
+
+Pre-release versions (`-alpha.N`, `-beta.N`, `-rc.N`) follow SemVer: dot-separated
+identifiers of `[0-9A-Za-z-]`, no leading zeros on numeric parts. Cargo will not
+resolve a pre-release from a plain requirement, so `eventuary = "0.3.0"` never
+selects `0.3.0-rc.1` — testers must ask for the exact version, and the
+workspace pins above must carry the same suffix.
 
 [trusted publishing]: https://crates.io/docs/trusted-publishing
 
