@@ -7,8 +7,10 @@
 //! sends them via `SendMessageBatch`. `SqsReader` long-polls `ReceiveMessage`
 //! and emits `Message<BatchedAcker<String>, NoCursor>` whose token is the receipt handle.
 //! SQS does not support historical replay: `StartFrom::{Earliest, Timestamp}`
-//! and `limit` are rejected at config time with `Error::Config`. Poison
-//! records (missing body, undecodable event) are acked and skipped.
+//! and `limit` are rejected at config time with `Error::Config`. A message the
+//! reader cannot decode into an `Event` is logged at warn with its message id
+//! and the decode error, then deleted, because leaving it on the queue would
+//! redeliver it forever.
 //!
 //! `SnsWriter` publishes the same wire format via `Publish` / `PublishBatch`.
 //! SNS is publish-only and has no receive API, so there is no `SnsReader`:

@@ -8,10 +8,15 @@ use uuid::Uuid;
 use eventuary_core::io::acker::{Acker, BatchedAcker};
 use eventuary_core::io::stream::BatchedStream;
 use eventuary_core::io::{Message, NoCursor, Reader};
-use eventuary_core::{Result, SerializedEvent};
+use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::sqs::flusher::SqsFlusher;
 use crate::sqs::queue::SqsQueueType;
+
+fn decode_event(body: Option<&str>) -> Result<Event> {
+    let body = body.ok_or_else(|| Error::Serialization("message has no body".to_owned()))?;
+    SerializedEvent::from_json_str(body)?.to_event()
+}
 
 #[derive(Debug, Clone)]
 pub struct SqsSubscription {
@@ -105,23 +110,15 @@ impl Reader for SqsReader {
                                 Some(r) => r,
                                 None => continue,
                             };
-                            let body = match m.body.as_deref() {
-                                Some(b) => b,
-                                None => {
-                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
-                                    continue;
-                                }
-                            };
-                            let serialized = match SerializedEvent::from_json_str(body) {
-                                Ok(s) => s,
-                                Err(_) => {
-                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
-                                    continue;
-                                }
-                            };
-                            let event = match serialized.to_event() {
-                                Ok(e) => e,
-                                Err(_) => {
+                            let event = match decode_event(m.body.as_deref()) {
+                                Ok(event) => event,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        queue_url = %queue_url,
+                                        message_id = m.message_id.as_deref().unwrap_or("<none>"),
+                                        %error,
+                                        "deleting undecodable SQS message"
+                                    );
                                     let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                                     continue;
                                 }
