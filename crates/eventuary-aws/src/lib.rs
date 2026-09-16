@@ -6,8 +6,10 @@
 //! `SqsWriter` serializes events with `SerializedEvent::to_json_string` and
 //! sends them via `SendMessageBatch`. `SqsReader` long-polls `ReceiveMessage`
 //! and emits `Message<BatchedAcker<String>, NoCursor>` whose token is the receipt handle.
-//! SQS does not support historical replay: `StartFrom::{Earliest, Timestamp}`
-//! and `limit` are rejected at config time with `Error::Config`. A message the
+//! SQS has no replay cursor, so `SqsReaderConfig` carries no start position at
+//! all rather than accepting one it would reject. `SqsSubscription` owns the
+//! protocol bounds and is validated on every read, not only when the reader is
+//! constructed. A message the
 //! reader cannot decode into an `Event` is logged at warn with its message id
 //! and the decode error, then deleted, because leaving it on the queue would
 //! redeliver it forever.

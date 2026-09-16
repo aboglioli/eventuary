@@ -15,7 +15,7 @@ This crate hosts every AWS-backed implementation of the eventuary IO traits. Bec
 
 ## SQS
 
-`SqsWriter` serializes events with `SerializedEvent::to_json_string`. `SqsReader` long-polls `ReceiveMessage` and emits messages whose ack token is the SQS receipt handle. Acks are batched into `DeleteMessageBatch` calls; nacks become `ChangeMessageVisibilityBatch` with a zero visibility timeout, so the message is redelivered immediately. SQS only supports `StartFrom::Latest`; `Earliest`, `Timestamp`, `limit`, and `consumer_group_id` are rejected at config construction with `Error::Config`. Poison records (missing body, malformed JSON, undecodable event) are acked and skipped so the queue keeps draining.
+`SqsWriter` serializes events with `SerializedEvent::to_json_string`. `SqsReader` long-polls `ReceiveMessage` and emits messages whose ack token is the SQS receipt handle. Acks are batched into `DeleteMessageBatch` calls; nacks become `ChangeMessageVisibilityBatch` with a zero visibility timeout, so the message is redelivered immediately. SQS has no replay cursor, so `SqsReaderConfig` carries no start position or consumer group at all rather than accepting values it would only reject; the queue URL is the consumer identity. `SqsSubscription` owns the protocol bounds — queue URL, `max_messages`, `wait_time`, `visibility_timeout` — and `validate` runs on every read, so a hand-built subscription is checked too. A message the reader cannot decode into an `Event` is logged at warn with its message id and the decode error, then deleted, because leaving it on the queue would redeliver it forever.
 
 ## SNS
 

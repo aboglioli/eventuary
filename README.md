@@ -1134,8 +1134,12 @@ more than one service. It supersedes the retired `eventuary-sqs` crate.
   instead of stalling the message group until the visibility timeout expires.
 - `SqsReader` emits messages with `BatchedAcker<String>` receipt-handle tokens.
 - Ack deletes messages in batches; nack changes visibility timeout to zero.
-- SQS supports only `StartFrom::Latest` in reader config and has no historical
-  replay cursor.
+- SQS has no historical replay cursor, so `SqsReaderConfig` carries no start
+  position and no consumer group id; the queue URL is the consumer identity.
+- `SqsSubscription::validate` runs on every read, so a hand-built subscription
+  is checked against the SQS protocol bounds, not just the reader's own config.
+- A message the reader cannot decode into an `Event` is logged at warn with its
+  message id and the decode error, then deleted.
 
 **SNS**
 
