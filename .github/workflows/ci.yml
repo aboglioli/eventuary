@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: AWS integration tests (SQS + SNS, LocalStack via testcontainers)
+      - name: AWS integration tests (SQS + SNS, Floci via testcontainers)
         run: cargo test -p eventuary-aws -- --test-threads=1
 
   integration-kafka:
