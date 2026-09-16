@@ -370,6 +370,9 @@ impl Reader for FsReader {
 
                     let mut nacked = false;
                     loop {
+                        let settled = notify.notified();
+                        tokio::pin!(settled);
+                        settled.as_mut().enable();
                         {
                             let mut guard = state.lock().await;
                             if guard.acked(partition.id(), offset) {
@@ -387,7 +390,7 @@ impl Reader for FsReader {
                                 return;
                             }
                         }
-                        notify.notified().await;
+                        settled.await;
                     }
                     if nacked {
                         tokio::time::sleep(poll_interval).await;
