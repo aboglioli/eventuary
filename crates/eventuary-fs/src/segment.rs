@@ -251,35 +251,25 @@ fn recover(log_path: &Path, base_offset: u64, index: &OffsetIndex) -> Result<Rec
         .map_err(|e| io_at("stat segment", log_path, e))?
         .len();
 
-    let start = u64::from(index.last_position().unwrap_or(0));
+    let (start, expected) = match index.entries().last() {
+        Some(entry) => (
+            u64::from(entry.position),
+            base_offset + u64::from(entry.relative_offset),
+        ),
+        None => (0, base_offset),
+    };
     let mut reader = BufReader::new(file);
     reader
         .seek(SeekFrom::Start(start))
         .map_err(|e| io_at("seek segment", log_path, e))?;
 
-    let mut valid_to = start;
-    let mut next_offset = base_offset;
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let read = reader
-            .read_until(b'\n', &mut line)
-            .map_err(|e| io_at("scan segment", log_path, e))?;
-        if read == 0 || line.last() != Some(&b'\n') {
-            break;
-        }
-        match Record::decode(&line[..line.len() - 1]) {
-            Ok(record) => {
-                valid_to += read as u64;
-                next_offset = record.offset + 1;
-            }
-            Err(_) => break,
-        }
-    }
+    let scanned = scan(&mut reader, log_path, start, expected)?;
 
-    if valid_to == start && start > 0 {
+    if scanned.valid_to == start && start > 0 {
         return recover_full_scan(log_path, base_offset, file_len);
     }
+    let next_offset = scanned.next_offset;
+    let valid_to = scanned.valid_to;
 
     Ok(Recovered {
         next_offset,
@@ -292,8 +282,28 @@ fn recover(log_path: &Path, base_offset: u64, index: &OffsetIndex) -> Result<Rec
 fn recover_full_scan(log_path: &Path, base_offset: u64, file_len: u64) -> Result<Recovered> {
     let file = File::open(log_path).map_err(|e| io_at("open segment", log_path, e))?;
     let mut reader = BufReader::new(file);
-    let mut valid_to = 0u64;
-    let mut next_offset = base_offset;
+    let scanned = scan(&mut reader, log_path, 0, base_offset)?;
+    Ok(Recovered {
+        next_offset: scanned.next_offset,
+        truncated_to: scanned.valid_to,
+        indexed_to: file_len,
+        file_len,
+    })
+}
+
+struct Scanned {
+    next_offset: u64,
+    valid_to: u64,
+}
+
+fn scan(
+    reader: &mut BufReader<File>,
+    log_path: &Path,
+    start: u64,
+    expected_first: u64,
+) -> Result<Scanned> {
+    let mut valid_to = start;
+    let mut expected = expected_first;
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -305,16 +315,24 @@ fn recover_full_scan(log_path: &Path, base_offset: u64, file_len: u64) -> Result
         }
         match Record::decode(&line[..line.len() - 1]) {
             Ok(record) => {
+                if record.offset != expected {
+                    return Err(corrupt(
+                        log_path,
+                        format!(
+                            "offset {} at byte {valid_to} breaks the dense sequence, expected {expected}; \
+                             a second writer has appended to this partition",
+                            record.offset
+                        ),
+                    ));
+                }
                 valid_to += read as u64;
-                next_offset = record.offset + 1;
+                expected = record.offset + 1;
             }
             Err(_) => break,
         }
     }
-    Ok(Recovered {
-        next_offset,
-        truncated_to: valid_to,
-        indexed_to: file_len,
-        file_len,
+    Ok(Scanned {
+        next_offset: expected,
+        valid_to,
     })
 }

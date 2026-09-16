@@ -44,10 +44,6 @@ impl OffsetIndex {
         self.entries.is_empty()
     }
 
-    pub(crate) fn last_position(&self) -> Option<u32> {
-        self.entries.last().map(|e| e.position)
-    }
-
     pub(crate) fn append(&mut self, entry: OffsetEntry) -> Result<()> {
         if let Some(last) = self.entries.last()
             && entry.relative_offset <= last.relative_offset

@@ -309,3 +309,63 @@ fn a_high_volume_append_and_full_read_round_trips() {
     assert_eq!(records.last().unwrap().offset, 4_999);
     assert!(log.segment_count() > 1);
 }
+
+#[test]
+fn duplicate_offsets_from_a_foreign_writer_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 5, synced());
+    let segment = segment_path(&partition_dir(dir.path(), 0), 0, LOG_SUFFIX);
+    let existing = fs::read_to_string(&segment).unwrap();
+    let replayed = existing.lines().last().unwrap().to_owned();
+    let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+    file.write_all(format!("{replayed}\n").as_bytes()).unwrap();
+    file.sync_all().unwrap();
+
+    let result = PartitionLog::open_readonly(dir.path(), 0, synced());
+
+    assert!(result.is_err(), "a repeated offset must not open cleanly");
+}
+
+#[test]
+fn a_gap_in_offsets_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 3, synced());
+    let segment = segment_path(&partition_dir(dir.path(), 0), 0, LOG_SUFFIX);
+    let mut record: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(&segment)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    record["offset"] = serde_json::json!(99);
+    let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+    file.write_all(format!("{record}\n").as_bytes()).unwrap();
+    file.sync_all().unwrap();
+
+    let result = PartitionLog::open_readonly(dir.path(), 0, synced());
+
+    assert!(result.is_err(), "a gap in offsets must not open cleanly");
+}
+
+#[test]
+fn a_segment_whose_first_offset_is_not_its_base_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 2, synced());
+    let stray = segment_path(&partition_dir(dir.path(), 0), 500, LOG_SUFFIX);
+    let mut record: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(segment_path(&partition_dir(dir.path(), 0), 0, LOG_SUFFIX))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    record["offset"] = serde_json::json!(777);
+    fs::write(&stray, format!("{record}\n")).unwrap();
+
+    let result = PartitionLog::open_readonly(dir.path(), 0, synced());
+
+    assert!(result.is_err(), "a segment must start at its base offset");
+}
