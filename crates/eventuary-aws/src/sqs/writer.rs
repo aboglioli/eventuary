@@ -4,6 +4,8 @@ use aws_sdk_sqs::types::SendMessageBatchRequestEntry;
 use eventuary_core::io::Writer;
 use eventuary_core::{Error, Event, EventId, Result, SerializedEvent};
 
+use crate::sqs::queue::SqsQueueType;
+
 const SQS_BATCH_MAX: usize = 10;
 const SQS_PAYLOAD_MAX: usize = 256 * 1024;
 
@@ -11,17 +13,36 @@ fn would_exceed_batch_limits(entry_count: usize, batch_bytes: usize, next_body: 
     entry_count == SQS_BATCH_MAX || batch_bytes + next_body > SQS_PAYLOAD_MAX
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SqsWriterConfig {
+    pub queue_type: SqsQueueType,
+}
+
 pub struct SqsWriter {
     client: Client,
     queue_url: String,
+    config: SqsWriterConfig,
 }
 
 impl SqsWriter {
     pub fn new(client: Client, queue_url: impl Into<String>) -> Self {
+        Self::new_with_config(client, queue_url, SqsWriterConfig::default())
+    }
+
+    pub fn new_with_config(
+        client: Client,
+        queue_url: impl Into<String>,
+        config: SqsWriterConfig,
+    ) -> Self {
         Self {
             client,
             queue_url: queue_url.into(),
+            config,
         }
+    }
+
+    pub fn queue_url(&self) -> &str {
+        &self.queue_url
     }
 
     fn serialize_body(event: &Event) -> Result<String> {
@@ -83,10 +104,18 @@ impl SqsWriter {
 impl Writer for SqsWriter {
     async fn write(&self, event: &Event) -> Result<()> {
         let body = Self::serialize_body(event)?;
-        self.client
+        let mut request = self
+            .client
             .send_message()
             .queue_url(&self.queue_url)
-            .message_body(body)
+            .message_body(body);
+        if let Some(group_id) = self.config.queue_type.message_group_id(event) {
+            request = request.message_group_id(group_id);
+        }
+        if let Some(dedup_id) = self.config.queue_type.message_deduplication_id(event) {
+            request = request.message_deduplication_id(dedup_id);
+        }
+        request
             .send()
             .await
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -107,11 +136,16 @@ impl Writer for SqsWriter {
                 self.send_batch(drained, &drained_ids).await?;
                 current_bytes = 0;
             }
-            let entry = SendMessageBatchRequestEntry::builder()
+            let mut builder = SendMessageBatchRequestEntry::builder()
                 .id(current.len().to_string())
-                .message_body(body)
-                .build()
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .message_body(body);
+            if let Some(group_id) = self.config.queue_type.message_group_id(event) {
+                builder = builder.message_group_id(group_id);
+            }
+            if let Some(dedup_id) = self.config.queue_type.message_deduplication_id(event) {
+                builder = builder.message_deduplication_id(dedup_id);
+            }
+            let entry = builder.build().map_err(|e| Error::Store(e.to_string()))?;
             current.push(entry);
             current_event_ids.push(event.id());
             current_bytes += body_len;
