@@ -17,7 +17,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! eventuary = { version = "0.2.0", features = ["postgres"] }
+//! eventuary = { version = "0.3.0-rc.1", features = ["postgres"] }
 //! ```
 //!
 //! Backend-authoring crates may prefer to depend directly on `eventuary-core`.

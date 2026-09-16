@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "eventuary-aws",
  "eventuary-core",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-aws"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "aws-config",
  "aws-sdk-sns",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-conformance"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "eventuary-core",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-core"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "base64",
  "bytes",
@@ -1162,7 +1162,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-kafka"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "eventuary-core",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-memory"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "eventuary-core",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-postgres"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "either",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "eventuary-sqlite"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 dependencies = [
  "chrono",
  "either",
