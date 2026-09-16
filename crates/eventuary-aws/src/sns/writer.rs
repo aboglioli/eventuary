@@ -8,14 +8,14 @@ const SNS_BATCH_MAX: usize = 10;
 const SNS_PAYLOAD_MAX: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SnsFifoConfig {
+pub enum SnsTopicType {
     #[default]
     Standard,
     Fifo,
     FifoContentBasedDeduplication,
 }
 
-impl SnsFifoConfig {
+impl SnsTopicType {
     fn message_group_id(&self, event: &Event) -> Option<String> {
         match self {
             Self::Standard => None,
@@ -35,7 +35,7 @@ impl SnsFifoConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct SnsWriterConfig {
-    pub fifo: SnsFifoConfig,
+    pub topic_type: SnsTopicType,
 }
 
 pub struct SnsWriter {
@@ -118,10 +118,10 @@ impl Writer for SnsWriter {
             .publish()
             .topic_arn(&self.topic_arn)
             .message(body);
-        if let Some(group_id) = self.config.fifo.message_group_id(event) {
+        if let Some(group_id) = self.config.topic_type.message_group_id(event) {
             request = request.message_group_id(group_id);
         }
-        if let Some(dedup_id) = self.config.fifo.message_deduplication_id(event) {
+        if let Some(dedup_id) = self.config.topic_type.message_deduplication_id(event) {
             request = request.message_deduplication_id(dedup_id);
         }
         request
@@ -148,10 +148,10 @@ impl Writer for SnsWriter {
             let mut builder = PublishBatchRequestEntry::builder()
                 .id(id_counter.to_string())
                 .message(body);
-            if let Some(group_id) = self.config.fifo.message_group_id(event) {
+            if let Some(group_id) = self.config.topic_type.message_group_id(event) {
                 builder = builder.message_group_id(group_id);
             }
-            if let Some(dedup_id) = self.config.fifo.message_deduplication_id(event) {
+            if let Some(dedup_id) = self.config.topic_type.message_deduplication_id(event) {
                 builder = builder.message_deduplication_id(dedup_id);
             }
             let entry = builder.build().map_err(|e| Error::Store(e.to_string()))?;
@@ -183,44 +183,50 @@ mod tests {
 
     #[test]
     fn standard_sets_no_fifo_attributes() {
-        let config = SnsFifoConfig::Standard;
+        let topic_type = SnsTopicType::Standard;
         let event = event("order-1");
-        assert!(config.message_group_id(&event).is_none());
-        assert!(config.message_deduplication_id(&event).is_none());
+        assert!(topic_type.message_group_id(&event).is_none());
+        assert!(topic_type.message_deduplication_id(&event).is_none());
     }
 
     #[test]
     fn fifo_groups_by_event_key_and_dedupes_by_event_id() {
-        let config = SnsFifoConfig::Fifo;
+        let topic_type = SnsTopicType::Fifo;
         let event = event("order-1");
-        assert_eq!(config.message_group_id(&event).as_deref(), Some("order-1"));
+        assert_eq!(
+            topic_type.message_group_id(&event).as_deref(),
+            Some("order-1")
+        );
         let expected_dedup_id = event.id().to_string();
         assert_eq!(
-            config.message_deduplication_id(&event).as_deref(),
+            topic_type.message_deduplication_id(&event).as_deref(),
             Some(expected_dedup_id.as_str())
         );
     }
 
     #[test]
     fn fifo_content_based_dedup_omits_deduplication_id() {
-        let config = SnsFifoConfig::FifoContentBasedDeduplication;
+        let topic_type = SnsTopicType::FifoContentBasedDeduplication;
         let event = event("order-1");
-        assert_eq!(config.message_group_id(&event).as_deref(), Some("order-1"));
-        assert!(config.message_deduplication_id(&event).is_none());
+        assert_eq!(
+            topic_type.message_group_id(&event).as_deref(),
+            Some("order-1")
+        );
+        assert!(topic_type.message_deduplication_id(&event).is_none());
     }
 
     #[test]
     fn events_sharing_a_key_share_a_message_group() {
-        let config = SnsFifoConfig::Fifo;
+        let topic_type = SnsTopicType::Fifo;
         let first = event("order-1");
         let second = event("order-1");
         assert_eq!(
-            config.message_group_id(&first),
-            config.message_group_id(&second)
+            topic_type.message_group_id(&first),
+            topic_type.message_group_id(&second)
         );
         assert_ne!(
-            config.message_deduplication_id(&first),
-            config.message_deduplication_id(&second)
+            topic_type.message_deduplication_id(&first),
+            topic_type.message_deduplication_id(&second)
         );
     }
 

@@ -9,7 +9,7 @@ use eventuary_core::io::Writer;
 use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{Error, Event, Payload, SerializedEvent};
 
-use eventuary_aws::sns::writer::{SnsFifoConfig, SnsWriter, SnsWriterConfig};
+use eventuary_aws::sns::writer::{SnsTopicType, SnsWriter, SnsWriterConfig};
 use eventuary_aws::sqs::reader::{SqsReader, SqsReaderConfig};
 
 use common::{
@@ -166,7 +166,7 @@ async fn fifo_topic_publish_round_trips_with_group_and_dedup_ids() {
         stack.sns.clone(),
         &topic_arn,
         SnsWriterConfig {
-            fifo: SnsFifoConfig::Fifo,
+            topic_type: SnsTopicType::Fifo,
         },
     );
 
@@ -197,7 +197,7 @@ async fn fifo_batch_publish_round_trips() {
         stack.sns.clone(),
         &topic_arn,
         SnsWriterConfig {
-            fifo: SnsFifoConfig::Fifo,
+            topic_type: SnsTopicType::Fifo,
         },
     );
 
