@@ -16,12 +16,19 @@ use crate::segment::Segment;
 pub use crate::record::Record;
 pub use crate::segment::SegmentConfig;
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub const DEFAULT_SYNC_INTERVAL_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SyncPolicy {
-    #[default]
     Never,
     Always,
     EveryBytes(u64),
+}
+
+impl Default for SyncPolicy {
+    fn default() -> Self {
+        Self::EveryBytes(DEFAULT_SYNC_INTERVAL_BYTES)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

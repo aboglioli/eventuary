@@ -358,3 +358,12 @@ fn seeking_a_high_offset_does_not_rescan_from_the_start() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].offset, 499);
 }
+
+#[test]
+fn the_default_sync_policy_fsyncs_periodically() {
+    assert_eq!(
+        LogConfig::default().sync,
+        SyncPolicy::EveryBytes(eventuary_fs::log::DEFAULT_SYNC_INTERVAL_BYTES)
+    );
+    assert_ne!(LogConfig::default().sync, SyncPolicy::Never);
+}
