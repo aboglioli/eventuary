@@ -10,7 +10,8 @@ use eventuary_core::partition::{
     EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionGroup,
     PartitionSelection,
 };
-use eventuary_core::{Event, OrganizationId, Payload, StartFrom, StopAt, Topic};
+use eventuary_core::{Error, Event, OrganizationId, Payload, StartFrom, StopAt, Topic};
+use eventuary_fs::log::{LogConfig, RetentionPolicy, SegmentConfig};
 use eventuary_fs::reader::{FsCursor, FsReader, FsReaderConfig, FsSubscription};
 use eventuary_fs::writer::{FsPartitioningConfig, FsWriter, FsWriterConfig};
 
@@ -547,4 +548,56 @@ async fn writing_to_an_unowned_partition_is_rejected() {
     }
 
     assert!(rejected);
+}
+
+#[tokio::test]
+async fn retention_removing_unread_events_surfaces_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = FsWriterConfig {
+        log: LogConfig {
+            segment: SegmentConfig {
+                index_interval_bytes: 64,
+                max_bytes: 400,
+            },
+            retention: RetentionPolicy {
+                max_bytes: Some(800),
+                max_age: None,
+            },
+            ..LogConfig::default()
+        },
+        ..FsWriterConfig::default()
+    };
+    let writer = FsWriter::open(dir.path(), config).unwrap();
+    for i in 0..80 {
+        writer
+            .write(&ev("order.created", &format!("k{i}")))
+            .await
+            .unwrap();
+    }
+    writer.sync().await.unwrap();
+    assert!(writer.enforce_retention().await.unwrap() > 0);
+
+    let reader = FsReader::open(dir.path(), fast()).unwrap();
+    let partition = Partition::new(0, NonZeroU32::new(1).unwrap()).unwrap();
+    let subscription = FsSubscription {
+        start: StartFrom::After(FsCursor::new(partition, 0)),
+        ..FsSubscription::default()
+    };
+    let mut stream = reader.read(subscription).await.unwrap();
+
+    let first = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("stream must yield")
+        .expect("stream must not end");
+
+    match first {
+        Err(Error::InvalidCursor(detail)) => {
+            assert!(detail.contains("retention removed"), "{detail}");
+        }
+        Err(other) => panic!("expected a cursor error, got {other}"),
+        Ok(message) => panic!(
+            "expected a retention gap, got event {}",
+            message.event().key().as_str()
+        ),
+    }
 }

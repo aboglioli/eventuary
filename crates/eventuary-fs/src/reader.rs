@@ -412,6 +412,20 @@ fn advance(cursors: &mut [PartitionCursor], partition_id: u32, offset: u64) {
     }
 }
 
+fn retention_gap(cursor: &PartitionCursor) -> Result<()> {
+    let start = cursor.log.start_offset();
+    if cursor.next >= start {
+        return Ok(());
+    }
+    Err(Error::InvalidCursor(format!(
+        "partition {} resumes at offset {} but its log now starts at {start}; \
+         retention removed {} unread event(s)",
+        cursor.partition.id(),
+        cursor.next,
+        start - cursor.next
+    )))
+}
+
 fn fetch_round(
     cursors: &mut [PartitionCursor],
     batch_size: usize,
@@ -421,9 +435,7 @@ fn fetch_round(
         if cursor.exhausted {
             continue;
         }
-        if cursor.next < cursor.log.start_offset() {
-            cursor.next = cursor.log.start_offset();
-        }
+        retention_gap(cursor)?;
         let take = match cursor.stop {
             Some(stop) if cursor.next > stop => {
                 cursor.exhausted = true;
@@ -435,9 +447,7 @@ fn fetch_round(
         let mut records = cursor.log.read(cursor.next, take)?;
         if records.is_empty() {
             cursor.log.refresh()?;
-            if cursor.next < cursor.log.start_offset() {
-                cursor.next = cursor.log.start_offset();
-            }
+            retention_gap(cursor)?;
             records = cursor.log.read(cursor.next, take)?;
         }
         if records.is_empty() {
