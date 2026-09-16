@@ -9,7 +9,7 @@ PostgreSQL, AWS (SQS, SNS), and Apache Kafka. Everything intended for applicatio
 available through the `eventuary` umbrella crate, with backends enabled by Cargo
 features.
 
-> **Status:** Stable (`0.2.0`).
+> **Status:** `0.2.0` stable; `0.3.0-rc.1` pre-release.
 
 Eventuary is a library you embed in your application. It is not a server, broker,
 daemon, or transport runtime.
@@ -21,7 +21,7 @@ features they need. No backend is enabled by default.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.2.0", features = ["postgres"] }
+eventuary = { version = "0.3.0-rc.1", features = ["postgres"] }
 ```
 
 | Feature | Module | Backend crate |
@@ -329,7 +329,7 @@ serialization happens.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.2.0", features = ["memory"] }
+eventuary = { version = "0.3.0-rc.1", features = ["memory"] }
 ```
 
 ```rust
@@ -1210,12 +1210,25 @@ runs formatting, clippy, and unit tests, then publishes in dependency order:
 Release procedure:
 
 ```bash
-# 1. Bump workspace.package.version in Cargo.toml.
-# 2. Commit and push the version bump.
-# 3. Create and publish a GitHub Release targeting main.
-#    Use tag v0.2.0 and title v0.2.0.
-# 4. The publish workflow runs automatically from the release event.
+# 1. Bump the version in the root Cargo.toml. Both places must match:
+#    - workspace.package.version
+#    - every workspace.dependencies pin for an eventuary crate
+#    A pin left behind fails the publish partway through, after the earlier
+#    crates are already on crates.io and immutable.
+# 2. Run `cargo check` so Cargo.lock records the new version.
+# 3. Commit and push the version bump.
+# 4. Create and publish a GitHub Release targeting main.
+#    Use tag v0.3.0-rc.1 and title v0.3.0-rc.1.
+#    For a pre-release, tick "Set as a pre-release"; the workflow listens on
+#    `published`, which fires for pre-releases too.
+# 5. The publish workflow runs automatically from the release event.
 ```
+
+Pre-release versions (`-alpha.N`, `-beta.N`, `-rc.N`) follow SemVer: dot-separated
+identifiers of `[0-9A-Za-z-]`, no leading zeros on numeric parts. Cargo will not
+resolve a pre-release from a plain requirement, so `eventuary = "0.3.0"` never
+selects `0.3.0-rc.1` — testers must ask for the exact version, and the
+workspace pins above must carry the same suffix.
 
 A `CARGO_REGISTRY_TOKEN` repository secret is required for publishing.
 
