@@ -14,7 +14,7 @@ default = []
 memory = ["dep:eventuary-memory"]
 sqlite = ["dep:eventuary-sqlite"]
 postgres = ["dep:eventuary-postgres"]
-sqs = ["dep:eventuary-sqs"]
+aws = ["dep:eventuary-aws"]
 kafka = ["dep:eventuary-kafka"]
 
 [dependencies]
@@ -22,7 +22,7 @@ eventuary-core = { workspace = true }
 eventuary-memory = { workspace = true, optional = true }
 eventuary-sqlite = { workspace = true, optional = true }
 eventuary-postgres = { workspace = true, optional = true }
-eventuary-sqs = { workspace = true, optional = true }
+eventuary-aws = { workspace = true, optional = true }
 eventuary-kafka = { workspace = true, optional = true }
 
 [dev-dependencies]

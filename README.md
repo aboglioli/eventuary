@@ -5,7 +5,7 @@ checkpointing, and acknowledgements across multiple backends.
 
 It provides a small typed event model, async IO traits, composable reader
 wrappers, and optional backend implementations for in-memory channels, SQLite,
-PostgreSQL, AWS SQS, and Apache Kafka. Everything intended for application use is
+PostgreSQL, AWS (SQS, SNS), and Apache Kafka. Everything intended for application use is
 available through the `eventuary` umbrella crate, with backends enabled by Cargo
 features.
 
@@ -29,7 +29,7 @@ eventuary = { version = "0.2.0", features = ["postgres"] }
 | `memory` | `eventuary::memory` | [`eventuary-memory`](crates/eventuary-memory) |
 | `sqlite` | `eventuary::sqlite` | [`eventuary-sqlite`](crates/eventuary-sqlite) |
 | `postgres` | `eventuary::postgres` | [`eventuary-postgres`](crates/eventuary-postgres) |
-| `sqs` | `eventuary::sqs` | [`eventuary-sqs`](crates/eventuary-sqs) |
+| `aws` | `eventuary::aws` | [`eventuary-aws`](crates/eventuary-aws) |
 | `kafka` | `eventuary::kafka` | [`eventuary-kafka`](crates/eventuary-kafka) |
 
 The umbrella crate re-exports `eventuary-core` at its root:
@@ -69,7 +69,7 @@ crates/
 ├── eventuary-memory/       # tokio::mpsc backend for tests/dev/single-process use
 ├── eventuary-sqlite/       # rusqlite append-only event log + checkpoint store
 ├── eventuary-postgres/     # sqlx/Postgres append-only event log + checkpoint store
-├── eventuary-sqs/          # AWS SQS writer/reader with batched delete acks
+├── eventuary-aws/          # AWS backends: SQS writer/reader with batched delete acks, SNS writer
 ├── eventuary-kafka/        # rdkafka writer/reader with batched offset commits
 └── eventuary-conformance/  # internal conformance scaffold, not published
 ```
@@ -80,7 +80,7 @@ Layering rules:
 - Backend crates depend on `eventuary-core`, not on the umbrella crate.
 - The umbrella crate contains no original implementation code; it only re-exports
   `eventuary-core` and optional backend crates.
-- Backend crate roots expose role modules only. Import concrete backend implementations through their role module paths (`reader`, `writer`, `checkpoint`, `coordinator`, etc.). This keeps the backend API consistent across memory, SQLite, PostgreSQL, SQS, and Kafka.
+- Backend crate roots expose role modules only. Import concrete backend implementations through their role module paths (`reader`, `writer`, `checkpoint`, `coordinator`, etc.). This keeps the backend API consistent across memory, SQLite, PostgreSQL, AWS, and Kafka. `eventuary-aws` nests one extra segment because it hosts several AWS services (`aws::sqs::reader`, `aws::sns::writer`).
 
 ## Core Event Model
 
@@ -375,7 +375,8 @@ durable replay, and no-op ack/nack.
 | memory | `memory::writer::MemoryWriter` | `memory::reader::MemoryReader` | `NoCursor` | no | tests, dev, single-process flows |
 | SQLite | `sqlite::writer::SqliteWriter` | `sqlite::reader::SqliteReader` | `SqliteCursor` | yes | embedded durable event log |
 | PostgreSQL | `postgres::writer::PgWriter` | `postgres::reader::PgReader` | `PgCursor` | yes | application event log in Postgres |
-| SQS | `sqs::writer::SqsWriter` | `sqs::reader::SqsReader` | `NoCursor` | no | queue delivery, visibility timeout redelivery |
+| SQS | `aws::sqs::writer::SqsWriter` | `aws::sqs::reader::SqsReader` | `NoCursor` | no | queue delivery, visibility timeout redelivery |
+| SNS | `aws::sns::writer::SnsWriter` | — (publish-only) | — | no | topic fanout to subscribed queues |
 | Kafka | `kafka::writer::KafkaWriter` | `kafka::reader::KafkaReader` | `KafkaCursor` | no | stream delivery, consumer group commits |
 
 SQL readers are source readers over append-only event tables. Their ackers track
@@ -396,7 +397,7 @@ Common subscription/config types:
 - `memory::reader::MemorySubscription { limit }`
 - `sqlite::reader::SqliteSubscription { start, stop_at, filter, partitions, batch_size, limit }`
 - `postgres::reader::PgSubscription { start, stop_at, filter, partitions, batch_size, limit }`
-- `sqs::reader::SqsReaderConfig`
+- `aws::sqs::reader::SqsReaderConfig`
 - `kafka::reader::KafkaReaderConfig`
 
 `StartFrom<C>` controls where replay begins. SQL subscriptions also support
@@ -1083,14 +1084,53 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   opens a pool and does not create Eventuary tables.
 - Integration tests use `postgres:18-alpine` through `testcontainers`.
 
-### sqs
+### aws
+
+`eventuary-aws` hosts every AWS backend. Its modules nest by service first and
+role second (`aws::sqs::reader`, `aws::sns::writer`) because the crate covers
+more than one service. It supersedes the retired `eventuary-sqs` crate.
+
+**SQS**
 
 - Uses `aws-sdk-sqs` long polling.
 - `SqsWriter` serializes events as `SerializedEvent` JSON.
+- `SqsQueueType` selects a standard or FIFO queue. FIFO sends carry
+  `MessageGroupId` from `event.key()` and `MessageDeduplicationId` from
+  `event.id()`; a FIFO queue rejects a send without a group id.
+- `SqsReaderConfig` takes the queue type too: FIFO polls carry a
+  `ReceiveRequestAttemptId` so a retried receive returns the same messages
+  instead of stalling the message group until the visibility timeout expires.
 - `SqsReader` emits messages with `BatchedAcker<String>` receipt-handle tokens.
 - Ack deletes messages in batches; nack changes visibility timeout to zero.
 - SQS supports only `StartFrom::Latest` in reader config and has no historical
   replay cursor.
+
+**SNS**
+
+- Uses `aws-sdk-sns` `Publish` / `PublishBatch` (10 entries, 256 KB per request).
+- `SnsWriter` publishes the same `SerializedEvent` JSON wire format, so a
+  subscribed queue can be consumed with `SqsReader`.
+- **Publish-only: there is no `SnsReader`.** SNS has no receive API. The
+  canonical topology is SNS → SQS fanout — publish once, subscribe one queue
+  per consumer, read each with `SqsReader`.
+- `SnsTopicType` selects a standard or FIFO topic, mapping FIFO requirements
+  onto event identity exactly as `SqsQueueType` does.
+
+> **Footgun:** queues subscribed to an SNS topic must have
+> `RawMessageDelivery` enabled. Without it SNS wraps the body in a notification
+> envelope (`{"Type":"Notification","Message":"..."}`) that `SqsReader` cannot
+> decode as a `SerializedEvent`, so every event is treated as a poison record
+> and silently ack-skipped — the queue drains and nothing reaches the handler.
+
+```rust,ignore
+use eventuary::aws::sns::writer::SnsWriter;
+use eventuary::aws::sqs::reader::{SqsReader, SqsReaderConfig};
+
+let writer = SnsWriter::new(sns_client, "arn:aws:sns:us-east-1:123456789012:orders");
+writer.write(&event).await?;
+
+let reader = SqsReader::new(sqs_client, SqsReaderConfig::defaults_for(queue_url))?;
+```
 
 ### kafka
 
@@ -1147,7 +1187,7 @@ export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
 export TESTCONTAINERS_RYUK_DISABLED=true
 
 cargo test -p eventuary-postgres -- --test-threads=1
-cargo test -p eventuary-sqs -- --test-threads=1
+cargo test -p eventuary-aws -- --test-threads=1
 cargo test -p eventuary-kafka -- --test-threads=1
 ```
 

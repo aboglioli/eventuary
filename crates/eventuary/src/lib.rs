@@ -9,14 +9,14 @@
 //! | `memory` | [`memory`] | [`eventuary-memory`](https://crates.io/crates/eventuary-memory) |
 //! | `sqlite` | [`sqlite`] | [`eventuary-sqlite`](https://crates.io/crates/eventuary-sqlite) |
 //! | `postgres` | [`postgres`] | [`eventuary-postgres`](https://crates.io/crates/eventuary-postgres) |
-//! | `sqs` | [`sqs`] | [`eventuary-sqs`](https://crates.io/crates/eventuary-sqs) |
+//! | `aws` | [`aws`] | [`eventuary-aws`](https://crates.io/crates/eventuary-aws) |
 //! | `kafka` | [`kafka`] | [`eventuary-kafka`](https://crates.io/crates/eventuary-kafka) |
 //!
 //! No backend is enabled by default. Pick the ones you need:
 //!
 //! ```toml
 //! [dependencies]
-//! eventuary = { version = "0.1.0", features = ["postgres"] }
+//! eventuary = { version = "0.2.0", features = ["postgres"] }
 //! ```
 //!
 //! Backend-authoring crates may prefer to depend directly on `eventuary-core`.
@@ -76,9 +76,9 @@ pub use eventuary_sqlite as sqlite;
 #[cfg_attr(docsrs, doc(cfg(feature = "postgres")))]
 pub use eventuary_postgres as postgres;
 
-#[cfg(feature = "sqs")]
-#[cfg_attr(docsrs, doc(cfg(feature = "sqs")))]
-pub use eventuary_sqs as sqs;
+#[cfg(feature = "aws")]
+#[cfg_attr(docsrs, doc(cfg(feature = "aws")))]
+pub use eventuary_aws as aws;
 
 #[cfg(feature = "kafka")]
 #[cfg_attr(docsrs, doc(cfg(feature = "kafka")))]

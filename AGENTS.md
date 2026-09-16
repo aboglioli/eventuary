@@ -1,7 +1,7 @@
 # eventuary
 
 Rust event toolkit: a typed event model and async IO traits with backend
-implementations for in-memory, SQLite, PostgreSQL, AWS SQS, and Apache Kafka.
+implementations for in-memory, SQLite, PostgreSQL, AWS (SQS, SNS), and Apache Kafka.
 
 Eventuary started life as `orchy-events` inside the [orchy](https://github.com/aboglioli/orchy)
 project and was extracted as a standalone library so other Rust projects can
@@ -26,7 +26,7 @@ crate** that re-exports everything user-facing:
    `PartitionedReader`.
 3. **Backend crates** that implement those traits over real systems —
    `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
-   `eventuary-sqs`, `eventuary-kafka` — plus an `eventuary-conformance`
+   `eventuary-aws`, `eventuary-kafka` — plus an `eventuary-conformance`
    crate for shared backend conformance types and reusable cases as they
    are rebuilt for cursor readers.
 
@@ -49,7 +49,7 @@ a library you embed.
 ```
 crates/
 ├── eventuary/              # umbrella facade — the published consumer-facing crate
-│   ├── Cargo.toml          # features: memory, sqlite, postgres, sqs, kafka
+│   ├── Cargo.toml          # features: memory, sqlite, postgres, aws, kafka
 │   └── src/lib.rs          # pub use eventuary_core::*; feature-gated `pub use <backend>` re-exports
 │
 ├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
@@ -130,7 +130,9 @@ crates/
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
 ├── eventuary-sqlite/       # rusqlite source reader/writer + SqliteCheckpointStore
 ├── eventuary-postgres/     # sqlx Postgres source reader/writer + PgCheckpointStore
-├── eventuary-sqs/          # aws-sdk-sqs, BatchedAcker via SqsFlusher + NoCursor
+├── eventuary-aws/          # AWS backends, nested by service:
+│   ├── sqs/                # aws-sdk-sqs, BatchedAcker via SqsFlusher + NoCursor
+│   └── sns/                # aws-sdk-sns, publish-only writer (no reader)
 ├── eventuary-kafka/        # rdkafka StreamConsumer, BatchedAcker via KafkaFlusher + KafkaCursor
 └── eventuary-conformance/  # internal workspace scaffold for backend conformance checks
 ```
@@ -141,7 +143,7 @@ crates/
 |-------|-----------|---------------|
 | `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, tokio-util (`rt` + `time`), either, base64, bytes | any other eventuary crate |
 | `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate |
-| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / rdkafka) | any other backend crate |
+| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka) | any other backend crate |
 | `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
 
 Key invariants:
@@ -307,7 +309,7 @@ Ack semantics are backend-specific:
 |---------|-----|------|
 | memory | no-op (`NoopAcker`) | no-op |
 | sqlite/postgres source | advance the in-memory buffered-batch cursor; on nack, re-emit the same row at next poll | re-emit at next poll |
-| sqs | `BatchedAcker` -> `SqsFlusher` -> `DeleteMessageBatch` | no-op; visibility timeout redelivers |
+| aws (sqs) | `BatchedAcker` -> `SqsFlusher` -> `DeleteMessageBatch` | no-op; visibility timeout redelivers |
 | kafka | `BatchedAcker` -> `KafkaFlusher` -> `consumer.commit` with highest contiguous offset per partition | no-op; offset left uncommitted, redelivered after rebalance/restart |
 
 Durable consumer progress for SQL backends lives in
@@ -527,7 +529,8 @@ possible: route failed messages with `OutcomeRouterReader`, map the event with
 | `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<C>` (JSON cursor column) | ✅ `PgPartitionCoordinator` (`event_stream_consumers` + `event_stream_partitions`) | composes with `PartitionedReader` + `CheckpointReader`; `PgCoordinatedReader` for multi-instance ownership |
 | `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | ✅ `SqlitePartitionCoordinator` | composes with `PartitionedReader` + `CheckpointReader`; `SqliteCoordinatedReader` for multi-instance ownership |
 | `eventuary-memory` | `NoCursor` | — | ✅ `MemoryPartitionCoordinator<C>` (testing) | mpsc source; no replay/checkpoint semantics |
-| `eventuary-sqs` | `NoCursor` | — | — | queue visibility/delete is the native progress model |
+| `eventuary-aws` (sqs) | `NoCursor` | — | — | queue visibility/delete is the native progress model |
+| `eventuary-aws` (sns) | — | — | — | publish-only; SNS has no receive API, so no reader |
 | `eventuary-kafka` | `KafkaCursor` | — | — | consumer group commits are the native progress model |
 
 Checkpoint compatibility is validated by the reader or wrapper that interprets
@@ -648,7 +651,14 @@ Migration SQL lives inline in the Rust module for the component that owns the ta
   first — mixed `NULL`/real rows split `CheckpointReader` progress between
   the synthetic `(0, 1)` cursor and the real partition cursors.
 
-### sqs
+### aws
+
+`eventuary-aws` is the only backend crate hosting more than one service, so its
+modules nest **service first, role second**: `sqs::reader`, `sqs::writer`,
+`sqs::flusher`, `sns::writer`. Adding another AWS service means adding a
+sibling service module, not a new crate.
+
+**sqs**
 
 - `aws-sdk-sqs` long-polling (`wait_time_seconds`). Max 10 messages per
   receive (SQS limit, enforced in `validate()`).
@@ -659,6 +669,28 @@ Migration SQL lives inline in the Rust module for the component that owns the ta
   `DeleteMessageBatch` (10 per call).
 - Queue semantics: no seek/replay cursor; delivered cursor is `NoCursor`.
 - Localstack via `testcontainers`.
+
+**sns**
+
+- `aws-sdk-sns` `Publish` / `PublishBatch`. `write_all` chunks to the
+  10-entry / 256 KB batch limits, same shape as `SqsWriter::write_all`.
+- **No reader, by protocol.** SNS is push-based and has no receive API. Do not
+  add an `SnsReader`; the consumption path is an SQS queue subscribed to the
+  topic, read with `sqs::reader::SqsReader`.
+- `SqsQueueType` (`sqs::queue`) and `SnsTopicType` (`sns::topic`) are the
+  symmetric standard/FIFO selectors, carried by `SqsWriterConfig`,
+  `SqsReaderConfig`, and `SnsWriterConfig`. On a FIFO queue the reader attaches
+  a `ReceiveRequestAttemptId` per poll and reuses it across a failed receive.
+- `SnsTopicType` derives FIFO attributes from event identity:
+  `MessageGroupId` = `event.key()` (required, so always present) and
+  `MessageDeduplicationId` = `event.id()` (UUID v7, unique per occurrence).
+  `FifoContentBasedDeduplication` omits the dedup id for topics that derive it.
+- Subscriptions must set `RawMessageDelivery=true`. Without it the queue body
+  is an SNS notification envelope that `SqsReader` decodes as a poison record
+  and ack-skips — silently draining the queue. The integration suite locks this
+  behaviour in `without_raw_message_delivery_the_body_is_an_undecodable_envelope`.
+- Localstack via `testcontainers`; SNS tests observe the writer through a
+  subscribed SQS queue since there is nothing else to read from.
 
 ### kafka
 
@@ -697,7 +729,7 @@ export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
 export TESTCONTAINERS_RYUK_DISABLED=true
 
 cargo test -p eventuary-postgres -- --test-threads=1
-cargo test -p eventuary-sqs      -- --test-threads=1
+cargo test -p eventuary-aws      -- --test-threads=1
 cargo test -p eventuary-kafka    -- --test-threads=1
 ```
 
@@ -706,10 +738,10 @@ CI (`.github/workflows/ci.yml`):
 - `lint` — fmt + `clippy --workspace --all-targets --all-features`.
 - `umbrella-feature-matrix` — `cargo check -p eventuary` against each
   feature combination consumers might pick (`""`, `memory`, `sqlite`,
-  `postgres`, `sqs`, `kafka`).
+  `postgres`, `aws`, `kafka`).
 - `test` — workspace unit tests + memory/sqlite integration + umbrella
   doctest with `--all-features`.
-- `integration-postgres`, `integration-sqs`, `integration-kafka` — per-backend
+- `integration-postgres`, `integration-aws`, `integration-kafka` — per-backend
   testcontainers runs.
 
 When adding a new backend, update both the umbrella feature matrix and
@@ -741,7 +773,7 @@ Use `Arc::clone(&x)` instead of `x.clone()` for ref-counted pointers (the
 - **No helper / utils files.** Cohesive module names that describe what
   they contain (`subscription.rs`, not `helpers.rs`).
 - **Conventional commits.** `type(scope): description`. Common scopes:
-  `core`, `memory`, `sqlite`, `postgres`, `sqs`, `kafka`, `conformance`,
+  `core`, `memory`, `sqlite`, `postgres`, `aws`, `kafka`, `conformance`,
   `ci`, `workflows`. Types: `feat`, `fix`, `refactor`, `test`, `docs`,
   `chore`, `perf`, `style`.
 - **One coherent unit per commit.** Don't bundle unrelated fixes.
@@ -787,7 +819,7 @@ Each crate exposes its base abstractions and cross-cutting value types at the to
 | Trait implementation / wrapper | `eventuary_core::io::<module>::*` | `io::reader::CheckpointReader`, `io::writer::FanoutWriter`, `io::handler::RetryHandler`, `io::consumer::BackgroundConsumer`, `io::stream::BatchedStream`, `io::acker::OnceAcker`, `io::filter::EventFilter` |
 | Auxiliary type of an implementation | same submodule as the implementation | `io::reader::CheckpointKey`, `io::reader::PartitionedCursor`, `io::handler::RetryPolicy` |
 
-**Backend crates** (`eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`, `eventuary-sqs`, `eventuary-kafka`):
+**Backend crates** (`eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`, `eventuary-aws`, `eventuary-kafka`):
 
 | Layer | Path | Examples |
 |---|---|---|
@@ -1178,6 +1210,25 @@ Worth knowing when changing the codebase:
   writer's `PartitionKeyResolver` + `PartitionHasher` is honored by
   construction with zero reader-side configuration.
 
+- **AWS backends live in one vendor crate, nested by service.**
+  `eventuary-aws` (formerly `eventuary-sqs`) hosts SQS and SNS. It is the one
+  exception to "backend crate roots expose role modules only": because a single
+  vendor crate covers several services that each have their own reader/writer
+  roles, the path gains one segment —
+  `<crate>::<service>::<role>::Type` (`eventuary_aws::sqs::reader::SqsReader`,
+  `eventuary_aws::sns::writer::SnsWriter`). Flat role modules were rejected
+  because `writer::{SqsWriter, SnsWriter}` conflates two unrelated services and
+  degrades further as AWS services are added. Single-service backend crates
+  (`eventuary-postgres`, `eventuary-sqlite`, …) keep role modules at their root
+  unchanged.
+- **SNS ships a writer and no reader.** This is a protocol fact, not an
+  omission: SNS is push-based with no receive API. Nothing in the trait model
+  requires a backend to implement both roles. The consumption story is SNS →
+  SQS fanout, which is also why both services belong in the same crate.
+- **`eventuary-sqs` is retired, not yanked.** Published versions keep resolving
+  for existing dependents; the crate simply stops receiving new versions.
+  Yanking is reserved for broken or insecure releases, not renames.
+
 ## Releasing
 
 Publishing is gated on a published GitHub Release. The
@@ -1194,7 +1245,7 @@ fmt + clippy + unit tests, then publishes in three tiers:
 
 1. `eventuary-core` (waits 60s for crates.io index to settle).
 2. `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
-   `eventuary-sqs`, `eventuary-kafka` — all depend on `eventuary-core` only.
+   `eventuary-aws`, `eventuary-kafka` — all depend on `eventuary-core` only.
 3. `eventuary` umbrella — depends on `eventuary-core` plus every backend
    crate via optional features.
 

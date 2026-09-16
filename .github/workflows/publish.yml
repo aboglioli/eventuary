@@ -80,7 +80,7 @@ jobs:
             eventuary-memory
             eventuary-sqlite
             eventuary-postgres
-            eventuary-sqs
+            eventuary-aws
             eventuary-kafka
             eventuary
           )

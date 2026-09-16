@@ -1,19 +1,22 @@
-pub use crate::reader_config::SqsReaderConfig;
+pub use crate::sqs::reader_config::SqsReaderConfig;
 
 use std::time::Duration;
 
 use aws_sdk_sqs::Client;
+use uuid::Uuid;
 
 use eventuary_core::io::acker::{Acker, BatchedAcker};
 use eventuary_core::io::stream::BatchedStream;
 use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
-use crate::flusher::SqsFlusher;
+use crate::sqs::flusher::SqsFlusher;
+use crate::sqs::queue::SqsQueueType;
 
 #[derive(Debug, Clone)]
 pub struct SqsSubscription {
     pub queue_url: String,
+    pub queue_type: SqsQueueType,
     pub wait_time: Duration,
     pub visibility_timeout: Duration,
     pub max_messages: i32,
@@ -34,6 +37,7 @@ impl SqsReader {
     pub fn default_subscription(&self) -> SqsSubscription {
         SqsSubscription {
             queue_url: self.config.queue_url.clone(),
+            queue_type: self.config.queue_type,
             wait_time: self.config.wait_time,
             visibility_timeout: self.config.visibility_timeout,
             max_messages: self.config.max_messages,
@@ -59,6 +63,7 @@ impl Reader for SqsReader {
         let wait_time = subscription.wait_time;
         let visibility_timeout = subscription.visibility_timeout;
         let limit = subscription.limit;
+        let queue_type = subscription.queue_type;
 
         Ok(BatchedStream::spawn(
             SqsFlusher::new(client.clone(), queue_url.clone()),
@@ -67,17 +72,26 @@ impl Reader for SqsReader {
             move |tx, tx_ack, cancel| {
                 Box::pin(async move {
                     let mut delivered = 0usize;
+                    let mut receive_attempt_id: Option<String> = None;
                     loop {
-                        let resp = client
+                        let mut request = client
                             .receive_message()
                             .queue_url(&queue_url)
                             .max_number_of_messages(max_messages)
                             .wait_time_seconds(wait_time.as_secs() as i32)
-                            .visibility_timeout(visibility_timeout.as_secs() as i32)
-                            .send()
-                            .await;
+                            .visibility_timeout(visibility_timeout.as_secs() as i32);
+                        if queue_type.is_fifo() {
+                            let attempt_id = receive_attempt_id
+                                .get_or_insert_with(|| Uuid::now_v7().to_string())
+                                .clone();
+                            request = request.receive_request_attempt_id(attempt_id);
+                        }
+                        let resp = request.send().await;
                         let messages = match resp {
-                            Ok(o) => o.messages.unwrap_or_default(),
+                            Ok(o) => {
+                                receive_attempt_id = None;
+                                o.messages.unwrap_or_default()
+                            }
                             Err(e) => {
                                 tracing::warn!("sqs receive error: {e}");
                                 tokio::select! {
