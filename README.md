@@ -4,8 +4,8 @@ Eventuary is a Rust event toolkit for logs, queues, streams, routing, replay,
 checkpointing, and acknowledgements across multiple backends.
 
 It provides a small typed event model, async IO traits, composable reader
-wrappers, and optional backend implementations for in-memory channels, SQLite,
-PostgreSQL, AWS (SQS, SNS), and Apache Kafka. Everything intended for application use is
+wrappers, and optional backend implementations for in-memory channels, the
+local filesystem, SQLite, PostgreSQL, AWS (SQS, SNS), and Apache Kafka. Everything intended for application use is
 available through the `eventuary` umbrella crate, with backends enabled by Cargo
 features.
 
@@ -27,6 +27,7 @@ eventuary = { version = "0.2.0", features = ["postgres"] }
 | Feature | Module | Backend crate |
 |---------|--------|---------------|
 | `memory` | `eventuary::memory` | [`eventuary-memory`](crates/eventuary-memory) |
+| `fs` | `eventuary::fs` | [`eventuary-fs`](crates/eventuary-fs) |
 | `sqlite` | `eventuary::sqlite` | [`eventuary-sqlite`](crates/eventuary-sqlite) |
 | `postgres` | `eventuary::postgres` | [`eventuary-postgres`](crates/eventuary-postgres) |
 | `aws` | `eventuary::aws` | [`eventuary-aws`](crates/eventuary-aws) |
@@ -67,6 +68,7 @@ crates/
 ├── eventuary/              # umbrella crate; re-exports core + feature-gated backends
 ├── eventuary-core/         # event model, serialization, IO traits, reader wrappers, consumer driver
 ├── eventuary-memory/       # tokio::mpsc backend for tests/dev/single-process use
+├── eventuary-fs/           # partitioned, segmented append-only log on plain files
 ├── eventuary-sqlite/       # rusqlite append-only event log + checkpoint store
 ├── eventuary-postgres/     # sqlx/Postgres append-only event log + checkpoint store
 ├── eventuary-aws/          # AWS backends: SQS writer/reader with batched delete acks, SNS writer
@@ -373,6 +375,7 @@ durable replay, and no-op ack/nack.
 | Backend | Writer | Reader | Cursor | Durable checkpoint store | Typical use |
 |---------|--------|--------|--------|---------------------------|-------------|
 | memory | `memory::writer::MemoryWriter` | `memory::reader::MemoryReader` | `NoCursor` | no | tests, dev, single-process flows |
+| filesystem | `fs::writer::FsWriter` | `fs::reader::FsReader` | `FsCursor` | yes | durable local event log with no server |
 | SQLite | `sqlite::writer::SqliteWriter` | `sqlite::reader::SqliteReader` | `SqliteCursor` | yes | embedded durable event log |
 | PostgreSQL | `postgres::writer::PgWriter` | `postgres::reader::PgReader` | `PgCursor` | yes | application event log in Postgres |
 | SQS | `aws::sqs::writer::SqsWriter` | `aws::sqs::reader::SqsReader` | `NoCursor` | no | queue delivery, visibility timeout redelivery |
@@ -395,6 +398,7 @@ positioning and protocol concerns.
 Common subscription/config types:
 
 - `memory::reader::MemorySubscription { limit }`
+- `fs::reader::FsSubscription { start, partition_starts, stop_at, filter, partitions, batch_size, limit }`
 - `sqlite::reader::SqliteSubscription { start, stop_at, filter, partitions, batch_size, limit }`
 - `postgres::reader::PgSubscription { start, stop_at, filter, partitions, batch_size, limit }`
 - `aws::sqs::reader::SqsReaderConfig`
@@ -1061,6 +1065,32 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
 - No persistence, replay, checkpointing, or filtering in the backend.
 - Best suited for tests, examples, and simple in-process flows.
 
+### fs
+
+- Stores each partition as a directory of size-rolled segments under a log root.
+  No server, no driver, and no C dependency.
+- Segment files are JSON lines carrying a flat `offset` field, so a log stays
+  readable with `cat`, `grep` and `jq`.
+- Sparse offset and time indexes let a read seek near its target instead of
+  scanning from the start of the segment.
+- `FsWriter` takes an exclusive advisory lock on every partition it opens, so a
+  log has **one producer process**. `FsWriter::open_partitions_subset` splits
+  production across processes by partition.
+- `FsCursor` is `{ partition, offset }` and implements `HasPartition`, so
+  `PartitionedReader::source_from_cursor` and `FsCoordinatedReader` route by the
+  persisted partition rather than re-hashing the key.
+- `FsCheckpointStore<C>` writes one JSON file per cursor id.
+  `FsPartitionCoordinator` claims partitions under `(owner_id, generation)`
+  fenced leases with monotonic checkpoints, matching the SQL coordinators.
+- `SyncPolicy` defaults to one fsync per megabyte appended. Use
+  `SyncPolicy::Always` when no acknowledged event may ever be lost.
+- `RetentionPolicy` drops whole segments by age or total size and never the
+  active one. A consumer whose checkpoint falls behind the retained range gets
+  `Error::InvalidCursor` rather than silently skipping the deleted events.
+- Coordination uses advisory file locks, so it is single-node. Putting the log
+  on a shared network filesystem does not make it multi-host.
+- Integration tests need no containers.
+
 ### sqlite
 
 - Uses `rusqlite` with the bundled SQLite feature.
@@ -1167,6 +1197,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --lib
 cargo test -p eventuary-memory
+cargo test -p eventuary-fs
 cargo test -p eventuary-sqlite
 ```
 
@@ -1175,6 +1206,7 @@ Verify umbrella feature combinations that users may depend on:
 ```bash
 cargo check -p eventuary --no-default-features
 cargo check -p eventuary --no-default-features --features "memory"
+cargo check -p eventuary --no-default-features --features "fs"
 cargo check -p eventuary --no-default-features --features "sqlite"
 cargo check -p eventuary --no-default-features --features "postgres,kafka"
 cargo test -p eventuary --doc --all-features

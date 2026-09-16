@@ -25,8 +25,9 @@ crate** that re-exports everything user-facing:
    through a `CheckpointStore`. Lane fanout is provided by
    `PartitionedReader`.
 3. **Backend crates** that implement those traits over real systems —
-   `eventuary-memory`, `eventuary-sqlite`, `eventuary-postgres`,
-   `eventuary-aws`, `eventuary-kafka` — plus an `eventuary-conformance`
+   `eventuary-memory`, `eventuary-fs`, `eventuary-sqlite`,
+   `eventuary-postgres`, `eventuary-aws`, `eventuary-kafka` — plus an
+   `eventuary-conformance`
    crate for shared backend conformance types and reusable cases as they
    are rebuilt for cursor readers.
 
@@ -128,6 +129,7 @@ crates/
 │           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
+├── eventuary-fs/           # segmented append-only log on plain files; FsCursor + FsCheckpointStore + FsPartitionCoordinator
 ├── eventuary-sqlite/       # rusqlite source reader/writer + SqliteCheckpointStore
 ├── eventuary-postgres/     # sqlx Postgres source reader/writer + PgCheckpointStore
 ├── eventuary-aws/          # AWS backends, nested by service:
@@ -143,7 +145,7 @@ crates/
 |-------|-----------|---------------|
 | `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, tokio-util (`rt` + `time`), either, base64, bytes | any other eventuary crate |
 | `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate |
-| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka) | any other backend crate |
+| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka / fs4) | any other backend crate |
 | `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
 
 Key invariants:
@@ -528,6 +530,7 @@ possible: route failed messages with `OutcomeRouterReader`, map the event with
 |---|---|---|---|---|
 | `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<C>` (JSON cursor column) | ✅ `PgPartitionCoordinator` (`event_stream_consumers` + `event_stream_partitions`) | composes with `PartitionedReader` + `CheckpointReader`; `PgCoordinatedReader` for multi-instance ownership |
 | `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | ✅ `SqlitePartitionCoordinator` | composes with `PartitionedReader` + `CheckpointReader`; `SqliteCoordinatedReader` for multi-instance ownership |
+| `eventuary-fs` | `FsCursor` | ✅ `FsCheckpointStore<C>` (one JSON file per cursor id) | ✅ `FsPartitionCoordinator` (`coordinator/<group>/<stream>/{consumers,partitions}`) | dense per-partition offsets; `FsCoordinatedReader` for multi-instance ownership; one producer process per log |
 | `eventuary-memory` | `NoCursor` | — | ✅ `MemoryPartitionCoordinator<C>` (testing) | mpsc source; no replay/checkpoint semantics |
 | `eventuary-aws` (sqs) | `NoCursor` | — | — | queue visibility/delete is the native progress model |
 | `eventuary-aws` (sns) | — | — | — | publish-only; SNS has no receive API, so no reader |
@@ -716,11 +719,13 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --lib       # unit tests, no containers
 cargo test -p eventuary-memory     # memory tests
+cargo test -p eventuary-fs         # filesystem tests, no containers
 cargo test -p eventuary-sqlite     # sqlite tests, no containers
 
 # Verify the umbrella for each feature combination consumers might use:
 cargo check -p eventuary --no-default-features
 cargo check -p eventuary --no-default-features --features "memory"
+cargo check -p eventuary --no-default-features --features "fs"
 cargo check -p eventuary --no-default-features --features "postgres,kafka"
 cargo test  -p eventuary --doc --all-features
 

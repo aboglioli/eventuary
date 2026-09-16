@@ -23,6 +23,26 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `eventuary-fs`, a filesystem event log backend behind the umbrella `fs`
+  feature (`eventuary::fs`). It stores a partitioned, segmented, append-only
+  log on ordinary files with sparse offset and time indexes, and needs no
+  server, driver, or C dependency. Records are JSON lines carrying a flat
+  `offset` field, so a log stays readable with `cat`, `grep` and `jq`.
+  - `fs::writer::FsWriter` and `fs::reader::FsReader` implement `Writer` and
+    `Reader`. `FsSubscription` supports start and stop positions, filters,
+    partition selection, and per-partition resume.
+  - `FsCursor { partition, offset }` implements `Cursor` and `HasPartition`, so
+    offsets compose with `PartitionedReader::source_from_cursor` and
+    `CheckpointReader` the way the SQL cursors do.
+  - `fs::checkpoint::FsCheckpointStore` and `fs::coordinator::FsPartitionCoordinator`
+    give the backend durable consumer progress and multi-instance partition
+    ownership under `(owner_id, generation)` fenced leases, with
+    `fs::reader::FsCoordinatedReader` composing the two.
+  - `fs::buffer`, `fs::dedupe`, `fs::multiplexer` and `fs::watermark` implement
+    the remaining reader and handler store traits, and `fs::log::PartitionLog`
+    exposes the storage engine directly.
+  - `SyncPolicy` defaults to one fsync per megabyte appended; `RetentionPolicy`
+    drops whole segments by age or total size.
 - `eventuary::aws::sns::writer::SnsWriter`: a `Writer` that publishes events to
   an SNS topic via `Publish` / `PublishBatch`, using the same `SerializedEvent`
   JSON wire format as every other durable backend. Batches are chunked to the
@@ -44,6 +64,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Notes
 
+- An `eventuary-fs` log has one producer process: `FsWriter::open` takes an
+  exclusive advisory lock on every partition, which is what keeps offsets dense
+  enough to use as cursors. Consumers are unrestricted and share a log through
+  `FsPartitionCoordinator`. Because coordination uses advisory file locks, it is
+  single-node; a shared network filesystem does not make it multi-host.
+- A consumer whose `eventuary-fs` checkpoint falls behind the retained range
+  fails with `Error::InvalidCursor` naming the partition and the number of
+  events removed, rather than silently resuming at the new log start.
 - SNS is publish-only and ships no reader: SNS has no receive API. Consume
   published events by subscribing SQS queues to the topic and reading each with
   `SqsReader`.
