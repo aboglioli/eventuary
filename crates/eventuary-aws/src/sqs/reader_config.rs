@@ -4,7 +4,7 @@ use eventuary_core::io::ConsumerGroupId;
 use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{Error, Result, StartFrom};
 
-const SQS_MAX_MESSAGES_LIMIT: i32 = 10;
+const SQS_MAX_MESSAGES: i32 = 10;
 const SQS_MAX_WAIT_TIME: Duration = Duration::from_secs(20);
 const SQS_MAX_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(43_200);
 
@@ -38,9 +38,9 @@ impl SqsReaderConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !(1..=SQS_MAX_MESSAGES_LIMIT).contains(&self.max_messages) {
+        if !(1..=SQS_MAX_MESSAGES).contains(&self.max_messages) {
             return Err(Error::Config(format!(
-                "max_messages must be 1..={SQS_MAX_MESSAGES_LIMIT}"
+                "max_messages must be 1..={SQS_MAX_MESSAGES}"
             )));
         }
         if self.wait_time > SQS_MAX_WAIT_TIME {
@@ -50,10 +50,10 @@ impl SqsReaderConfig {
             return Err(Error::Config("visibility_timeout max 12h".to_owned()));
         }
         if self.ack_buffer.max_pending == 0
-            || self.ack_buffer.max_pending > SQS_MAX_MESSAGES_LIMIT as usize
+            || self.ack_buffer.max_pending > SQS_MAX_MESSAGES as usize
         {
             return Err(Error::Config(format!(
-                "ack_buffer.max_pending must be 1..={SQS_MAX_MESSAGES_LIMIT} for SQS"
+                "ack_buffer.max_pending must be 1..={SQS_MAX_MESSAGES} for SQS"
             )));
         }
         if !matches!(self.start_from, StartFrom::Latest) {
