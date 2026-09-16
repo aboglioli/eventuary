@@ -551,6 +551,16 @@ async fn writing_to_an_unowned_partition_is_rejected() {
 }
 
 #[tokio::test]
+async fn a_second_writer_for_the_same_partitions_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let _held = FsWriter::open(dir.path(), FsWriterConfig::default()).unwrap();
+
+    let second = FsWriter::open(dir.path(), FsWriterConfig::default());
+
+    assert!(second.is_err(), "a partition has at most one writer");
+}
+
+#[tokio::test]
 async fn retention_removing_unread_events_surfaces_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let config = FsWriterConfig {
