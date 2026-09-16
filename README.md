@@ -1094,6 +1094,12 @@ more than one service. It supersedes the retired `eventuary-sqs` crate.
 
 - Uses `aws-sdk-sqs` long polling.
 - `SqsWriter` serializes events as `SerializedEvent` JSON.
+- `SqsQueueType` selects a standard or FIFO queue. FIFO sends carry
+  `MessageGroupId` from `event.key()` and `MessageDeduplicationId` from
+  `event.id()`; a FIFO queue rejects a send without a group id.
+- `SqsReaderConfig` takes the queue type too: FIFO polls carry a
+  `ReceiveRequestAttemptId` so a retried receive returns the same messages
+  instead of stalling the message group until the visibility timeout expires.
 - `SqsReader` emits messages with `BatchedAcker<String>` receipt-handle tokens.
 - Ack deletes messages in batches; nack changes visibility timeout to zero.
 - SQS supports only `StartFrom::Latest` in reader config and has no historical
@@ -1108,9 +1114,7 @@ more than one service. It supersedes the retired `eventuary-sqs` crate.
   canonical topology is SNS → SQS fanout — publish once, subscribe one queue
   per consumer, read each with `SqsReader`.
 - `SnsTopicType` selects a standard or FIFO topic, mapping FIFO requirements
-  onto event identity:
-  `MessageGroupId` from `event.key()` and `MessageDeduplicationId` from
-  `event.id()`.
+  onto event identity exactly as `SqsQueueType` does.
 
 > **Footgun:** queues subscribed to an SNS topic must have
 > `RawMessageDelivery` enabled. Without it SNS wraps the body in a notification

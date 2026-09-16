@@ -27,6 +27,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an SNS topic via `Publish` / `PublishBatch`, using the same `SerializedEvent`
   JSON wire format as every other durable backend. Batches are chunked to the
   10-entry / 256 KB `PublishBatch` limits.
+- `SqsWriterConfig { queue_type: SqsQueueType }` and `SqsReaderConfig.queue_type`
+  let the SQS writer and reader target standard or FIFO queues. `SqsWriter`
+  previously set no `MessageGroupId`, so it could not write to a FIFO queue at
+  all. FIFO reads attach a `ReceiveRequestAttemptId` so a retried receive
+  returns the same messages instead of stalling the message group.
 - `SnsWriterConfig { topic_type: SnsTopicType }` selects the topic the writer
   addresses. `Standard` (the default) sets no FIFO attributes; `Fifo` maps
   `MessageGroupId` from `Event::key()` and `MessageDeduplicationId` from

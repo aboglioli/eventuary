@@ -9,7 +9,9 @@ This crate hosts every AWS-backed implementation of the eventuary IO traits. Bec
 | `sqs::writer::SqsWriter` | publishes serialized events via `SendMessage` / `SendMessageBatch` |
 | `sqs::reader::SqsReader` | long-polls a queue, emits `Message<BatchedAcker<String>, NoCursor>` keyed by receipt handle |
 | `sqs::flusher::SqsFlusher` | batched `DeleteMessageBatch` (ack) and `ChangeMessageVisibilityBatch` (nack) |
+| `sqs::queue::SqsQueueType` | standard or FIFO queue selection |
 | `sns::writer::SnsWriter` | topic fanout via `Publish` / `PublishBatch` |
+| `sns::topic::SnsTopicType` | standard or FIFO topic selection |
 
 ## SQS
 
@@ -40,20 +42,49 @@ aws sns set-subscription-attributes \
 
 Without it SNS wraps the body in a notification envelope (`{"Type":"Notification","Message":"<body>",...}`) that `SqsReader` cannot decode as a `SerializedEvent`. Every delivered event would be treated as a poison record and silently ack-skipped — the queue drains and nothing reaches your handler.
 
-### Topic types
+### Standard and FIFO
 
-`SnsTopicType` selects the topic the writer is addressing and maps SNS FIFO requirements onto the event's own identities:
+SQS queues and SNS topics both come in standard and FIFO flavours, and both are
+selected the same way: `SqsWriterConfig { queue_type }` and
+`SnsWriterConfig { topic_type }`. FIFO attributes are derived from the event's
+own identities:
 
-| `SnsTopicType` | `MessageGroupId` | `MessageDeduplicationId` |
-|------|------------------|--------------------------|
+| Variant | `MessageGroupId` | `MessageDeduplicationId` |
+|---------|------------------|--------------------------|
 | `Standard` (default) | — | — |
 | `Fifo` | `event.key()` | `event.id()` |
-| `FifoContentBasedDeduplication` | `event.key()` | derived by SNS from the body |
+| `FifoContentBasedDeduplication` | `event.key()` | derived from the body |
 
-`event.key()` is the required routing identity, so all events for one entity land in the same message group and stay ordered relative to each other. `event.id()` is a unique UUID v7, which is exactly what a deduplication id needs to be.
+`event.key()` is the required routing identity, so all events for one entity
+land in the same message group and stay in order relative to each other.
+`event.id()` is a unique UUID v7, which is exactly what a deduplication id
+needs to be. A FIFO queue rejects a send that carries no `MessageGroupId`, so
+the writer must be told which kind of queue it is addressing.
+
+`SqsReaderConfig` carries `queue_type` as well. On a FIFO queue the reader
+attaches a `ReceiveRequestAttemptId` to each poll and reuses it when a receive
+fails, so the retry returns the same messages rather than leaving the message
+group blocked until the visibility timeout expires.
 
 ```rust,ignore
-use eventuary_aws::sns::writer::{SnsTopicType, SnsWriter, SnsWriterConfig};
+use eventuary_aws::sqs::queue::SqsQueueType;
+use eventuary_aws::sqs::reader::{SqsReader, SqsReaderConfig};
+use eventuary_aws::sqs::writer::{SqsWriter, SqsWriterConfig};
+
+let writer = SqsWriter::new_with_config(
+    sqs_client.clone(),
+    &queue_url,
+    SqsWriterConfig { queue_type: SqsQueueType::Fifo },
+);
+
+let mut config = SqsReaderConfig::defaults_for(&queue_url);
+config.queue_type = SqsQueueType::Fifo;
+let reader = SqsReader::new(sqs_client, config)?;
+```
+
+```rust,ignore
+use eventuary_aws::sns::topic::SnsTopicType;
+use eventuary_aws::sns::writer::{SnsWriter, SnsWriterConfig};
 
 let writer = SnsWriter::new_with_config(
     sns_client,
