@@ -17,8 +17,9 @@
 //! otherwise SNS wraps the body in a notification envelope that `SqsReader`
 //! decodes as a poison record and ack-skips.
 //!
-//! `SnsFifoConfig` derives FIFO attributes from event identity: `MessageGroupId`
-//! from `Event::key()` and `MessageDeduplicationId` from `Event::id()`.
+//! `SnsTopicType` selects a standard or FIFO topic and derives FIFO attributes
+//! from event identity: `MessageGroupId` from `Event::key()` and
+//! `MessageDeduplicationId` from `Event::id()`.
 
 pub mod sns;
 pub mod sqs;

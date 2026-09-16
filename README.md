@@ -1107,7 +1107,8 @@ more than one service. It supersedes the retired `eventuary-sqs` crate.
 - **Publish-only: there is no `SnsReader`.** SNS has no receive API. The
   canonical topology is SNS → SQS fanout — publish once, subscribe one queue
   per consumer, read each with `SqsReader`.
-- `SnsFifoConfig` maps FIFO requirements onto event identity:
+- `SnsTopicType` selects a standard or FIFO topic, mapping FIFO requirements
+  onto event identity:
   `MessageGroupId` from `event.key()` and `MessageDeduplicationId` from
   `event.id()`.
 
@@ -1124,7 +1125,6 @@ use eventuary::aws::sqs::reader::{SqsReader, SqsReaderConfig};
 let writer = SnsWriter::new(sns_client, "arn:aws:sns:us-east-1:123456789012:orders");
 writer.write(&event).await?;
 
-// Each subscriber owns its own queue and reads it independently.
 let reader = SqsReader::new(sqs_client, SqsReaderConfig::defaults_for(queue_url))?;
 ```
 

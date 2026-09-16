@@ -677,7 +677,8 @@ sibling service module, not a new crate.
 - **No reader, by protocol.** SNS is push-based and has no receive API. Do not
   add an `SnsReader`; the consumption path is an SQS queue subscribed to the
   topic, read with `sqs::reader::SqsReader`.
-- `SnsFifoConfig` derives FIFO attributes from event identity:
+- `SnsTopicType` selects a standard or FIFO topic and derives FIFO attributes
+  from event identity:
   `MessageGroupId` = `event.key()` (required, so always present) and
   `MessageDeduplicationId` = `event.id()` (UUID v7, unique per occurrence).
   `FifoContentBasedDeduplication` omits the dedup id for topics that derive it.

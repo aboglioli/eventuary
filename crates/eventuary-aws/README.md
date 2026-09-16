@@ -40,11 +40,11 @@ aws sns set-subscription-attributes \
 
 Without it SNS wraps the body in a notification envelope (`{"Type":"Notification","Message":"<body>",...}`) that `SqsReader` cannot decode as a `SerializedEvent`. Every delivered event would be treated as a poison record and silently ack-skipped — the queue drains and nothing reaches your handler.
 
-### FIFO topics
+### Topic types
 
-`SnsFifoConfig` maps SNS FIFO requirements onto the event's own identities:
+`SnsTopicType` selects the topic the writer is addressing and maps SNS FIFO requirements onto the event's own identities:
 
-| Mode | `MessageGroupId` | `MessageDeduplicationId` |
+| `SnsTopicType` | `MessageGroupId` | `MessageDeduplicationId` |
 |------|------------------|--------------------------|
 | `Standard` (default) | — | — |
 | `Fifo` | `event.key()` | `event.id()` |
@@ -53,12 +53,12 @@ Without it SNS wraps the body in a notification envelope (`{"Type":"Notification
 `event.key()` is the required routing identity, so all events for one entity land in the same message group and stay ordered relative to each other. `event.id()` is a unique UUID v7, which is exactly what a deduplication id needs to be.
 
 ```rust,ignore
-use eventuary_aws::sns::writer::{SnsFifoConfig, SnsWriter, SnsWriterConfig};
+use eventuary_aws::sns::writer::{SnsTopicType, SnsWriter, SnsWriterConfig};
 
 let writer = SnsWriter::new_with_config(
     sns_client,
     "arn:aws:sns:us-east-1:123456789012:orders.fifo",
-    SnsWriterConfig { fifo: SnsFifoConfig::Fifo },
+    SnsWriterConfig { topic_type: SnsTopicType::Fifo },
 );
 ```
 

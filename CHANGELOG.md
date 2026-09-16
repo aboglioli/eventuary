@@ -27,10 +27,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an SNS topic via `Publish` / `PublishBatch`, using the same `SerializedEvent`
   JSON wire format as every other durable backend. Batches are chunked to the
   10-entry / 256 KB `PublishBatch` limits.
-- `SnsFifoConfig` maps SNS FIFO requirements onto event identity:
+- `SnsWriterConfig { topic_type: SnsTopicType }` selects the topic the writer
+  addresses. `Standard` (the default) sets no FIFO attributes; `Fifo` maps
   `MessageGroupId` from `Event::key()` and `MessageDeduplicationId` from
-  `Event::id()`, with a `FifoContentBasedDeduplication` mode for topics that
-  derive the deduplication id themselves.
+  `Event::id()`; `FifoContentBasedDeduplication` omits the deduplication id for
+  topics that derive it themselves.
 - LocalStack integration coverage for the SNS writer (single publish, batch
   chunking, multi-queue fanout, FIFO, oversized-payload rejection, end-to-end
   SNS → SQS delivery through `SqsReader`) and for previously untested SQS
