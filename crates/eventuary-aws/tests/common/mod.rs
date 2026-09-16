@@ -11,23 +11,24 @@ use testcontainers::{ContainerAsync, GenericImage};
 
 use eventuary_core::{Event, Payload, SerializedEvent};
 
-pub(crate) const LOCALSTACK_IMAGE: &str = "localstack/localstack";
-pub(crate) const LOCALSTACK_TAG: &str = "3.8.1";
+pub(crate) const EMULATOR_IMAGE: &str = "floci/floci";
+pub(crate) const EMULATOR_TAG: &str = "2.1.0";
+pub(crate) const EMULATOR_PORT: u16 = 4566;
 
-pub(crate) struct Localstack {
+pub(crate) struct AwsEmulator {
     _container: ContainerAsync<GenericImage>,
     pub(crate) sqs: aws_sdk_sqs::Client,
     pub(crate) sns: aws_sdk_sns::Client,
 }
 
-pub(crate) async fn start_localstack() -> Localstack {
-    let container = GenericImage::new(LOCALSTACK_IMAGE, LOCALSTACK_TAG)
-        .with_exposed_port(4566.tcp())
+pub(crate) async fn start_aws_emulator() -> AwsEmulator {
+    let container = GenericImage::new(EMULATOR_IMAGE, EMULATOR_TAG)
+        .with_exposed_port(EMULATOR_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stdout("Ready."))
         .start()
         .await
-        .expect("start localstack");
-    let port = container.get_host_port_ipv4(4566).await.unwrap();
+        .expect("start aws emulator");
+    let port = container.get_host_port_ipv4(EMULATOR_PORT).await.unwrap();
     let endpoint = format!("http://127.0.0.1:{port}");
     let creds = Credentials::new("test", "test", None, None, "static");
     let cfg = aws_config::defaults(BehaviorVersion::latest())
@@ -36,7 +37,7 @@ pub(crate) async fn start_localstack() -> Localstack {
         .credentials_provider(creds)
         .load()
         .await;
-    Localstack {
+    AwsEmulator {
         sqs: aws_sdk_sqs::Client::new(&cfg),
         sns: aws_sdk_sns::Client::new(&cfg),
         _container: container,
@@ -66,32 +67,43 @@ pub(crate) async fn create_fifo_queue(client: &aws_sdk_sqs::Client, name: &str) 
         .expect("queue url")
 }
 
-pub(crate) async fn queue_arn(client: &aws_sdk_sqs::Client, queue_url: &str) -> String {
+async fn queue_attribute(
+    client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    name: QueueAttributeName,
+) -> String {
     let resp = client
         .get_queue_attributes()
         .queue_url(queue_url)
-        .attribute_names(QueueAttributeName::QueueArn)
-        .send()
-        .await
-        .expect("get queue arn");
-    resp.attributes()
-        .and_then(|m| m.get(&QueueAttributeName::QueueArn))
-        .expect("queue arn attribute")
-        .clone()
-}
-
-pub(crate) async fn approximate_messages(client: &aws_sdk_sqs::Client, queue_url: &str) -> i32 {
-    let resp = client
-        .get_queue_attributes()
-        .queue_url(queue_url)
-        .attribute_names(QueueAttributeName::ApproximateNumberOfMessages)
+        .attribute_names(name.clone())
         .send()
         .await
         .expect("get queue attributes");
-    resp.attributes()
-        .and_then(|m| m.get(&QueueAttributeName::ApproximateNumberOfMessages))
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(-1)
+    let value = resp.attributes().and_then(|m| m.get(&name)).cloned();
+    value.unwrap_or_else(|| panic!("emulator did not return queue attribute {name:?}"))
+}
+
+async fn queue_message_count(
+    client: &aws_sdk_sqs::Client,
+    queue_url: &str,
+    name: QueueAttributeName,
+) -> i32 {
+    let raw = queue_attribute(client, queue_url, name.clone()).await;
+    raw.parse()
+        .unwrap_or_else(|_| panic!("queue attribute {name:?} was not numeric: {raw}"))
+}
+
+pub(crate) async fn queue_arn(client: &aws_sdk_sqs::Client, queue_url: &str) -> String {
+    queue_attribute(client, queue_url, QueueAttributeName::QueueArn).await
+}
+
+pub(crate) async fn approximate_messages(client: &aws_sdk_sqs::Client, queue_url: &str) -> i32 {
+    queue_message_count(
+        client,
+        queue_url,
+        QueueAttributeName::ApproximateNumberOfMessages,
+    )
+    .await
 }
 
 pub(crate) async fn send_raw(client: &aws_sdk_sqs::Client, queue_url: &str, body: &str) {
@@ -166,17 +178,12 @@ pub(crate) async fn approximate_messages_not_visible(
     client: &aws_sdk_sqs::Client,
     queue_url: &str,
 ) -> i32 {
-    let resp = client
-        .get_queue_attributes()
-        .queue_url(queue_url)
-        .attribute_names(QueueAttributeName::ApproximateNumberOfMessagesNotVisible)
-        .send()
-        .await
-        .expect("get queue attributes");
-    resp.attributes()
-        .and_then(|m| m.get(&QueueAttributeName::ApproximateNumberOfMessagesNotVisible))
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(-1)
+    queue_message_count(
+        client,
+        queue_url,
+        QueueAttributeName::ApproximateNumberOfMessagesNotVisible,
+    )
+    .await
 }
 
 pub(crate) async fn total_messages(client: &aws_sdk_sqs::Client, queue_url: &str) -> i32 {

@@ -37,7 +37,7 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `MessageGroupId` from `Event::key()` and `MessageDeduplicationId` from
   `Event::id()`; `FifoContentBasedDeduplication` omits the deduplication id for
   topics that derive it themselves.
-- LocalStack integration coverage for the SNS writer (single publish, batch
+- Floci integration coverage for the SNS writer (single publish, batch
   chunking, multi-queue fanout, FIFO, oversized-payload rejection, end-to-end
   SNS → SQS delivery through `SqsReader`) and for previously untested SQS
   paths (`SqsFlusher` ack/nack, poison-record skipping, batch writes).
