@@ -1060,13 +1060,30 @@ dependencies = [
 name = "eventuary"
 version = "0.2.0"
 dependencies = [
+ "eventuary-aws",
  "eventuary-core",
  "eventuary-kafka",
  "eventuary-memory",
  "eventuary-postgres",
  "eventuary-sqlite",
- "eventuary-sqs",
  "serde_json",
+]
+
+[[package]]
+name = "eventuary-aws"
+version = "0.2.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-sqs",
+ "chrono",
+ "eventuary-core",
+ "futures",
+ "serde_json",
+ "testcontainers",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1164,23 +1181,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "eventuary-sqs"
-version = "0.2.0"
-dependencies = [
- "aws-config",
- "aws-sdk-sqs",
- "chrono",
- "eventuary-core",
- "futures",
- "serde_json",
- "testcontainers",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ members = [
     "crates/eventuary-memory",
     "crates/eventuary-sqlite",
     "crates/eventuary-postgres",
-    "crates/eventuary-sqs",
+    "crates/eventuary-aws",
     "crates/eventuary-kafka",
     "crates/eventuary-conformance",
 ]
@@ -23,7 +23,7 @@ eventuary-core = { path = "crates/eventuary-core", version = "0.2.0" }
 eventuary-memory = { path = "crates/eventuary-memory", version = "0.2.0" }
 eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.2.0" }
 eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.2.0" }
-eventuary-sqs = { path = "crates/eventuary-sqs", version = "0.2.0" }
+eventuary-aws = { path = "crates/eventuary-aws", version = "0.2.0" }
 eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.2.0" }
 eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.2.0" }
 

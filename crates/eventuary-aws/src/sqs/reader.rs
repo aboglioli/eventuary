@@ -1,4 +1,4 @@
-pub use crate::reader_config::SqsReaderConfig;
+pub use crate::sqs::reader_config::SqsReaderConfig;
 
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use eventuary_core::io::stream::BatchedStream;
 use eventuary_core::io::{Message, NoCursor, Reader};
 use eventuary_core::{Result, SerializedEvent};
 
-use crate::flusher::SqsFlusher;
+use crate::sqs::flusher::SqsFlusher;
 
 #[derive(Debug, Clone)]
 pub struct SqsSubscription {

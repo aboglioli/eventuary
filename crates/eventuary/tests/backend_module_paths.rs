@@ -2,7 +2,7 @@
     feature = "memory",
     feature = "sqlite",
     feature = "postgres",
-    feature = "sqs",
+    feature = "aws",
     feature = "kafka"
 ))]
 
@@ -108,11 +108,11 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::postgres::partitioning::PgPartitionBackfillConfig>();
     assert_type::<eventuary::postgres::partitioning::BackfillReport>();
 
-    assert_type::<eventuary::sqs::reader::SqsReader>();
-    assert_type::<eventuary::sqs::reader::SqsSubscription>();
-    assert_type::<eventuary::sqs::reader::SqsReaderConfig>();
-    assert_type::<eventuary::sqs::writer::SqsWriter>();
-    assert_type::<eventuary::sqs::flusher::SqsFlusher>();
+    assert_type::<eventuary::aws::sqs::reader::SqsReader>();
+    assert_type::<eventuary::aws::sqs::reader::SqsSubscription>();
+    assert_type::<eventuary::aws::sqs::reader::SqsReaderConfig>();
+    assert_type::<eventuary::aws::sqs::writer::SqsWriter>();
+    assert_type::<eventuary::aws::sqs::flusher::SqsFlusher>();
 
     assert_type::<eventuary::kafka::reader::KafkaReader>();
     assert_type::<eventuary::kafka::reader::KafkaSubscription>();

@@ -34,7 +34,7 @@ jobs:
           - "memory"
           - "sqlite"
           - "postgres"
-          - "sqs"
+          - "aws"
           - "kafka"
     steps:
       - uses: actions/checkout@v4
@@ -72,14 +72,14 @@ jobs:
       - name: Postgres integration tests
         run: cargo test -p eventuary-postgres -- --test-threads=1
 
-  integration-sqs:
+  integration-aws:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: SQS integration tests (LocalStack via testcontainers)
-        run: cargo test -p eventuary-sqs -- --test-threads=1
+      - name: AWS integration tests (SQS + SNS, LocalStack via testcontainers)
+        run: cargo test -p eventuary-aws -- --test-threads=1
 
   integration-kafka:
     runs-on: ubuntu-latest

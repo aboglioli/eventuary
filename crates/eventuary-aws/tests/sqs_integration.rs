@@ -13,8 +13,8 @@ use eventuary_core::io::Writer;
 use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{Error, Event, Payload, StartFrom};
 
-use eventuary_sqs::reader::{SqsReader, SqsReaderConfig};
-use eventuary_sqs::writer::SqsWriter;
+use eventuary_aws::sqs::reader::{SqsReader, SqsReaderConfig};
+use eventuary_aws::sqs::writer::SqsWriter;
 
 const LOCALSTACK_IMAGE: &str = "localstack/localstack";
 const LOCALSTACK_TAG: &str = "3.8.1";
