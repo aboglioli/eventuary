@@ -11,12 +11,13 @@ use eventuary_core::io::acker::{AckBufferConfig, BatchFlusher};
 use eventuary_core::{Error, Event, StartFrom};
 
 use eventuary_aws::sqs::flusher::SqsFlusher;
+use eventuary_aws::sqs::queue::SqsQueueType;
 use eventuary_aws::sqs::reader::{SqsReader, SqsReaderConfig};
-use eventuary_aws::sqs::writer::SqsWriter;
+use eventuary_aws::sqs::writer::{SqsWriter, SqsWriterConfig};
 
 use common::{
-    approximate_messages, create_queue, decode_event, drain_bodies, make_event, send_raw,
-    start_localstack, wait_for_message_count,
+    approximate_messages, create_fifo_queue, create_queue, decode_event, drain_bodies, make_event,
+    send_raw, start_localstack, wait_for_message_count,
 };
 
 async fn receive_receipts(
@@ -250,4 +251,124 @@ async fn invalid_visibility_timeout_is_rejected() {
     config.visibility_timeout = Duration::from_secs(43_201);
     let err = config.validate().unwrap_err();
     assert!(matches!(err, Error::Config(_)));
+}
+
+fn fifo_writer(client: aws_sdk_sqs::Client, queue_url: &str) -> SqsWriter {
+    SqsWriter::new_with_config(
+        client,
+        queue_url,
+        SqsWriterConfig {
+            queue_type: SqsQueueType::Fifo,
+        },
+    )
+}
+
+#[tokio::test]
+async fn writer_sends_to_a_fifo_queue() {
+    let stack = start_localstack().await;
+    let queue_url = create_fifo_queue(&stack.sqs, "q-fifo-write.fifo").await;
+    let writer = fifo_writer(stack.sqs.clone(), &queue_url);
+
+    let event = make_event("orgsqs", "order-1");
+    writer.write(&event).await.unwrap();
+
+    let bodies = drain_bodies(&stack.sqs, &queue_url, 1, Duration::from_secs(30)).await;
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(decode_event(&bodies[0]).id(), event.id());
+}
+
+#[tokio::test]
+async fn standard_writer_cannot_send_to_a_fifo_queue() {
+    let stack = start_localstack().await;
+    let queue_url = create_fifo_queue(&stack.sqs, "q-fifo-reject.fifo").await;
+    let writer = SqsWriter::new(stack.sqs.clone(), &queue_url);
+
+    let err = writer
+        .write(&make_event("orgsqs", "order-1"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Store(_)),
+        "FIFO queues reject sends without a MessageGroupId: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn fifo_writer_batches_and_preserves_group_order() {
+    let stack = start_localstack().await;
+    let queue_url = create_fifo_queue(&stack.sqs, "q-fifo-batch.fifo").await;
+    let writer = fifo_writer(stack.sqs.clone(), &queue_url);
+
+    let events: Vec<Event> = (0..25).map(|_| make_event("orgsqs", "order-1")).collect();
+    writer.write_all(&events).await.unwrap();
+
+    let bodies = drain_bodies(&stack.sqs, &queue_url, 25, Duration::from_secs(60)).await;
+    assert_eq!(bodies.len(), 25, "batch crossed the 10-entry limit intact");
+
+    let ids: Vec<_> = bodies.iter().map(|b| decode_event(b).id()).collect();
+    let expected: Vec<_> = events.iter().map(|e| e.id()).collect();
+    assert_eq!(ids, expected, "one message group stays in publish order");
+}
+
+#[tokio::test]
+async fn reader_consumes_a_fifo_queue() {
+    let stack = start_localstack().await;
+    let queue_url = create_fifo_queue(&stack.sqs, "q-fifo-read.fifo").await;
+    let writer = fifo_writer(stack.sqs.clone(), &queue_url);
+    let event = make_event("orgsqs", "order-1");
+    writer.write(&event).await.unwrap();
+
+    let mut config = SqsReaderConfig::defaults_for(&queue_url);
+    config.queue_type = SqsQueueType::Fifo;
+    config.ack_buffer = AckBufferConfig {
+        max_pending: 1,
+        flush_interval: Duration::from_millis(50),
+    };
+    let reader = SqsReader::new(stack.sqs.clone(), config).unwrap();
+    let mut stream = reader.read().await.unwrap();
+
+    let msg = tokio::time::timeout(Duration::from_secs(30), stream.next())
+        .await
+        .expect("reader produced a message before timeout")
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.event().id(), event.id());
+    msg.ack().await.unwrap();
+    drop(stream);
+
+    wait_for_message_count(&stack.sqs, &queue_url, 0, Duration::from_secs(20)).await;
+}
+
+#[tokio::test]
+async fn fifo_reader_delivers_a_message_group_in_order() {
+    let stack = start_localstack().await;
+    let queue_url = create_fifo_queue(&stack.sqs, "q-fifo-order.fifo").await;
+    let writer = fifo_writer(stack.sqs.clone(), &queue_url);
+
+    let events: Vec<Event> = (0..5).map(|_| make_event("orgsqs", "order-1")).collect();
+    writer.write_all(&events).await.unwrap();
+
+    let mut config = SqsReaderConfig::defaults_for(&queue_url);
+    config.queue_type = SqsQueueType::Fifo;
+    config.ack_buffer = AckBufferConfig {
+        max_pending: 1,
+        flush_interval: Duration::from_millis(50),
+    };
+    let reader = SqsReader::new(stack.sqs.clone(), config).unwrap();
+    let mut stream = reader.read().await.unwrap();
+
+    let mut received = Vec::new();
+    for _ in 0..events.len() {
+        let msg = tokio::time::timeout(Duration::from_secs(30), stream.next())
+            .await
+            .expect("reader produced a message before timeout")
+            .unwrap()
+            .unwrap();
+        received.push(msg.event().id());
+        msg.ack().await.unwrap();
+    }
+    drop(stream);
+
+    let expected: Vec<_> = events.iter().map(|e| e.id()).collect();
+    assert_eq!(received, expected);
 }

@@ -9,7 +9,8 @@ use eventuary_core::io::Writer;
 use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{Error, Event, Payload, SerializedEvent};
 
-use eventuary_aws::sns::writer::{SnsTopicType, SnsWriter, SnsWriterConfig};
+use eventuary_aws::sns::topic::SnsTopicType;
+use eventuary_aws::sns::writer::{SnsWriter, SnsWriterConfig};
 use eventuary_aws::sqs::reader::{SqsReader, SqsReaderConfig};
 
 use common::{
