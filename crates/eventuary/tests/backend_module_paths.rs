@@ -113,6 +113,9 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::aws::sqs::reader::SqsReaderConfig>();
     assert_type::<eventuary::aws::sqs::writer::SqsWriter>();
     assert_type::<eventuary::aws::sqs::flusher::SqsFlusher>();
+    assert_type::<eventuary::aws::sns::writer::SnsWriter>();
+    assert_type::<eventuary::aws::sns::writer::SnsWriterConfig>();
+    assert_type::<eventuary::aws::sns::writer::SnsFifoConfig>();
 
     assert_type::<eventuary::kafka::reader::KafkaReader>();
     assert_type::<eventuary::kafka::reader::KafkaSubscription>();

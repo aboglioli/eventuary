@@ -28,6 +28,7 @@ eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.2.0" }
 eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.2.0" }
 
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
+aws-sdk-sns = "1.89"
 aws-sdk-sqs = "1.89"
 base64 = "0.22"
 bytes = "1"
