@@ -50,7 +50,7 @@ impl Segment {
         let mut time_index = TimeIndex::open(segment_path(dir, base_offset, TIME_INDEX_SUFFIX))?;
 
         let recovered = recover(&log_path, base_offset, &offset_index)?;
-        if recovered.truncated_to < recovered.file_len {
+        if writable && recovered.truncated_to < recovered.file_len {
             let file = OpenOptions::new()
                 .write(true)
                 .open(&log_path)
@@ -59,9 +59,9 @@ impl Segment {
                 .map_err(|e| io_at("truncate segment", &log_path, e))?;
         }
         if recovered.truncated_to < recovered.indexed_to {
-            offset_index.truncate_after_position(recovered.truncated_to as u32)?;
+            offset_index.truncate_after_position(recovered.truncated_to as u32, writable)?;
             let last_relative = recovered.next_offset.saturating_sub(base_offset);
-            time_index.truncate_after_relative_offset(last_relative as u32)?;
+            time_index.truncate_after_relative_offset(last_relative as u32, writable)?;
         }
 
         let writer = if writable {

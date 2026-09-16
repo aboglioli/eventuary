@@ -75,7 +75,7 @@ impl OffsetIndex {
         }
     }
 
-    pub(crate) fn truncate_after_position(&mut self, position: u32) -> Result<()> {
+    pub(crate) fn truncate_after_position(&mut self, position: u32, persist: bool) -> Result<()> {
         let keep = self
             .entries
             .iter()
@@ -85,6 +85,9 @@ impl OffsetIndex {
             return Ok(());
         }
         self.entries.truncate(keep);
+        if !persist {
+            return Ok(());
+        }
         rewrite(&self.path, &self.entries, OFFSET_ENTRY_LEN, |entry, out| {
             out[0..4].copy_from_slice(&entry.relative_offset.to_be_bytes());
             out[4..8].copy_from_slice(&entry.position.to_be_bytes());
@@ -136,7 +139,11 @@ impl TimeIndex {
         }
     }
 
-    pub(crate) fn truncate_after_relative_offset(&mut self, relative_offset: u32) -> Result<()> {
+    pub(crate) fn truncate_after_relative_offset(
+        &mut self,
+        relative_offset: u32,
+        persist: bool,
+    ) -> Result<()> {
         let keep = self
             .entries
             .iter()
@@ -146,6 +153,9 @@ impl TimeIndex {
             return Ok(());
         }
         self.entries.truncate(keep);
+        if !persist {
+            return Ok(());
+        }
         rewrite(&self.path, &self.entries, TIME_ENTRY_LEN, |entry, out| {
             out[0..8].copy_from_slice(&entry.timestamp_ms.to_be_bytes());
             out[8..12].copy_from_slice(&entry.relative_offset.to_be_bytes());
@@ -307,7 +317,7 @@ mod tests {
                 .unwrap();
         }
 
-        index.truncate_after_position(5000).unwrap();
+        index.truncate_after_position(5000, true).unwrap();
         let reopened = OffsetIndex::open(path).unwrap();
 
         assert_eq!(reopened.entries().len(), 2);

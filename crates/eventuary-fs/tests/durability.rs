@@ -369,3 +369,58 @@ fn a_segment_whose_first_offset_is_not_its_base_is_rejected() {
 
     assert!(result.is_err(), "a segment must start at its base offset");
 }
+
+#[test]
+fn a_readonly_open_leaves_a_torn_tail_for_the_writer_to_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 5, synced());
+    let segment = segment_path(&partition_dir(dir.path(), 0), 0, LOG_SUFFIX);
+    let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+    file.write_all(b"{\"offset\":5,\"id\":\"half-writ").unwrap();
+    file.sync_all().unwrap();
+    let torn_len = fs::metadata(&segment).unwrap().len();
+
+    let reader = PartitionLog::open_readonly(dir.path(), 0, synced()).unwrap();
+
+    assert_eq!(
+        fs::metadata(&segment).unwrap().len(),
+        torn_len,
+        "a reader must not rewrite a partition it does not own"
+    );
+    assert_eq!(reader.next_offset(), 5);
+    assert_eq!(reader.read(0, 100).unwrap().len(), 5);
+}
+
+#[test]
+fn a_writable_open_still_repairs_a_torn_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 5, synced());
+    let segment = segment_path(&partition_dir(dir.path(), 0), 0, LOG_SUFFIX);
+    let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+    file.write_all(b"{\"offset\":5,\"id\":\"half-writ").unwrap();
+    file.sync_all().unwrap();
+    let torn_len = fs::metadata(&segment).unwrap().len();
+
+    let mut log = PartitionLog::open_writable(dir.path(), 0, synced()).unwrap();
+
+    assert!(fs::metadata(&segment).unwrap().len() < torn_len);
+    assert_eq!(log.append(serialized("after")).unwrap(), 5);
+    assert_eq!(log.read(0, 100).unwrap().len(), 6);
+}
+
+#[test]
+fn a_readonly_open_leaves_the_offset_index_on_disk_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 200, synced());
+    let segment = segment_path(&partition_dir(dir.path(), 0), 0, LOG_SUFFIX);
+    let index = segment_path(&partition_dir(dir.path(), 0), 0, OFFSET_INDEX_SUFFIX);
+    let mut file = OpenOptions::new().append(true).open(&segment).unwrap();
+    file.write_all(b"{\"offset\":200,\"id\":\"half-writ")
+        .unwrap();
+    file.sync_all().unwrap();
+    let index_len = fs::metadata(&index).unwrap().len();
+
+    let _reader = PartitionLog::open_readonly(dir.path(), 0, synced()).unwrap();
+
+    assert_eq!(fs::metadata(&index).unwrap().len(), index_len);
+}
