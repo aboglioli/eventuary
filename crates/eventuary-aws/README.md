@@ -95,7 +95,7 @@ let writer = SnsWriter::new_with_config(
 
 ## Testing
 
-Integration tests use [`testcontainers`](https://crates.io/crates/testcontainers) to spawn LocalStack at `localstack/localstack:3.8.1`, covering the SQS writer/reader/flusher and the SNS writer including end-to-end SNS → SQS delivery. On rootless podman:
+Integration tests use [`testcontainers`](https://crates.io/crates/testcontainers) to spawn [Floci](https://floci.io) at `floci/floci:2.1.0`, covering the SQS writer/reader/flusher and the SNS writer including end-to-end SNS → SQS delivery. Floci is an MIT-licensed local AWS emulator that speaks the same wire protocol on port 4566; it replaced LocalStack, whose Community image began requiring an auth token in March 2026. On rootless podman:
 
 ```bash
 export DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock

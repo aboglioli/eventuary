@@ -668,7 +668,7 @@ sibling service module, not a new crate.
 - `BatchedAcker<String>` token = receipt handle. `SqsFlusher` -> batch
   `DeleteMessageBatch` (10 per call).
 - Queue semantics: no seek/replay cursor; delivered cursor is `NoCursor`.
-- Localstack via `testcontainers`.
+- Floci (`floci/floci`) via `testcontainers`.
 
 **sns**
 
@@ -689,7 +689,7 @@ sibling service module, not a new crate.
   is an SNS notification envelope that `SqsReader` decodes as a poison record
   and ack-skips — silently draining the queue. The integration suite locks this
   behaviour in `without_raw_message_delivery_the_body_is_an_undecodable_envelope`.
-- Localstack via `testcontainers`; SNS tests observe the writer through a
+- Floci (`floci/floci`) via `testcontainers`; SNS tests observe the writer through a
   subscribed SQS queue since there is nothing else to read from.
 
 ### kafka
