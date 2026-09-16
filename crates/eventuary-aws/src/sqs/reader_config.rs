@@ -5,10 +5,7 @@ use eventuary_core::io::acker::AckBufferConfig;
 use eventuary_core::{Error, Result, StartFrom};
 
 use crate::sqs::queue::SqsQueueType;
-
-const SQS_MAX_MESSAGES: i32 = 10;
-const SQS_MAX_WAIT_TIME: Duration = Duration::from_secs(20);
-const SQS_MAX_VISIBILITY_TIMEOUT: Duration = Duration::from_secs(43_200);
+use crate::sqs::subscription::{MAX_MESSAGES, SqsSubscription};
 
 #[derive(Debug, Clone)]
 pub struct SqsReaderConfig {
@@ -41,23 +38,22 @@ impl SqsReaderConfig {
         }
     }
 
+    pub fn subscription(&self) -> SqsSubscription {
+        SqsSubscription {
+            queue_url: self.queue_url.clone(),
+            queue_type: self.queue_type,
+            wait_time: self.wait_time,
+            visibility_timeout: self.visibility_timeout,
+            max_messages: self.max_messages,
+            limit: self.limit,
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if !(1..=SQS_MAX_MESSAGES).contains(&self.max_messages) {
+        self.subscription().validate()?;
+        if self.ack_buffer.max_pending == 0 || self.ack_buffer.max_pending > MAX_MESSAGES as usize {
             return Err(Error::Config(format!(
-                "max_messages must be 1..={SQS_MAX_MESSAGES}"
-            )));
-        }
-        if self.wait_time > SQS_MAX_WAIT_TIME {
-            return Err(Error::Config("wait_time max 20s".to_owned()));
-        }
-        if self.visibility_timeout > SQS_MAX_VISIBILITY_TIMEOUT {
-            return Err(Error::Config("visibility_timeout max 12h".to_owned()));
-        }
-        if self.ack_buffer.max_pending == 0
-            || self.ack_buffer.max_pending > SQS_MAX_MESSAGES as usize
-        {
-            return Err(Error::Config(format!(
-                "ack_buffer.max_pending must be 1..={SQS_MAX_MESSAGES} for SQS"
+                "ack_buffer.max_pending must be 1..={MAX_MESSAGES} for SQS"
             )));
         }
         if !matches!(self.start_from, StartFrom::Latest) {
