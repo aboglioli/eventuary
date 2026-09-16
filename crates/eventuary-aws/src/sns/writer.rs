@@ -2,10 +2,14 @@ use aws_sdk_sns::Client;
 use aws_sdk_sns::types::PublishBatchRequestEntry;
 
 use eventuary_core::io::Writer;
-use eventuary_core::{Error, Event, Result, SerializedEvent};
+use eventuary_core::{Error, Event, EventId, Result, SerializedEvent};
 
 const SNS_BATCH_MAX: usize = 10;
 const SNS_PAYLOAD_MAX: usize = 256 * 1024;
+
+fn would_exceed_batch_limits(entry_count: usize, batch_bytes: usize, next_body: usize) -> bool {
+    entry_count == SNS_BATCH_MAX || batch_bytes + next_body > SNS_PAYLOAD_MAX
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SnsTopicType {
@@ -77,7 +81,11 @@ impl SnsWriter {
         Ok(body)
     }
 
-    async fn publish_batch(&self, entries: Vec<PublishBatchRequestEntry>) -> Result<()> {
+    async fn publish_batch(
+        &self,
+        entries: Vec<PublishBatchRequestEntry>,
+        event_ids: &[EventId],
+    ) -> Result<()> {
         let resp = self
             .client
             .publish_batch()
@@ -91,9 +99,16 @@ impl SnsWriter {
             let details: Vec<String> = failed
                 .iter()
                 .map(|f| {
+                    let event = f
+                        .id()
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|i| event_ids.get(i))
+                        .map(EventId::to_string)
+                        .unwrap_or_else(|| f.id().to_owned());
                     format!(
-                        "id={} code={} sender_fault={} message={}",
-                        f.id(),
+                        "event={} code={} sender_fault={} message={}",
+                        event,
                         f.code(),
                         f.sender_fault(),
                         f.message().unwrap_or("")
@@ -133,20 +148,20 @@ impl Writer for SnsWriter {
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
         let mut current: Vec<PublishBatchRequestEntry> = Vec::new();
+        let mut current_event_ids: Vec<EventId> = Vec::new();
         let mut current_bytes = 0usize;
 
-        for (id_counter, event) in events.iter().enumerate() {
+        for event in events {
             let body = Self::serialize_body(event)?;
             let body_len = body.len();
-            let would_overflow =
-                current.len() == SNS_BATCH_MAX || (current_bytes + body_len) > SNS_PAYLOAD_MAX;
-            if would_overflow {
+            if would_exceed_batch_limits(current.len(), current_bytes, body_len) {
                 let drained = std::mem::take(&mut current);
-                self.publish_batch(drained).await?;
+                let drained_ids = std::mem::take(&mut current_event_ids);
+                self.publish_batch(drained, &drained_ids).await?;
                 current_bytes = 0;
             }
             let mut builder = PublishBatchRequestEntry::builder()
-                .id(id_counter.to_string())
+                .id(current.len().to_string())
                 .message(body);
             if let Some(group_id) = self.config.topic_type.message_group_id(event) {
                 builder = builder.message_group_id(group_id);
@@ -156,10 +171,11 @@ impl Writer for SnsWriter {
             }
             let entry = builder.build().map_err(|e| Error::Store(e.to_string()))?;
             current.push(entry);
+            current_event_ids.push(event.id());
             current_bytes += body_len;
         }
         if !current.is_empty() {
-            self.publish_batch(current).await?;
+            self.publish_batch(current, &current_event_ids).await?;
         }
         Ok(())
     }
@@ -179,6 +195,63 @@ mod tests {
             Payload::from_string("v"),
         )
         .expect("valid event")
+    }
+
+    fn batch_sizes(event_count: usize, body_len: usize) -> Vec<usize> {
+        let mut sizes = Vec::new();
+        let mut entries = 0usize;
+        let mut bytes = 0usize;
+        for _ in 0..event_count {
+            if would_exceed_batch_limits(entries, bytes, body_len) {
+                sizes.push(entries);
+                entries = 0;
+                bytes = 0;
+            }
+            entries += 1;
+            bytes += body_len;
+        }
+        if entries > 0 {
+            sizes.push(entries);
+        }
+        sizes
+    }
+
+    #[test]
+    fn flushes_only_once_ten_entries_are_buffered() {
+        assert!(!would_exceed_batch_limits(SNS_BATCH_MAX - 1, 0, 1));
+        assert!(would_exceed_batch_limits(SNS_BATCH_MAX, 0, 1));
+    }
+
+    #[test]
+    fn flushes_before_the_payload_limit_is_crossed() {
+        assert!(!would_exceed_batch_limits(1, SNS_PAYLOAD_MAX - 1, 1));
+        assert!(would_exceed_batch_limits(1, SNS_PAYLOAD_MAX, 1));
+    }
+
+    #[test]
+    fn no_batch_ever_exceeds_ten_entries() {
+        for count in [0, 1, 9, 10, 11, 25, 100, 1001] {
+            let sizes = batch_sizes(count, 16);
+            assert!(
+                sizes.iter().all(|n| *n <= SNS_BATCH_MAX),
+                "count {count} produced {sizes:?}"
+            );
+            assert_eq!(sizes.iter().sum::<usize>(), count);
+            assert!(sizes.iter().all(|n| *n > 0));
+        }
+    }
+
+    #[test]
+    fn exactly_ten_events_publish_as_one_batch() {
+        assert_eq!(batch_sizes(10, 16), vec![10]);
+        assert_eq!(batch_sizes(11, 16), vec![10, 1]);
+        assert_eq!(batch_sizes(25, 16), vec![10, 10, 5]);
+    }
+
+    #[test]
+    fn oversized_bodies_split_before_the_entry_limit() {
+        let half = SNS_PAYLOAD_MAX / 2;
+        assert_eq!(batch_sizes(4, half), vec![2, 2]);
     }
 
     #[test]
