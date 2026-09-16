@@ -28,5 +28,7 @@
 //! queue type too, so FIFO polls carry a `ReceiveRequestAttemptId` and a
 //! retried receive returns the same messages instead of stalling the group.
 
+mod batch;
+
 pub mod sns;
 pub mod sqs;
