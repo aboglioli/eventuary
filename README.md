@@ -1084,8 +1084,10 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   fenced leases with monotonic checkpoints, matching the SQL coordinators.
 - `SyncPolicy` defaults to one fsync per megabyte appended. Use
   `SyncPolicy::Always` when no acknowledged event may ever be lost.
-- `RetentionPolicy` drops whole segments by age or total size and never the
-  active one. A consumer whose checkpoint falls behind the retained range gets
+- `RetentionPolicy` selects whole segments to drop by age or total size, never
+  the active one. Reclaiming is caller-driven: `FsWriter::enforce_retention`
+  does the deleting and nothing calls it for you, so schedule it from the
+  application. A consumer whose checkpoint falls behind the retained range gets
   `Error::InvalidCursor` rather than silently skipping the deleted events.
 - Coordination uses advisory file locks, so it is single-node. Putting the log
   on a shared network filesystem does not make it multi-host.

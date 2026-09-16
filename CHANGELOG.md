@@ -41,8 +41,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `fs::buffer`, `fs::dedupe`, `fs::multiplexer` and `fs::watermark` implement
     the remaining reader and handler store traits, and `fs::log::PartitionLog`
     exposes the storage engine directly.
-  - `SyncPolicy` defaults to one fsync per megabyte appended; `RetentionPolicy`
-    drops whole segments by age or total size.
+  - `SyncPolicy` defaults to one fsync per megabyte appended. `RetentionPolicy`
+    selects whole segments to drop by age or total size, reclaimed when the
+    application calls `FsWriter::enforce_retention`.
 - `eventuary::aws::sns::writer::SnsWriter`: a `Writer` that publishes events to
   an SNS topic via `Publish` / `PublishBatch`, using the same `SerializedEvent`
   JSON wire format as every other durable backend. Batches are chunked to the

@@ -60,7 +60,10 @@
 //! acknowledged event may ever be lost, and [`log::SyncPolicy::Never`] only
 //! when the log is reproducible from another source.
 //!
-//! Retention deletes whole segments. A consumer whose checkpoint falls behind
+//! Retention is caller-driven: [`writer::FsWriter::enforce_retention`] deletes
+//! whole segments that a [`log::RetentionPolicy`] has aged or sized out, and
+//! nothing calls it for you, so a policy without a caller never reclaims
+//! anything. A consumer whose checkpoint falls behind
 //! the retained range gets [`eventuary_core::Error::InvalidCursor`] rather than
 //! a silent skip over the deleted events.
 //!
