@@ -1,5 +1,6 @@
 #![cfg(all(
     feature = "memory",
+    feature = "fs",
     feature = "sqlite",
     feature = "postgres",
     feature = "aws",
@@ -23,6 +24,45 @@ fn backend_types_are_available_at_role_module_paths() {
     assert_type::<eventuary::memory::multiplexer::MemoryMultiplexerStore>();
     assert_type::<eventuary::memory::subscriber_work::MemorySubscriberWorkStore>();
     assert_type::<eventuary::memory::watermark::MemoryWatermarkStore>();
+
+    assert_type::<eventuary::fs::reader::FsReader>();
+    assert_type::<eventuary::fs::reader::FsSubscription>();
+    assert_type::<eventuary::fs::reader::FsCursor>();
+    assert_type::<eventuary::fs::reader::FsCursorAcker>();
+    assert_type::<eventuary::fs::reader::FsReaderConfig>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedReader>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedSubscription>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedReaderConfig>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedCursor>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedStream>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedAcker>();
+    assert_type::<eventuary::fs::reader::FsCoordinatedStreamAcker>();
+    assert_type::<eventuary::fs::reader::FsPartitionedCursor>();
+    assert_type::<eventuary::fs::writer::FsWriter>();
+    assert_type::<eventuary::fs::writer::FsWriterConfig>();
+    assert_type::<eventuary::fs::writer::FsPartitioningConfig>();
+    assert_type::<eventuary::fs::checkpoint::FsCheckpointStore<eventuary::fs::reader::FsCursor>>();
+    assert_type::<eventuary::fs::checkpoint::FsCheckpointStoreConfig>();
+    assert_type::<
+        eventuary::fs::coordinator::FsPartitionCoordinator<eventuary::fs::reader::FsCursor>,
+    >();
+    assert_type::<eventuary::fs::coordinator::FsPartitionCoordinatorConfig>();
+    assert_type::<eventuary::fs::buffer::FsBufferStore<eventuary::fs::reader::FsCursor>>();
+    assert_type::<eventuary::fs::buffer::FsBufferStoreConfig>();
+    assert_type::<eventuary::fs::buffer::FsBufferStoreId>();
+    assert_type::<eventuary::fs::dedupe::FsDedupeStore>();
+    assert_type::<eventuary::fs::dedupe::FsDedupeStoreConfig>();
+    assert_type::<eventuary::fs::multiplexer::FsMultiplexerStore>();
+    assert_type::<eventuary::fs::multiplexer::FsMultiplexerStoreConfig>();
+    assert_type::<eventuary::fs::watermark::FsWatermarkStore>();
+    assert_type::<eventuary::fs::watermark::FsWatermarkStoreConfig>();
+    assert_type::<eventuary::fs::partitioning::FsPartitioningConfig>();
+    assert_type::<eventuary::fs::log::PartitionLog>();
+    assert_type::<eventuary::fs::log::LogConfig>();
+    assert_type::<eventuary::fs::log::SegmentConfig>();
+    assert_type::<eventuary::fs::log::SyncPolicy>();
+    assert_type::<eventuary::fs::log::RetentionPolicy>();
+    assert_type::<eventuary::fs::log::Record>();
 
     assert_type::<eventuary::sqlite::reader::SqliteReader>();
     assert_type::<eventuary::sqlite::reader::SqliteSubscription>();

@@ -6,6 +6,7 @@
 //!
 //! | Feature | Module | Backend crate |
 //! |---------|--------|---------------|
+//! | `fs` | [`fs`] | [`eventuary-fs`](https://crates.io/crates/eventuary-fs) |
 //! | `memory` | [`memory`] | [`eventuary-memory`](https://crates.io/crates/eventuary-memory) |
 //! | `sqlite` | [`sqlite`] | [`eventuary-sqlite`](https://crates.io/crates/eventuary-sqlite) |
 //! | `postgres` | [`postgres`] | [`eventuary-postgres`](https://crates.io/crates/eventuary-postgres) |
@@ -63,6 +64,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub use eventuary_core::*;
+
+#[cfg(feature = "fs")]
+#[cfg_attr(docsrs, doc(cfg(feature = "fs")))]
+pub use eventuary_fs as fs;
 
 #[cfg(feature = "memory")]
 #[cfg_attr(docsrs, doc(cfg(feature = "memory")))]

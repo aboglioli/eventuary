@@ -11,6 +11,7 @@ repository.workspace = true
 
 [features]
 default = []
+fs = ["dep:eventuary-fs"]
 memory = ["dep:eventuary-memory"]
 sqlite = ["dep:eventuary-sqlite"]
 postgres = ["dep:eventuary-postgres"]
@@ -19,6 +20,7 @@ kafka = ["dep:eventuary-kafka"]
 
 [dependencies]
 eventuary-core = { workspace = true }
+eventuary-fs = { workspace = true, optional = true }
 eventuary-memory = { workspace = true, optional = true }
 eventuary-sqlite = { workspace = true, optional = true }
 eventuary-postgres = { workspace = true, optional = true }

@@ -4,6 +4,7 @@ members = [
     "crates/eventuary",
     "crates/eventuary-core",
     "crates/eventuary-memory",
+    "crates/eventuary-fs",
     "crates/eventuary-sqlite",
     "crates/eventuary-postgres",
     "crates/eventuary-aws",
@@ -21,6 +22,7 @@ repository = "https://github.com/aboglioli/eventuary"
 eventuary = { path = "crates/eventuary", version = "0.3.0-rc.1" }
 eventuary-core = { path = "crates/eventuary-core", version = "0.3.0-rc.1" }
 eventuary-memory = { path = "crates/eventuary-memory", version = "0.3.0-rc.1" }
+eventuary-fs = { path = "crates/eventuary-fs", version = "0.3.0-rc.1" }
 eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.3.0-rc.1" }
 eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.3.0-rc.1" }
 eventuary-aws = { path = "crates/eventuary-aws", version = "0.3.0-rc.1" }
@@ -34,6 +36,7 @@ base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 either = "1"
+fs4 = "0.13"
 futures = "0.3"
 rdkafka = { version = "0.38", features = ["cmake-build", "tokio"] }
 rusqlite = { version = "0.37", features = ["bundled-full"] }

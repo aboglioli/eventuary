@@ -78,6 +78,7 @@ jobs:
           packages=(
             eventuary-core
             eventuary-memory
+            eventuary-fs
             eventuary-sqlite
             eventuary-postgres
             eventuary-aws
