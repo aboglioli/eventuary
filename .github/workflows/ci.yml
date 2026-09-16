@@ -32,6 +32,7 @@ jobs:
         features:
           - ""
           - "memory"
+          - "fs"
           - "sqlite"
           - "postgres"
           - "aws"
@@ -58,6 +59,8 @@ jobs:
         run: cargo test --workspace --lib
       - name: Memory integration tests
         run: cargo test -p eventuary-memory
+      - name: Filesystem integration tests
+        run: cargo test -p eventuary-fs
       - name: SQLite integration tests
         run: cargo test -p eventuary-sqlite
       - name: Umbrella doctest (all features)
