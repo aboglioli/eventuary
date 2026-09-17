@@ -203,6 +203,39 @@ Every event has two identities:
 direct-cast strings into value objects: use the constructor (`Topic::new`,
 `Namespace::new`, etc.) so validation runs.
 
+### Misuse-Resistant Contracts
+
+A helper whose invariant holds only because the caller performs steps in the
+right order has no invariant, it has a comment. Push the rule into the type so
+the wrong sequence either does not compile or cannot produce a wrong value.
+
+This applies to every shared implementation, not only to domain aggregates:
+
+- **No sequence coupling.** If two calls must happen in a particular order,
+  expose one call that does both. `would_exceed` + `push` + `take` lets a caller
+  skip the check and assemble an over-limit batch; a single `push` that returns
+  the batch it sealed cannot.
+- **Validate on construction.** Bounds belong in a value object built once
+  (`BatchLimits`, `Partition`, `Topic`), not re-checked at each call site where
+  one site can forget.
+- **Only the owner mints the proof.** A type that certifies an invariant
+  (`Batch`, `PartitionLease`) has private fields and no public constructor, so
+  holding one is evidence the invariant held.
+- **Make an obligation impossible to ignore.** Mark such a type `#[must_use]`
+  with a message naming what is lost by dropping it.
+- **Consume `self` to end a lifecycle.** `finish(self)`, `into_items(self)`: a
+  terminal step that takes ownership cannot run twice, and cannot race further
+  writes to the thing it just closed.
+- **Keep values that must agree in one place.** Two parallel `Vec`s a caller
+  passes separately can be misaligned; one `Vec` of pairs cannot.
+- **Reject impossible input at the boundary**, naming the limit crossed and by
+  how much, rather than letting the remote service reject it later.
+- **Leave failed calls inert.** A fallible step runs before any mutation, so an
+  error leaves the value exactly as it was.
+
+The review question is: can a caller hold these pieces and still reach a state
+the module forbids? If yes, tighten the type rather than documenting the rule.
+
 ### Native Async Traits + Dyn Bridge
 
 Core IO traits use AFIT (Arbitrary Function In Traits):
@@ -1230,6 +1263,23 @@ Worth knowing when changing the codebase:
   omission: SNS is push-based with no receive API. Nothing in the trait model
   requires a backend to implement both roles. The consumption story is SNS →
   SQS fanout, which is also why both services belong in the same crate.
+- **Batch assembly is a sealing batcher, not a check-then-push helper.**
+  `push` is the only mutator on `Batcher<T>`: it seals and returns the full batch
+  when the incoming item does not fit, so there is no check a caller can skip and
+  no over-limit batch to assemble. `Batch<T>` is `#[must_use]` with private
+  fields, so it can only come from a batcher and cannot be dropped unnoticed;
+  `finish` consumes the batcher so a tail cannot be sent twice. Entry ids stay
+  request-scoped because `push` hands the builder the index inside the batch the
+  item actually lands in. See **Misuse-Resistant Contracts**.
+- **`eventuary-aws::batch` knows nothing about events or AWS.** It is
+  `BatchLimits` plus `Batch<T>` and `Batcher<T>` over a weighted `T`, so it fits
+  any API that caps a request by count and size. Everything vendor-specific
+  lives in `eventuary-aws::request`: the 10-entry / 256 KB ceiling,
+  `serialize_body`, the `Entry<R>` that keeps a request beside the `EventId` it
+  came from so a failed entry cannot resolve to the wrong event, and the failed
+  entry report. Promote `batch` to `eventuary-core` only when a second backend
+  needs it; until then it stays private rather than committing the umbrella to a
+  public API with one consumer.
 - **`eventuary-sqs` is retired, not yanked.** Published versions keep resolving
   for existing dependents; the crate simply stops receiving new versions.
   Yanking is reserved for broken or insecure releases, not renames.

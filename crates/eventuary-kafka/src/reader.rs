@@ -18,6 +18,14 @@ use eventuary_core::{Error, Event, Result, SerializedEvent, StartFrom, Startable
 use crate::flusher::KafkaFlusher;
 use crate::flusher::KafkaOffsetToken;
 
+fn decode_event(payload: Option<&[u8]>) -> Result<Event> {
+    let payload =
+        payload.ok_or_else(|| Error::Serialization("record has no payload".to_owned()))?;
+    let serialized: SerializedEvent = serde_json::from_slice(payload)
+        .map_err(|e| Error::Serialization(format!("decode record: {e}")))?;
+    serialized.to_event()
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KafkaCursor {
     pub topic: String,
@@ -212,23 +220,16 @@ impl Reader for KafkaReader {
                             partition: msg.partition(),
                             offset: msg.offset(),
                         };
-                        let body = match msg.payload() {
-                            Some(p) => p,
-                            None => {
-                                let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                                continue;
-                            }
-                        };
-                        let serialized: SerializedEvent = match serde_json::from_slice(body) {
-                            Ok(s) => s,
-                            Err(_) => {
-                                let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
-                                continue;
-                            }
-                        };
-                        let event: Event = match serialized.to_event() {
-                            Ok(e) => e,
-                            Err(_) => {
+                        let event = match decode_event(msg.payload()) {
+                            Ok(event) => event,
+                            Err(error) => {
+                                tracing::warn!(
+                                    topic = %token.topic,
+                                    partition = token.partition,
+                                    offset = token.offset,
+                                    %error,
+                                    "committing past undecodable Kafka record"
+                                );
                                 let _ = BatchedAcker::new(token, tx_ack.clone()).ack().await;
                                 continue;
                             }

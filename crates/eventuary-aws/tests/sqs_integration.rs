@@ -3,12 +3,11 @@ mod common;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use chrono::Utc;
 use futures::StreamExt;
 
 use eventuary_core::io::Writer;
 use eventuary_core::io::acker::{AckBufferConfig, BatchFlusher};
-use eventuary_core::{Error, Event, StartFrom};
+use eventuary_core::{Error, Event};
 
 use eventuary_aws::sqs::flusher::SqsFlusher;
 use eventuary_aws::sqs::queue::SqsQueueType;
@@ -220,21 +219,6 @@ async fn flusher_handles_empty_batches() {
     let flusher = SqsFlusher::new(aws.sqs.clone(), &queue_url);
     flusher.flush(Vec::new()).await.unwrap();
     flusher.flush_nack(Vec::new()).await.unwrap();
-}
-
-#[tokio::test]
-async fn invalid_start_from_is_rejected() {
-    let queue_url = "https://example.com/queue".to_owned();
-
-    let mut config = SqsReaderConfig::defaults_for(&queue_url);
-    config.start_from = StartFrom::Earliest;
-    let err = config.validate().unwrap_err();
-    assert!(matches!(err, Error::Config(_)));
-
-    let mut config = SqsReaderConfig::defaults_for(&queue_url);
-    config.start_from = StartFrom::Timestamp(Utc::now());
-    let err = config.validate().unwrap_err();
-    assert!(matches!(err, Error::Config(_)));
 }
 
 #[tokio::test]

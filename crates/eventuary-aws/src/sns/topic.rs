@@ -84,6 +84,32 @@ mod tests {
     }
 
     #[test]
+    fn fifo_ids_match_the_sqs_queue_type() {
+        use crate::sqs::queue::SqsQueueType;
+
+        let event = event("order-1");
+        for (topic_type, queue_type) in [
+            (SnsTopicType::Standard, SqsQueueType::Standard),
+            (SnsTopicType::Fifo, SqsQueueType::Fifo),
+            (
+                SnsTopicType::FifoContentBasedDeduplication,
+                SqsQueueType::FifoContentBasedDeduplication,
+            ),
+        ] {
+            assert_eq!(
+                topic_type.message_group_id(&event),
+                queue_type.message_group_id(&event),
+                "SNS to SQS fanout keeps grouping only while both derive the same group id"
+            );
+            assert_eq!(
+                topic_type.message_deduplication_id(&event),
+                queue_type.message_deduplication_id(&event)
+            );
+            assert_eq!(topic_type.is_fifo(), queue_type.is_fifo());
+        }
+    }
+
+    #[test]
     fn events_sharing_a_key_share_a_message_group() {
         let topic_type = SnsTopicType::Fifo;
         let first = event("order-1");

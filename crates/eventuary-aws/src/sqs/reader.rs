@@ -1,4 +1,5 @@
 pub use crate::sqs::reader_config::SqsReaderConfig;
+pub use crate::sqs::subscription::SqsSubscription;
 
 use std::time::Duration;
 
@@ -8,19 +9,13 @@ use uuid::Uuid;
 use eventuary_core::io::acker::{Acker, BatchedAcker};
 use eventuary_core::io::stream::BatchedStream;
 use eventuary_core::io::{Message, NoCursor, Reader};
-use eventuary_core::{Result, SerializedEvent};
+use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::sqs::flusher::SqsFlusher;
-use crate::sqs::queue::SqsQueueType;
 
-#[derive(Debug, Clone)]
-pub struct SqsSubscription {
-    pub queue_url: String,
-    pub queue_type: SqsQueueType,
-    pub wait_time: Duration,
-    pub visibility_timeout: Duration,
-    pub max_messages: i32,
-    pub limit: Option<usize>,
+fn decode_event(body: Option<&str>) -> Result<Event> {
+    let body = body.ok_or_else(|| Error::Serialization("message has no body".to_owned()))?;
+    SerializedEvent::from_json_str(body)?.to_event()
 }
 
 pub struct SqsReader {
@@ -35,14 +30,7 @@ impl SqsReader {
     }
 
     pub fn default_subscription(&self) -> SqsSubscription {
-        SqsSubscription {
-            queue_url: self.config.queue_url.clone(),
-            queue_type: self.config.queue_type,
-            wait_time: self.config.wait_time,
-            visibility_timeout: self.config.visibility_timeout,
-            max_messages: self.config.max_messages,
-            limit: self.config.limit,
-        }
+        self.config.subscription()
     }
 
     pub async fn read(&self) -> Result<BatchedStream<String, SqsFlusher>> {
@@ -57,6 +45,7 @@ impl Reader for SqsReader {
     type Stream = BatchedStream<String, SqsFlusher>;
 
     async fn read(&self, subscription: Self::Subscription) -> Result<Self::Stream> {
+        subscription.validate()?;
         let client = self.client.clone();
         let queue_url = subscription.queue_url.clone();
         let max_messages = subscription.max_messages;
@@ -105,23 +94,15 @@ impl Reader for SqsReader {
                                 Some(r) => r,
                                 None => continue,
                             };
-                            let body = match m.body.as_deref() {
-                                Some(b) => b,
-                                None => {
-                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
-                                    continue;
-                                }
-                            };
-                            let serialized = match SerializedEvent::from_json_str(body) {
-                                Ok(s) => s,
-                                Err(_) => {
-                                    let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
-                                    continue;
-                                }
-                            };
-                            let event = match serialized.to_event() {
-                                Ok(e) => e,
-                                Err(_) => {
+                            let event = match decode_event(m.body.as_deref()) {
+                                Ok(event) => event,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        queue_url = %queue_url,
+                                        message_id = m.message_id.as_deref().unwrap_or("<none>"),
+                                        %error,
+                                        "deleting undecodable SQS message"
+                                    );
                                     let _ = BatchedAcker::new(receipt, tx_ack.clone()).ack().await;
                                     continue;
                                 }

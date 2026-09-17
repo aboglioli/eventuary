@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking changes
+
+- `SqsReaderConfig` drops `start_from` and `consumer_group_id`. Neither could
+  hold a value SQS could honour, so both existed only to be rejected by
+  `validate` at runtime; removing them turns that into a compile error. SQS
+  still has no replay cursor, and the queue URL remains the consumer identity.
+- `SqsReaderConfig::limit` is now honoured instead of rejected. The reader
+  already stopped the stream after `limit` deliveries when a `SqsSubscription`
+  carried one; only the config validator disagreed.
+
+### Fixed
+
+- `SqsReader` and `KafkaReader` log a message or record they cannot decode into
+  an `Event`, at warn with its identity and the decode cause, before discarding
+  it. Both previously discarded the error and wrote nothing, which made the
+  documented `RawMessageDelivery` failure — a queue draining while the handler
+  stays idle — impossible to diagnose from the outside.
+- `SqsReader::read` validates the `SqsSubscription` it is given. Validation
+  previously ran only in `SqsReader::new`, so a caller using the `Reader` trait
+  with its own subscription got an opaque AWS error instead of `Error::Config`.
+
 ## [0.3.0-rc.1] - 2026-09-16
 
 ### Breaking changes
