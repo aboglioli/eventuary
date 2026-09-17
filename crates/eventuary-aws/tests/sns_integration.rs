@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -104,10 +105,8 @@ async fn sns_to_sqs_reader_round_trips_end_to_end() {
     writer.write(&event).await.unwrap();
 
     let mut config = SqsReaderConfig::defaults_for(&queue_url);
-    config.ack_buffer = AckBufferConfig {
-        max_pending: 1,
-        flush_interval: Duration::from_millis(50),
-    };
+    config.ack_buffer =
+        AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(50));
     let reader = SqsReader::new(aws.sqs.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
 

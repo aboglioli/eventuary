@@ -15,8 +15,45 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SqsReaderConfig::limit` is now honoured instead of rejected. The reader
   already stopped the stream after `limit` deliveries when a `SqsSubscription`
   carried one; only the config validator disagreed.
+- `AckBufferConfig` takes its values through `AckBufferConfig::new(max_pending,
+  flush_interval)` instead of public fields, and `max_pending` is a
+  `NonZeroUsize`. A zero `flush_interval` is now a supported setting meaning
+  "run no timer", matching what `CheckpointFlushPolicy` already means by it:
+  the buffer then flushes when `max_pending` tokens are held, and when it
+  closes. `SqsReaderConfig` and `KafkaReaderConfig` no longer reject a zero
+  `ack_buffer.max_pending`, because the type no longer permits one.
+- `BufferedReaderConfig` takes its value through
+  `BufferedReaderConfig::new(max_pending)` instead of a public field, and
+  `max_pending` is a `NonZeroUsize`. A zero there built a `Semaphore` with no
+  permits, and every delivery acquires one first, so the reader silently
+  delivered nothing for the life of the stream.
+
+- `RetryConfig` takes its values through `RetryConfig::new(max_attempts,
+  base_delay, max_delay, multiplier)` instead of public fields, rejecting a zero
+  `max_attempts` and any `multiplier` that is not finite and at least `1.0` —
+  the same contract `RetryWriterConfig` already enforced for the same numbers.
+
+### Performance
+
+- `FsReader` no longer re-reads a partition's active segment on every idle poll.
+  `PartitionLog::refresh` reopened it unconditionally, reading the whole sparse
+  index and rescanning the tail, so the cost of tailing a quiet log grew with
+  segment size. It now stats the segment first and reopens only when the file
+  changed. Measured per idle poll per partition: 0.022 ms to 0.0046 ms at 10k
+  records, and 0.040 ms to 0.0044 ms at 100k, where the old cost scaled with the
+  log and the new one does not.
 
 ### Fixed
+
+- A negative `RetryConfig::multiplier` no longer panics the consumer.
+  `backoff_delay` multiplied it into a negative number of seconds and handed
+  that to `Duration::from_secs_f64`, which panics rather than saturating, inside
+  the handler retry path.
+- A zero `AckBufferConfig::flush_interval` no longer kills acking. It reached
+  `tokio::time::interval`, which panics on a zero period, and the panic stayed
+  inside the spawned flusher task: the handle survived, acks kept queueing, and
+  nothing ever flushed them. On SQS that meant `DeleteMessageBatch` never ran
+  and every message redelivered forever; on Kafka, offsets never committed.
 
 - `SqsReader` and `KafkaReader` log a message or record they cannot decode into
   an `Event`, at warn with its identity and the decode cause, before discarding

@@ -1,10 +1,11 @@
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::interval;
+use tokio::time::{Interval, interval};
 
 use crate::error::{Error, Result};
 use crate::io::Acker;
@@ -19,16 +20,44 @@ pub trait BatchFlusher: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct AckBufferConfig {
-    pub max_pending: usize,
-    pub flush_interval: Duration,
+    max_pending: NonZeroUsize,
+    flush_interval: Duration,
+}
+
+impl AckBufferConfig {
+    /// A zero `flush_interval` runs no timer: the buffer then flushes when
+    /// `max_pending` tokens are held, and when it closes.
+    pub fn new(max_pending: NonZeroUsize, flush_interval: Duration) -> Self {
+        Self {
+            max_pending,
+            flush_interval,
+        }
+    }
+
+    pub fn max_pending(&self) -> usize {
+        self.max_pending.get()
+    }
+
+    pub fn flush_interval(&self) -> Duration {
+        self.flush_interval
+    }
 }
 
 impl Default for AckBufferConfig {
     fn default() -> Self {
         Self {
-            max_pending: 100,
+            max_pending: NonZeroUsize::new(100).expect("100 is non-zero"),
             flush_interval: Duration::from_secs(1),
         }
+    }
+}
+
+async fn next_tick(tick: &mut Option<Interval>) {
+    match tick {
+        Some(tick) => {
+            tick.tick().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -69,38 +98,45 @@ async fn drain_nacks<F: BatchFlusher>(
 
 impl<F: BatchFlusher + 'static> AckBuffer<F> {
     pub fn spawn(flusher: F, config: AckBufferConfig) -> Arc<Self> {
-        let cap = (config.max_pending * 4).max(16);
+        let max_pending = config.max_pending();
+        let cap = (max_pending * 4).max(16);
         let (tx, mut rx) = mpsc::channel(cap);
         let flusher = Arc::new(flusher);
         let handle = tokio::spawn(async move {
-            let mut acks: Vec<F::Token> = Vec::with_capacity(config.max_pending);
-            let mut nacks: Vec<F::Token> = Vec::with_capacity(config.max_pending);
-            let mut tick = interval(config.flush_interval);
-            tick.tick().await;
+            let mut acks: Vec<F::Token> = Vec::with_capacity(max_pending);
+            let mut nacks: Vec<F::Token> = Vec::with_capacity(max_pending);
+            let mut tick = match config.flush_interval() {
+                period if period.is_zero() => None,
+                period => {
+                    let mut tick = interval(period);
+                    tick.tick().await;
+                    Some(tick)
+                }
+            };
             loop {
                 tokio::select! {
                     cmd = rx.recv() => match cmd {
                         Some(AckCmd::Ack(t)) => {
                             acks.push(t);
-                            if acks.len() >= config.max_pending {
-                                drain_acks(&mut acks, &flusher, config.max_pending).await;
+                            if acks.len() >= max_pending {
+                                drain_acks(&mut acks, &flusher, max_pending).await;
                             }
                         }
                         Some(AckCmd::Nack(t)) => {
                             nacks.push(t);
-                            if nacks.len() >= config.max_pending {
-                                drain_nacks(&mut nacks, &flusher, config.max_pending).await;
+                            if nacks.len() >= max_pending {
+                                drain_nacks(&mut nacks, &flusher, max_pending).await;
                             }
                         }
                         Some(AckCmd::Flush) | None => {
-                            drain_acks(&mut acks, &flusher, config.max_pending).await;
-                            drain_nacks(&mut nacks, &flusher, config.max_pending).await;
+                            drain_acks(&mut acks, &flusher, max_pending).await;
+                            drain_nacks(&mut nacks, &flusher, max_pending).await;
                             break;
                         }
                     },
-                    _ = tick.tick() => {
-                        drain_acks(&mut acks, &flusher, config.max_pending).await;
-                        drain_nacks(&mut nacks, &flusher, config.max_pending).await;
+                    _ = next_tick(&mut tick) => {
+                        drain_acks(&mut acks, &flusher, max_pending).await;
+                        drain_nacks(&mut nacks, &flusher, max_pending).await;
                     }
                 }
             }
@@ -193,8 +229,8 @@ mod tests {
     #[test]
     fn default_config() {
         let c = AckBufferConfig::default();
-        assert_eq!(c.max_pending, 100);
-        assert_eq!(c.flush_interval, Duration::from_secs(1));
+        assert_eq!(c.max_pending(), 100);
+        assert_eq!(c.flush_interval(), Duration::from_secs(1));
     }
 
     #[tokio::test]
@@ -209,10 +245,7 @@ mod tests {
         };
         let buf = AckBuffer::spawn(
             flusher,
-            AckBufferConfig {
-                max_pending: 5,
-                flush_interval: Duration::from_secs(60),
-            },
+            AckBufferConfig::new(NonZeroUsize::new(5).unwrap(), Duration::from_secs(60)),
         );
         let tx = buf.sender();
         for i in 0..5u64 {
@@ -221,6 +254,44 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(ack_calls.load(Ordering::SeqCst), 1);
         assert_eq!(ack_total.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn a_zero_flush_interval_runs_no_timer_and_still_flushes() {
+        let ack_calls = Arc::new(AtomicUsize::new(0));
+        let ack_total = Arc::new(AtomicUsize::new(0));
+        let flusher = CountingFlusher {
+            ack_calls: Arc::clone(&ack_calls),
+            ack_total: Arc::clone(&ack_total),
+            nack_calls: Arc::new(AtomicUsize::new(0)),
+            nack_total: Arc::new(AtomicUsize::new(0)),
+        };
+        let buf = AckBuffer::spawn(
+            flusher,
+            AckBufferConfig::new(NonZeroUsize::new(2).unwrap(), Duration::ZERO),
+        );
+        let tx = buf.sender();
+
+        BatchedAcker::new(1u64, tx.clone()).ack().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            ack_calls.load(Ordering::SeqCst),
+            0,
+            "a zero interval must not flush on a timer"
+        );
+
+        BatchedAcker::new(2u64, tx.clone()).ack().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(ack_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ack_total.load(Ordering::SeqCst), 2);
+
+        BatchedAcker::new(3u64, tx.clone()).ack().await.unwrap();
+        buf.shutdown().await.unwrap();
+        assert_eq!(
+            ack_total.load(Ordering::SeqCst),
+            3,
+            "closing must flush what is still held"
+        );
     }
 
     #[tokio::test]
@@ -235,10 +306,7 @@ mod tests {
         };
         let buf = AckBuffer::spawn(
             flusher,
-            AckBufferConfig {
-                max_pending: 100,
-                flush_interval: Duration::from_millis(50),
-            },
+            AckBufferConfig::new(NonZeroUsize::new(100).unwrap(), Duration::from_millis(50)),
         );
         let tx = buf.sender();
         BatchedAcker::new(1u64, tx.clone()).ack().await.unwrap();
@@ -258,10 +326,7 @@ mod tests {
         };
         let buf = AckBuffer::spawn(
             flusher,
-            AckBufferConfig {
-                max_pending: 100,
-                flush_interval: Duration::from_secs(60),
-            },
+            AckBufferConfig::new(NonZeroUsize::new(100).unwrap(), Duration::from_secs(60)),
         );
         let tx = buf.sender();
         BatchedAcker::new(1u64, tx.clone()).ack().await.unwrap();
@@ -283,10 +348,7 @@ mod tests {
         };
         let buf = AckBuffer::spawn(
             flusher,
-            AckBufferConfig {
-                max_pending: 100,
-                flush_interval: Duration::from_millis(20),
-            },
+            AckBufferConfig::new(NonZeroUsize::new(100).unwrap(), Duration::from_millis(20)),
         );
         let tx = buf.sender();
         BatchedAcker::new(1u64, tx.clone()).ack().await.unwrap();

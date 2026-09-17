@@ -67,6 +67,12 @@
 //! the retained range gets [`eventuary_core::Error::InvalidCursor`] rather than
 //! a silent skip over the deleted events.
 //!
+//! A record that no longer decodes into an [`eventuary_core::Event`] ends that
+//! partition's stream naming its partition and offset, and keeps ending it until
+//! someone intervenes, because skipping it would lose an event that the log
+//! still holds. Segments are JSON lines, so the repair is to find that offset in
+//! `<partition>/<base offset>.log` and correct or delete its line.
+//!
 //! # Components
 //!
 //! - [`writer::FsWriter`] implements [`eventuary_core::io::Writer`], routing
@@ -83,7 +89,9 @@
 //!   can share a consumer group: partitions are claimed under fenced,
 //!   generation-checked leases with the same semantics as the SQL backends, and
 //!   [`reader::FsCoordinatedReader`] composes the two.
-//! - [`buffer::FsBufferStore`], [`dedupe::FsDedupeStore`],
+//! - [`buffer::FsBufferStore`] numbers its entries from a counter held in the
+//!   process that opened it, so one buffer directory belongs to one process;
+//!   two would reuse each other's ids. [`dedupe::FsDedupeStore`],
 //!   [`multiplexer::FsMultiplexerStore`] and [`watermark::FsWatermarkStore`]
 //!   implement the remaining reader and handler store traits, so the composers
 //!   in [`eventuary_core::io`] work against files exactly as they do against a

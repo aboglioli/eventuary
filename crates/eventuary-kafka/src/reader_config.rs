@@ -60,11 +60,6 @@ impl KafkaReaderConfig {
         if self.max_poll_records == 0 {
             return Err(Error::Config("max_poll_records must be > 0".to_owned()));
         }
-        if self.ack_buffer.max_pending == 0 {
-            return Err(Error::Config(
-                "ack_buffer.max_pending must be > 0".to_owned(),
-            ));
-        }
         Ok(())
     }
 
@@ -136,17 +131,6 @@ mod tests {
     fn rejects_zero_max_poll_records() {
         let mut c = cfg();
         c.max_poll_records = 0;
-        let err = c.validate().unwrap_err();
-        assert!(matches!(err, Error::Config(_)));
-    }
-
-    #[test]
-    fn rejects_zero_ack_buffer() {
-        let mut c = cfg();
-        c.ack_buffer = AckBufferConfig {
-            max_pending: 0,
-            flush_interval: Duration::from_secs(1),
-        };
         let err = c.validate().unwrap_err();
         assert!(matches!(err, Error::Config(_)));
     }

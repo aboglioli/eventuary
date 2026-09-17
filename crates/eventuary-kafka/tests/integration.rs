@@ -1,4 +1,5 @@
 use std::net::TcpListener;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -125,10 +126,7 @@ async fn ack_commits_offset() {
     let group = ConsumerGroupId::new("g-ack").unwrap();
     let cfg = KafkaReaderConfig {
         start_from: StartFrom::Earliest,
-        ack_buffer: AckBufferConfig {
-            max_pending: 1,
-            flush_interval: Duration::from_millis(100),
-        },
+        ack_buffer: AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(100)),
         ..KafkaReaderConfig::streaming(
             vec![brokers.clone()],
             vec!["topic-ack".to_owned()],
@@ -197,10 +195,7 @@ async fn consumer_group_resume() {
 
     let mk_cfg = || KafkaReaderConfig {
         start_from: StartFrom::Earliest,
-        ack_buffer: AckBufferConfig {
-            max_pending: 1,
-            flush_interval: Duration::from_millis(100),
-        },
+        ack_buffer: AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(100)),
         ..KafkaReaderConfig::streaming(
             vec![brokers.clone()],
             vec!["topic-resume".to_owned()],

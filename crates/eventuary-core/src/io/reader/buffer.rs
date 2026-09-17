@@ -27,6 +27,7 @@
 
 use std::future::Future;
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -67,12 +68,24 @@ where
 }
 
 pub struct BufferedReaderConfig {
-    pub max_pending: usize,
+    max_pending: NonZeroUsize,
+}
+
+impl BufferedReaderConfig {
+    pub fn new(max_pending: NonZeroUsize) -> Self {
+        Self { max_pending }
+    }
+
+    pub fn max_pending(&self) -> usize {
+        self.max_pending.get()
+    }
 }
 
 impl Default for BufferedReaderConfig {
     fn default() -> Self {
-        Self { max_pending: 1024 }
+        Self {
+            max_pending: NonZeroUsize::new(1024).expect("1024 is non-zero"),
+        }
     }
 }
 
@@ -202,7 +215,7 @@ where
 
         let pending_entries = store.pending().await?;
         let inner = self.inner.read(subscription).await?;
-        let semaphore = Arc::new(Semaphore::new(self.config.max_pending));
+        let semaphore = Arc::new(Semaphore::new(self.config.max_pending()));
 
         let handle = tokio::spawn(async move {
             let mut inner = Box::pin(inner);
@@ -556,8 +569,11 @@ mod tests {
         let reader = VecReader {
             events: Mutex::new(Some(events)),
         };
-        let buffered =
-            BufferedReader::with_config(reader, store, BufferedReaderConfig { max_pending: 2 });
+        let buffered = BufferedReader::with_config(
+            reader,
+            store,
+            BufferedReaderConfig::new(NonZeroUsize::new(2).unwrap()),
+        );
         let mut stream = buffered.read(()).await.unwrap();
 
         let msg0 = tokio::time::timeout(Duration::from_secs(2), stream.next())

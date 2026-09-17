@@ -205,9 +205,10 @@ impl PartitionLog {
         if bases.is_empty() {
             return Ok(());
         }
-        let known = self.segments.len();
+        let last = bases.len() - 1;
         for (i, base) in bases.iter().enumerate() {
-            if i < known && self.segments[i].base_offset() == *base && i + 1 < bases.len() {
+            let known = self.segments.get(i).map(Segment::base_offset) == Some(*base);
+            if known && (i < last || !self.segments[i].has_changed_on_disk()?) {
                 continue;
             }
             let segment = Segment::open(&self.dir, *base, self.config.segment, false)?;

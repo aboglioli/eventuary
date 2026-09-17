@@ -102,6 +102,14 @@ impl Segment {
         self.size
     }
 
+    pub(crate) fn has_changed_on_disk(&self) -> Result<bool> {
+        match std::fs::metadata(&self.log_path) {
+            Ok(meta) => Ok(meta.len() != self.size),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(io_at("stat segment", &self.log_path, e)),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.next_offset == self.base_offset
     }
