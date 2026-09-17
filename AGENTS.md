@@ -1263,6 +1263,17 @@ Worth knowing when changing the codebase:
   omission: SNS is push-based with no receive API. Nothing in the trait model
   requires a backend to implement both roles. The consumption story is SNS →
   SQS fanout, which is also why both services belong in the same crate.
+- **`CheckpointAcker` settles once by itself, rather than relying on
+  `OnceAcker`.** Most ackers tolerate a repeat settle: `PartitionAcker` checks
+  the in-flight id before releasing a lane, `CoordinatedAcker` only inflates a
+  flush counter over monotonic fenced cursors, and `BatchedAcker`'s delete or
+  commit is idempotent at the broker. `CheckpointAcker` cannot, because it
+  identifies a message by its position in a per-cursor queue and that queue is
+  dropped once it drains, so positions are reused. A stale ack would have
+  completed whichever message inherited its slot and moved the durable
+  checkpoint past an unhandled event, which is why the guard belongs in the type
+  and not in a wrapper a caller has to remember. See **Misuse-Resistant
+  Contracts**.
 - **A core config that bounds something owns that bound.** Where a field feeds
   something that cannot take every value — a `tokio::time::interval` period, a
   `Semaphore` permit count, an exponent in a `Duration::from_secs_f64` — the

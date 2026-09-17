@@ -6,6 +6,18 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Acking a message twice through `CheckpointReader` no longer panics.
+  `CheckpointAcker` identifies a message by its position in a per-cursor queue,
+  and `Message::ack` takes `&self`, so a second call indexed a slot that had
+  already been popped: `idx.wrapping_sub(offset)` wrapped and the index went out
+  of bounds. Guarding the index alone would have been worse than the panic —
+  the per-cursor state is dropped once its queue drains, so positions are reused
+  and a stale ack could have marked a later, unhandled message complete and
+  advanced the durable checkpoint past it. `CheckpointAcker` now settles once:
+  the first `ack`, `nack` or `nack_with` wins and later calls are no-ops.
+
 ### Breaking changes
 
 - `SqsReaderConfig` drops `start_from` and `consumer_group_id`. Neither could

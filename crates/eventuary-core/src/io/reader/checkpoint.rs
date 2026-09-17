@@ -308,6 +308,18 @@ pub struct CheckpointAcker<A: Acker, C, S: CheckpointStore<C>> {
     store: S,
     flush_policy: CheckpointFlushPolicy,
     flush_signal: FlushSignal,
+    settled: Arc<Mutex<bool>>,
+}
+
+impl<A: Acker, C, S: CheckpointStore<C>> CheckpointAcker<A, C, S> {
+    async fn claim_settlement(&self) -> bool {
+        let mut settled = self.settled.lock().await;
+        if *settled {
+            return false;
+        }
+        *settled = true;
+        true
+    }
 }
 
 impl<A, C, S> Acker for CheckpointAcker<A, C, S>
@@ -317,6 +329,9 @@ where
     S: CheckpointStore<C>,
 {
     async fn ack(&self) -> Result<()> {
+        if !self.claim_settlement().await {
+            return Ok(());
+        }
         self.inner.ack().await?;
         let to_commit = {
             let mut state = self.state.lock().await;
@@ -347,10 +362,16 @@ where
     }
 
     async fn nack(&self) -> Result<()> {
+        if !self.claim_settlement().await {
+            return Ok(());
+        }
         self.inner.nack().await
     }
 
     async fn nack_with(&self, context: NackContext) -> Result<()> {
+        if !self.claim_settlement().await {
+            return Ok(());
+        }
         self.inner.nack_with(context).await
     }
 }
@@ -708,6 +729,7 @@ where
                     store: store.clone(),
                     flush_policy,
                     flush_signal: producer_signal.clone(),
+                    settled: Arc::new(Mutex::new(false)),
                 };
                 let out = Message::new(event, acker, cursor);
                 if producer_tx.send(Ok(out)).await.is_err() {
@@ -1055,6 +1077,83 @@ mod tests {
         .unwrap()
         .build()
         .expect("valid event")
+    }
+
+    async fn settled_once_reader(
+        events: Vec<Event>,
+    ) -> (
+        MemStore,
+        impl futures::Stream<
+            Item = Result<Message<CheckpointAcker<NoopAcker, TestCursor, MemStore>, TestCursor>>,
+        >,
+    ) {
+        let reader = VecReader {
+            events: std::sync::Mutex::new(Some(events)),
+        };
+        let store = MemStore::default();
+        let cr = CheckpointReader::new(reader, store.clone());
+        let scope = CheckpointScope::new(
+            ConsumerGroupId::new("g").unwrap(),
+            StreamId::new("s").unwrap(),
+        );
+        let stream = cr
+            .read(CheckpointSubscription::new(TestSub, scope))
+            .await
+            .unwrap();
+        (store, stream)
+    }
+
+    #[tokio::test]
+    async fn acking_the_same_message_twice_commits_once() {
+        use futures::StreamExt;
+        let (store, stream) = settled_once_reader(vec![ev("k0")]).await;
+        futures::pin_mut!(stream);
+        let msg = stream.next().await.unwrap().unwrap();
+
+        msg.ack().await.unwrap();
+        msg.ack().await.unwrap();
+
+        assert_eq!(
+            store.committed().len(),
+            1,
+            "a repeat ack must not commit again"
+        );
+    }
+
+    #[tokio::test]
+    async fn settling_is_once_whichever_way_it_goes() {
+        use futures::StreamExt;
+        let (store, stream) = settled_once_reader(vec![ev("k0")]).await;
+        futures::pin_mut!(stream);
+        let msg = stream.next().await.unwrap().unwrap();
+
+        msg.nack().await.unwrap();
+        msg.ack().await.unwrap();
+
+        assert!(
+            store.committed().is_empty(),
+            "an ack after a nack must not commit the nacked message"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repeat_ack_cannot_complete_a_later_message() {
+        use futures::StreamExt;
+        let (store, stream) = settled_once_reader(vec![ev("k0"), ev("k1")]).await;
+        futures::pin_mut!(stream);
+
+        let first = stream.next().await.unwrap().unwrap();
+        first.ack().await.unwrap();
+        let committed_after_first = store.committed();
+
+        let _second = stream.next().await.unwrap().unwrap();
+        first.ack().await.unwrap();
+
+        assert_eq!(
+            store.committed(),
+            committed_after_first,
+            "a stale ack must not complete the message that reused its slot"
+        );
     }
 
     #[tokio::test]
