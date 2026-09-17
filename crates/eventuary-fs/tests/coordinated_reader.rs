@@ -9,11 +9,11 @@ use tokio::time::timeout;
 use eventuary_core::io::reader::CheckpointScope;
 use eventuary_core::io::{ConsumerGroupId, OwnerId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
-use eventuary_core::{Event, Payload, StartFrom};
+use eventuary_core::{Error, Event, Payload, StartFrom};
 use eventuary_fs::coordinator::{FsPartitionCoordinator, FsPartitionCoordinatorConfig};
 use eventuary_fs::reader::{
-    FsCoordinatedReader, FsCoordinatedReaderConfig, FsCoordinatedSubscription, FsCursor, FsReader,
-    FsReaderConfig, FsSubscription,
+    FsCoordinatedReader, FsCoordinatedReaderConfig, FsCoordinatedStream, FsCoordinatedSubscription,
+    FsCursor, FsReader, FsReaderConfig, FsSubscription,
 };
 use eventuary_fs::writer::{FsPartitioningConfig, FsWriter, FsWriterConfig};
 
@@ -146,14 +146,41 @@ async fn coordinated_reader_registers_itself_as_a_live_consumer() {
     assert_eq!(coordinator.live_consumers(&scope()).await.unwrap(), 1);
 }
 
+async fn settled_group(coordinator: &Arc<FsPartitionCoordinator<FsCursor>>, want: usize) {
+    use eventuary_core::io::reader::PartitionCoordinator;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if coordinator.live_consumers(&scope()).await.unwrap() >= want {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("consumer group never reached {want} live consumers");
+}
+
+async fn drain(mut stream: FsCoordinatedStream) -> (HashSet<String>, HashSet<u32>) {
+    let mut keys = HashSet::new();
+    let mut partitions = HashSet::new();
+    while let Ok(Some(Ok(message))) = timeout(Duration::from_millis(1500), stream.next()).await {
+        let partition = message.cursor().partition.id();
+        let key = message.event().key().as_str().to_owned();
+        match message.ack().await {
+            Ok(()) => {}
+            Err(Error::OwnershipLost(_)) => continue,
+            Err(e) => panic!("unexpected ack failure: {e}"),
+        }
+        keys.insert(key);
+        partitions.insert(partition);
+    }
+    (keys, partitions)
+}
+
 #[tokio::test]
 async fn two_coordinated_readers_split_partitions_without_overlap() {
     let dir = tempfile::tempdir().unwrap();
     let writer = FsWriter::open(dir.path(), writer_config()).unwrap();
-    for i in 0..40 {
-        writer.write(&ev(&format!("k{i}"))).await.unwrap();
-    }
-    writer.sync().await.unwrap();
 
     let coordinator = Arc::new(
         FsPartitionCoordinator::open(dir.path(), FsPartitionCoordinatorConfig::default()).unwrap(),
@@ -161,42 +188,35 @@ async fn two_coordinated_readers_split_partitions_without_overlap() {
     let first = coordinated(dir.path(), Arc::clone(&coordinator));
     let second = coordinated(dir.path(), Arc::clone(&coordinator));
 
-    let mut stream_a = first.read(subscription(StartFrom::Earliest)).await.unwrap();
-    let mut stream_b = second
+    let stream_a = first.read(subscription(StartFrom::Earliest)).await.unwrap();
+    let stream_b = second
         .read(subscription(StartFrom::Earliest))
         .await
         .unwrap();
 
-    let mut partitions_a = HashSet::new();
-    let mut partitions_b = HashSet::new();
-    let mut keys = HashSet::new();
+    settled_group(&coordinator, 2).await;
 
-    for _ in 0..40 {
-        tokio::select! {
-            item = timeout(Duration::from_millis(800), stream_a.next()) => {
-                if let Ok(Some(Ok(message))) = item {
-                    message.ack().await.unwrap();
-                    partitions_a.insert(message.cursor().partition.id());
-                    keys.insert(message.event().key().as_str().to_owned());
-                }
-            }
-            item = timeout(Duration::from_millis(800), stream_b.next()) => {
-                if let Ok(Some(Ok(message))) = item {
-                    message.ack().await.unwrap();
-                    partitions_b.insert(message.cursor().partition.id());
-                    keys.insert(message.event().key().as_str().to_owned());
-                }
-            }
-        }
-        if keys.len() == 40 {
-            break;
-        }
+    let keys: Vec<String> = (0..40).map(|i| format!("k{i}")).collect();
+    for key in &keys {
+        writer.write(&ev(key)).await.unwrap();
     }
+    writer.sync().await.unwrap();
+
+    let a = tokio::spawn(drain(stream_a));
+    let b = tokio::spawn(drain(stream_b));
+    let (keys_a, partitions_a) = a.await.unwrap();
+    let (keys_b, partitions_b) = b.await.unwrap();
 
     let overlap: Vec<_> = partitions_a.intersection(&partitions_b).collect();
     assert!(
         overlap.is_empty(),
-        "partitions must not be delivered to both readers: {overlap:?}"
+        "partitions must not be served by both readers: {overlap:?}"
     );
-    assert!(!keys.is_empty());
+
+    let delivered: HashSet<&String> = keys_a.union(&keys_b).collect();
+    let missing: Vec<&String> = keys.iter().filter(|k| !delivered.contains(k)).collect();
+    assert!(
+        missing.is_empty(),
+        "the group must cover every event, missing {missing:?}"
+    );
 }
