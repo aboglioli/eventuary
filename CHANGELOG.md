@@ -28,6 +28,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permits, and every delivery acquires one first, so the reader silently
   delivered nothing for the life of the stream.
 
+- `RetryConfig` takes its values through `RetryConfig::new(max_attempts,
+  base_delay, max_delay, multiplier)` instead of public fields, rejecting a zero
+  `max_attempts` and any `multiplier` that is not finite and at least `1.0` —
+  the same contract `RetryWriterConfig` already enforced for the same numbers.
+
 ### Performance
 
 - `FsReader` no longer re-reads a partition's active segment on every idle poll.
@@ -40,6 +45,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A negative `RetryConfig::multiplier` no longer panics the consumer.
+  `backoff_delay` multiplied it into a negative number of seconds and handed
+  that to `Duration::from_secs_f64`, which panics rather than saturating, inside
+  the handler retry path.
 - A zero `AckBufferConfig::flush_interval` no longer kills acking. It reached
   `tokio::time::interval`, which panics on a zero period, and the panic stayed
   inside the spawned flusher task: the handle survived, acks kept queueing, and

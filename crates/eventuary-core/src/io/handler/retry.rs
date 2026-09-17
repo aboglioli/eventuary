@@ -14,10 +14,52 @@ use crate::topic::Topic;
 
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
-    pub max_attempts: u32,
-    pub base_delay: Duration,
-    pub max_delay: Duration,
-    pub multiplier: f64,
+    max_attempts: u32,
+    base_delay: Duration,
+    max_delay: Duration,
+    multiplier: f64,
+}
+
+impl RetryConfig {
+    pub fn new(
+        max_attempts: u32,
+        base_delay: Duration,
+        max_delay: Duration,
+        multiplier: f64,
+    ) -> Result<Self> {
+        if max_attempts == 0 {
+            return Err(Error::Config(
+                "retry handler max_attempts must be greater than zero".to_owned(),
+            ));
+        }
+        if !multiplier.is_finite() || multiplier < 1.0 {
+            return Err(Error::Config(
+                "retry handler multiplier must be finite and >= 1.0".to_owned(),
+            ));
+        }
+        Ok(Self {
+            max_attempts,
+            base_delay,
+            max_delay,
+            multiplier,
+        })
+    }
+
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    pub fn base_delay(&self) -> Duration {
+        self.base_delay
+    }
+
+    pub fn max_delay(&self) -> Duration {
+        self.max_delay
+    }
+
+    pub fn multiplier(&self) -> f64 {
+        self.multiplier
+    }
 }
 
 impl Default for RetryConfig {
@@ -55,9 +97,9 @@ impl RetryPolicy for DefaultRetryPolicy {
 
 pub fn backoff_delay(config: &RetryConfig, attempt: u32) -> Duration {
     let exponent = attempt.saturating_sub(1);
-    let base = config.base_delay.as_secs_f64();
-    let delay = base * config.multiplier.powi(exponent as i32);
-    let max = config.max_delay.as_secs_f64();
+    let base = config.base_delay().as_secs_f64();
+    let delay = base * config.multiplier().powi(exponent as i32);
+    let max = config.max_delay().as_secs_f64();
     let capped = delay.min(max);
     Duration::from_secs_f64(capped)
 }
@@ -194,10 +236,10 @@ where
 
             let action = self
                 .policy
-                .classify(&error, attempt, self.config.max_attempts);
+                .classify(&error, attempt, self.config.max_attempts());
             match action {
                 RetryAction::Retry => {
-                    if attempt >= self.config.max_attempts {
+                    if attempt >= self.config.max_attempts() {
                         let reason = error.to_string();
                         self.dead_letter
                             .send(event, self.inner.id(), attempt, &reason)
@@ -221,6 +263,42 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rejects_zero_attempts() {
+        let err = RetryConfig::new(0, Duration::from_millis(100), Duration::from_secs(30), 2.0)
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Config(_)), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_multiplier_that_would_not_produce_a_delay() {
+        for multiplier in [-2.0, 0.0, 0.5, f64::NAN, f64::INFINITY] {
+            let result = RetryConfig::new(
+                3,
+                Duration::from_millis(100),
+                Duration::from_secs(30),
+                multiplier,
+            );
+
+            assert!(
+                result.is_err(),
+                "multiplier {multiplier} must be rejected before it reaches Duration"
+            );
+        }
+    }
+
+    #[test]
+    fn every_accepted_config_yields_a_usable_delay() {
+        let config =
+            RetryConfig::new(5, Duration::from_millis(100), Duration::from_secs(30), 2.0).unwrap();
+
+        for attempt in 1..=10 {
+            let delay = backoff_delay(&config, attempt);
+            assert!(delay <= config.max_delay());
+        }
+    }
     use super::*;
 
     use std::sync::Arc;
@@ -285,12 +363,8 @@ mod tests {
 
     #[test]
     fn backoff_delay_grows_exponentially() {
-        let config = RetryConfig {
-            max_attempts: 5,
-            base_delay: Duration::from_millis(100),
-            max_delay: Duration::from_secs(60),
-            multiplier: 2.0,
-        };
+        let config =
+            RetryConfig::new(5, Duration::from_millis(100), Duration::from_secs(60), 2.0).unwrap();
         assert_eq!(backoff_delay(&config, 1), Duration::from_millis(100));
         assert_eq!(backoff_delay(&config, 2), Duration::from_millis(200));
         assert_eq!(backoff_delay(&config, 3), Duration::from_millis(400));
@@ -298,12 +372,13 @@ mod tests {
 
     #[test]
     fn backoff_delay_capped_at_max() {
-        let config = RetryConfig {
-            max_attempts: 20,
-            base_delay: Duration::from_millis(100),
-            max_delay: Duration::from_millis(500),
-            multiplier: 2.0,
-        };
+        let config = RetryConfig::new(
+            20,
+            Duration::from_millis(100),
+            Duration::from_millis(500),
+            2.0,
+        )
+        .unwrap();
         assert_eq!(backoff_delay(&config, 10), Duration::from_millis(500));
     }
 
@@ -320,12 +395,7 @@ mod tests {
         let retry = RetryHandler::new(
             inner,
             DefaultRetryPolicy,
-            RetryConfig {
-                max_attempts: 5,
-                base_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(10),
-                multiplier: 2.0,
-            },
+            RetryConfig::new(5, Duration::from_millis(1), Duration::from_millis(10), 2.0).unwrap(),
             DeadLetterWriter::new(writer),
         );
 
@@ -347,12 +417,7 @@ mod tests {
         let retry = RetryHandler::new(
             inner,
             DefaultRetryPolicy,
-            RetryConfig {
-                max_attempts: 3,
-                base_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(10),
-                multiplier: 2.0,
-            },
+            RetryConfig::new(3, Duration::from_millis(1), Duration::from_millis(10), 2.0).unwrap(),
             DeadLetterWriter::new(writer),
         );
 
@@ -378,12 +443,7 @@ mod tests {
         let retry = RetryHandler::new(
             inner,
             DefaultRetryPolicy,
-            RetryConfig {
-                max_attempts: 2,
-                base_delay: Duration::from_millis(1),
-                max_delay: Duration::from_millis(10),
-                multiplier: 2.0,
-            },
+            RetryConfig::new(2, Duration::from_millis(1), Duration::from_millis(10), 2.0).unwrap(),
             DeadLetterWriter::new(writer),
         );
 
