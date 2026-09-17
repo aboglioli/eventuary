@@ -22,6 +22,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the buffer then flushes when `max_pending` tokens are held, and when it
   closes. `SqsReaderConfig` and `KafkaReaderConfig` no longer reject a zero
   `ack_buffer.max_pending`, because the type no longer permits one.
+- `BufferedReaderConfig` takes its value through
+  `BufferedReaderConfig::new(max_pending)` instead of a public field, and
+  `max_pending` is a `NonZeroUsize`. A zero there built a `Semaphore` with no
+  permits, and every delivery acquires one first, so the reader silently
+  delivered nothing for the life of the stream.
 
 ### Fixed
 
