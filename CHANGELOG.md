@@ -15,8 +15,21 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SqsReaderConfig::limit` is now honoured instead of rejected. The reader
   already stopped the stream after `limit` deliveries when a `SqsSubscription`
   carried one; only the config validator disagreed.
+- `AckBufferConfig` takes its values through `AckBufferConfig::new(max_pending,
+  flush_interval)` instead of public fields, and `max_pending` is a
+  `NonZeroUsize`. A zero `flush_interval` is now a supported setting meaning
+  "run no timer", matching what `CheckpointFlushPolicy` already means by it:
+  the buffer then flushes when `max_pending` tokens are held, and when it
+  closes. `SqsReaderConfig` and `KafkaReaderConfig` no longer reject a zero
+  `ack_buffer.max_pending`, because the type no longer permits one.
 
 ### Fixed
+
+- A zero `AckBufferConfig::flush_interval` no longer kills acking. It reached
+  `tokio::time::interval`, which panics on a zero period, and the panic stayed
+  inside the spawned flusher task: the handle survived, acks kept queueing, and
+  nothing ever flushed them. On SQS that meant `DeleteMessageBatch` never ran
+  and every message redelivered forever; on Kafka, offsets never committed.
 
 - `SqsReader` and `KafkaReader` log a message or record they cannot decode into
   an `Event`, at warn with its identity and the decode cause, before discarding

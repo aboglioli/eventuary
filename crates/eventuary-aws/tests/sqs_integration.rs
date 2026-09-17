@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -119,10 +120,8 @@ async fn ack_deletes_message() {
     writer.write(&make_event("orgsqs", "k-ack")).await.unwrap();
 
     let mut config = SqsReaderConfig::defaults_for(&queue_url);
-    config.ack_buffer = AckBufferConfig {
-        max_pending: 1,
-        flush_interval: Duration::from_millis(50),
-    };
+    config.ack_buffer =
+        AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(50));
     let reader = SqsReader::new(aws.sqs.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
     let msg = tokio::time::timeout(Duration::from_secs(30), stream.next())
@@ -156,10 +155,8 @@ async fn reader_acks_and_skips_poison_records() {
     writer.write(&good).await.unwrap();
 
     let mut config = SqsReaderConfig::defaults_for(&queue_url);
-    config.ack_buffer = AckBufferConfig {
-        max_pending: 1,
-        flush_interval: Duration::from_millis(50),
-    };
+    config.ack_buffer =
+        AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(50));
     let reader = SqsReader::new(aws.sqs.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
 
@@ -304,10 +301,8 @@ async fn reader_consumes_a_fifo_queue() {
 
     let mut config = SqsReaderConfig::defaults_for(&queue_url);
     config.queue_type = SqsQueueType::Fifo;
-    config.ack_buffer = AckBufferConfig {
-        max_pending: 1,
-        flush_interval: Duration::from_millis(50),
-    };
+    config.ack_buffer =
+        AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(50));
     let reader = SqsReader::new(aws.sqs.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
 
@@ -334,10 +329,8 @@ async fn fifo_reader_delivers_a_message_group_in_order() {
 
     let mut config = SqsReaderConfig::defaults_for(&queue_url);
     config.queue_type = SqsQueueType::Fifo;
-    config.ack_buffer = AckBufferConfig {
-        max_pending: 1,
-        flush_interval: Duration::from_millis(50),
-    };
+    config.ack_buffer =
+        AckBufferConfig::new(NonZeroUsize::new(1).unwrap(), Duration::from_millis(50));
     let reader = SqsReader::new(aws.sqs.clone(), config).unwrap();
     let mut stream = reader.read().await.unwrap();
 

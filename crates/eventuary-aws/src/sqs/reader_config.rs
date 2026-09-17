@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use eventuary_core::io::acker::AckBufferConfig;
@@ -25,10 +26,10 @@ impl SqsReaderConfig {
             max_messages: 10,
             visibility_timeout: Duration::from_secs(30),
             wait_time: Duration::from_secs(20),
-            ack_buffer: AckBufferConfig {
-                max_pending: 10,
-                flush_interval: Duration::from_secs(1),
-            },
+            ack_buffer: AckBufferConfig::new(
+                NonZeroUsize::new(10).expect("10 is non-zero"),
+                Duration::from_secs(1),
+            ),
             limit: None,
         }
     }
@@ -46,7 +47,7 @@ impl SqsReaderConfig {
 
     pub fn validate(&self) -> Result<()> {
         self.subscription().validate()?;
-        if self.ack_buffer.max_pending == 0 || self.ack_buffer.max_pending > MAX_MESSAGES as usize {
+        if self.ack_buffer.max_pending() > MAX_MESSAGES as usize {
             return Err(Error::Config(format!(
                 "ack_buffer.max_pending must be 1..={MAX_MESSAGES} for SQS"
             )));
@@ -60,10 +61,10 @@ mod tests {
     use super::*;
 
     fn ack(n: usize) -> AckBufferConfig {
-        AckBufferConfig {
-            max_pending: n,
-            flush_interval: Duration::from_secs(1),
-        }
+        AckBufferConfig::new(
+            NonZeroUsize::new(n).expect("non-zero"),
+            Duration::from_secs(1),
+        )
     }
 
     fn base() -> SqsReaderConfig {
