@@ -28,6 +28,16 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permits, and every delivery acquires one first, so the reader silently
   delivered nothing for the life of the stream.
 
+### Performance
+
+- `FsReader` no longer re-reads a partition's active segment on every idle poll.
+  `PartitionLog::refresh` reopened it unconditionally, reading the whole sparse
+  index and rescanning the tail, so the cost of tailing a quiet log grew with
+  segment size. It now stats the segment first and reopens only when the file
+  changed. Measured per idle poll per partition: 0.022 ms to 0.0046 ms at 10k
+  records, and 0.040 ms to 0.0044 ms at 100k, where the old cost scaled with the
+  log and the new one does not.
+
 ### Fixed
 
 - A zero `AckBufferConfig::flush_interval` no longer kills acking. It reached
