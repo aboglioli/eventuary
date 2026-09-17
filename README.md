@@ -1089,6 +1089,12 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   does the deleting and nothing calls it for you, so schedule it from the
   application. A consumer whose checkpoint falls behind the retained range gets
   `Error::InvalidCursor` rather than silently skipping the deleted events.
+- A record that no longer decodes into an `Event` ends that partition's stream,
+  naming its partition and offset, and keeps doing so until someone intervenes,
+  because skipping it would lose an event the log still holds. Segments are JSON
+  lines, so the repair is to correct or delete that line.
+- `FsBufferStore` numbers entries from a counter held in the process that opened
+  it, so one buffer directory belongs to one process.
 - Coordination uses advisory file locks, so it is single-node. Putting the log
   on a shared network filesystem does not make it multi-host.
 - Integration tests need no containers.
