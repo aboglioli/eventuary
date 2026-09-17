@@ -29,6 +29,7 @@
 //! retried receive returns the same messages instead of stalling the group.
 
 mod batch;
+mod request;
 
 pub mod sns;
 pub mod sqs;

@@ -2,9 +2,10 @@ use aws_sdk_sns::Client;
 use aws_sdk_sns::types::PublishBatchRequestEntry;
 
 use eventuary_core::io::Writer;
-use eventuary_core::{Error, Event, EventId, Result};
+use eventuary_core::{Error, Event, Result};
 
-use crate::batch::{self, Batcher, FailedEntry};
+use crate::batch::{Batch, Batcher};
+use crate::request::{self, Entry, FailedEntry};
 use crate::sns::topic::SnsTopicType;
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +45,7 @@ impl SnsWriter {
         event: &Event,
         body: String,
         entry_id: usize,
-    ) -> Result<PublishBatchRequestEntry> {
+    ) -> Result<Entry<PublishBatchRequestEntry>> {
         let mut builder = PublishBatchRequestEntry::builder()
             .id(entry_id.to_string())
             .message(body);
@@ -54,14 +55,12 @@ impl SnsWriter {
         if let Some(dedup_id) = self.config.topic_type.message_deduplication_id(event) {
             builder = builder.message_deduplication_id(dedup_id);
         }
-        builder.build().map_err(|e| Error::Store(e.to_string()))
+        let request = builder.build().map_err(|e| Error::Store(e.to_string()))?;
+        Ok(Entry::new(request, event.id()))
     }
 
-    async fn publish_batch(
-        &self,
-        entries: Vec<PublishBatchRequestEntry>,
-        event_ids: &[EventId],
-    ) -> Result<()> {
+    async fn publish_batch(&self, sealed: Batch<Entry<PublishBatchRequestEntry>>) -> Result<()> {
+        let (entries, event_ids) = request::unzip(sealed.into_items());
         let resp = self
             .client
             .publish_batch()
@@ -83,13 +82,17 @@ impl SnsWriter {
                 message: f.message(),
             })
             .collect();
-        Err(batch::failure_report("publish_batch", &reported, event_ids))
+        Err(request::failure_report(
+            "publish_batch",
+            &reported,
+            &event_ids,
+        ))
     }
 }
 
 impl Writer for SnsWriter {
     async fn write(&self, event: &Event) -> Result<()> {
-        let body = batch::serialize_body(event)?;
+        let body = request::serialize_body(event)?;
         let mut request = self
             .client
             .publish()
@@ -109,20 +112,16 @@ impl Writer for SnsWriter {
     }
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
-        let mut pending = Batcher::new();
+        let mut batcher = Batcher::new(request::BATCH_LIMITS);
         for event in events {
-            let body = batch::serialize_body(event)?;
-            let body_len = body.len();
-            if pending.would_exceed(body_len) {
-                let (entries, event_ids) = pending.take();
-                self.publish_batch(entries, &event_ids).await?;
+            let body = request::serialize_body(event)?;
+            let weight = body.len();
+            if let Some(sealed) = batcher.push(weight, |index| self.entry(event, body, index))? {
+                self.publish_batch(sealed).await?;
             }
-            let entry = self.entry(event, body, pending.len())?;
-            pending.push(entry, event.id(), body_len);
         }
-        if !pending.is_empty() {
-            let (entries, event_ids) = pending.take();
-            self.publish_batch(entries, &event_ids).await?;
+        if let Some(tail) = batcher.finish() {
+            self.publish_batch(tail).await?;
         }
         Ok(())
     }
