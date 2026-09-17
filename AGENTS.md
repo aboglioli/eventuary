@@ -1263,6 +1263,18 @@ Worth knowing when changing the codebase:
   omission: SNS is push-based with no receive API. Nothing in the trait model
   requires a backend to implement both roles. The consumption story is SNS →
   SQS fanout, which is also why both services belong in the same crate.
+- **A core config that bounds something owns that bound.** Where a field feeds
+  something that cannot take every value — a `tokio::time::interval` period, a
+  `Semaphore` permit count, an exponent in a `Duration::from_secs_f64` — the
+  field is private behind a constructor and counts are `NonZeroUsize`, as
+  `BatchWriterConfig`, `RetryWriterConfig` and `RecoverConfig` already were and
+  `AckBufferConfig`, `BufferedReaderConfig` and `RetryConfig` now are. A zero
+  that has a meaning keeps it and is documented: `AckBufferConfig::flush_interval`
+  and `CheckpointFlushPolicy::max_pending_interval` both read zero as "run no
+  timer". The configs left with public numeric fields are the ones where every
+  value is legal or fails loudly: `CoordinatedReaderConfig`'s durations spin
+  visibly, and `CheckpointReaderConfig::max_pending_per_key` errors on the first
+  ack. See **Misuse-Resistant Contracts**.
 - **Batch assembly is a sealing batcher, not a check-then-push helper.**
   `push` is the only mutator on `Batcher<T>`: it seals and returns the full batch
   when the incoming item does not fit, so there is no check a caller can skip and
