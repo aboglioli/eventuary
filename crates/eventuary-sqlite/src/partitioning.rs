@@ -102,7 +102,7 @@ impl SqlitePartitionBackfill {
 
         let fetch_sql = format!(
             "SELECT sequence, id, organization, namespace, topic, event_key, payload, \
-             content_type, metadata, timestamp, version, parent_id, correlation_id, causation_id \
+             content_type, metadata, timestamp, version \
              FROM {events} \
              WHERE partition_id IS NULL \
              ORDER BY sequence \
@@ -192,9 +192,6 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, SerializedEvent
     let metadata_str: String = row.get(8)?;
     let timestamp_str: String = row.get(9)?;
     let version: i64 = row.get(10)?;
-    let parent_id: Option<String> = row.get(11)?;
-    let correlation_id: Option<String> = row.get(12)?;
-    let causation_id: Option<String> = row.get(13)?;
 
     let id = uuid::Uuid::parse_str(&id).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -203,17 +200,6 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, SerializedEvent
             Box::new(std::io::Error::other(format!("decode id: {e}"))),
         )
     })?;
-    let parent_id = parent_id
-        .as_deref()
-        .map(uuid::Uuid::parse_str)
-        .transpose()
-        .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                11,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::other(format!("decode parent_id: {e}"))),
-            )
-        })?;
     let payload: SerializedPayload = serde_json::from_str(&payload_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
             6,
@@ -250,9 +236,6 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, SerializedEvent
             timestamp,
             version: version as u64,
             key,
-            parent_id,
-            correlation_id,
-            causation_id,
         },
     ))
 }

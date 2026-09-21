@@ -516,7 +516,7 @@ async fn fetch_batch(
 
         let mut sql = format!(
             "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, parent_id, correlation_id, causation_id, partition_id, partition_count \
+             timestamp, version, partition_id, partition_count \
              FROM {relation} WHERE sequence > ?1"
         );
         let mut params: Vec<Value> = vec![Value::Integer(after_seq)];
@@ -597,11 +597,8 @@ async fn fetch_batch(
                 let metadata_str: String = row.get(8)?;
                 let timestamp_str: String = row.get(9)?;
                 let version: i64 = row.get(10)?;
-                let parent_id: Option<String> = row.get(11)?;
-                let correlation_id: Option<String> = row.get(12)?;
-                let causation_id: Option<String> = row.get(13)?;
-                let partition_id: Option<i64> = row.get(14)?;
-                let partition_count: Option<i64> = row.get(15)?;
+                let partition_id: Option<i64> = row.get(11)?;
+                let partition_count: Option<i64> = row.get(12)?;
                 Ok((
                     sequence,
                     id,
@@ -614,9 +611,6 @@ async fn fetch_batch(
                     metadata_str,
                     timestamp_str,
                     version,
-                    parent_id,
-                    correlation_id,
-                    causation_id,
                     partition_id,
                     partition_count,
                 ))
@@ -637,9 +631,6 @@ async fn fetch_batch(
                 metadata_str,
                 timestamp_str,
                 version,
-                parent_id,
-                correlation_id,
-                causation_id,
                 partition_id,
                 partition_count,
             ) = row.map_err(|e| Error::Store(e.to_string()))?;
@@ -649,11 +640,6 @@ async fn fetch_batch(
             let _ = content_type;
             let id = uuid::Uuid::parse_str(&id)
                 .map_err(|e| Error::Serialization(format!("decode id: {e}")))?;
-            let parent_id = parent_id
-                .as_deref()
-                .map(uuid::Uuid::parse_str)
-                .transpose()
-                .map_err(|e| Error::Serialization(format!("decode parent_id: {e}")))?;
             let metadata: HashMap<String, String> = serde_json::from_str(&metadata_str)
                 .map_err(|e| Error::Serialization(format!("decode metadata: {e}")))?;
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
@@ -671,9 +657,6 @@ async fn fetch_batch(
                     timestamp,
                     version: version as u64,
                     key,
-                    parent_id,
-                    correlation_id,
-                    causation_id,
                 },
                 sequence,
                 partition,

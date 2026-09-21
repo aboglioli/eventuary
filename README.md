@@ -103,15 +103,15 @@ let event = Event::builder(
     "invoice-123",
     Payload::from_json(&serde_json::json!({ "amount": 100 }))?,
 )?
-.correlation_id("billing-run-7")?
 .build()?;
 ```
 
 Important model types:
 
 - `Event` — immutable event record with UUID v7 `id`, tenant organization,
-  namespace, topic, key, payload, metadata, timestamp, version, and optional
-  lineage fields.
+  namespace, topic, key, payload, metadata, timestamp, and version. Tracing and
+  lineage values live in `metadata`; see
+  [Correlation and causation](#correlation-and-causation).
 - `Payload` — JSON, plain text, or binary content. Internally it uses
   `bytes::Bytes`, so cloning a payload is cheap and does not copy the byte
   buffer.
@@ -120,9 +120,8 @@ Important model types:
   `/billing/invoices`.
 - `OrganizationId` — tenant scope; `_platform` is reserved for platform-wide
   events.
-- `EventKey` — required non-empty key used for event keys, correlation IDs, and
-  causation IDs. `EventKey` is the stable entity key commonly used by the
-  partition resolver pipeline. Use
+- `EventKey` — required non-empty routing/stream key. `EventKey` is the stable
+  entity key commonly used by the partition resolver pipeline. Use
   `eventuary::partition::EventKeyPartitionKeyResolver` with
   `Fnv1a64PartitionHasher` for deterministic FNV-1a partition routing.
 - `Metadata` — validated string key/value metadata.
@@ -130,6 +129,63 @@ Important model types:
 - `FieldMap<V>` — reusable validated key/value storage backing `Metadata` and
   `Context`. Keys must be non-empty, must not have leading or trailing
   whitespace, and must not contain newlines.
+
+### Correlation and causation
+
+`Event` carries no `correlation_id`, `causation_id`, or `parent_id` field.
+Lineage is application context, so it belongs in `metadata`:
+
+```rust
+use eventuary::{Event, Metadata, Payload};
+
+let parent = Event::create("acme", "/billing", "invoice.created", "invoice-123",
+    Payload::from_string("created"))?;
+
+let event = Event::builder(
+    "acme",
+    "/billing",
+    "invoice.paid",
+    "invoice-123",
+    Payload::from_string("paid"),
+)?
+.metadata(
+    Metadata::new()
+        .with("correlation_id", "billing-run-7")?
+        .with("causation_id", parent.id().to_string())?,
+)
+.build()?;
+```
+
+Why metadata rather than dedicated fields:
+
+- **`EventFilter` already matches metadata subsets**, so a metadata-carried
+  correlation id is filterable through the public API. Dedicated fields were
+  not, in any backend.
+- **Every backend persists metadata already** — JSONB in PostgreSQL, JSON text
+  in SQLite, the `metadata` object in the `SerializedEvent` wire format used by
+  fs, SQS, SNS, and Kafka. No schema change is needed to adopt a convention.
+- **Applications disagree about what lineage is.** A W3C `traceparent`, an HTTP
+  request id, a saga id, and a job id all compete for the same slot, and several
+  applications need more than one at a time. An open map holds all of them; a
+  fixed trio holds none of them well.
+
+Eventuary defines no reserved metadata keys and does not populate lineage for
+you. Pick key names once and apply them consistently across producers.
+
+Both SQL backends can index a metadata key when lineage becomes a query path:
+
+```sql
+-- PostgreSQL (metadata is JSONB)
+CREATE INDEX idx_events_correlation ON events ((metadata->>'correlation_id'));
+CREATE INDEX idx_events_metadata ON events USING GIN (metadata jsonb_path_ops);
+
+-- SQLite (metadata is JSON text; JSON1 ships with the bundled build)
+CREATE INDEX idx_events_correlation
+ON events (json_extract(metadata, '$.correlation_id'));
+```
+
+Those indexes serve your own queries. Eventuary's readers scan by `sequence` and
+apply `EventFilter` after the fetch, so they do not plan against them.
 
 ### Context Values
 
@@ -872,7 +928,9 @@ let handler = RetryHandler::new(
 ```
 
 Dead-letter events are written to `<original_topic>.dead_letter` with failure
-metadata and the original event payload preserved.
+details and the original event payload preserved. The original event's
+`metadata` is copied onto the dead-letter event, so a metadata-carried
+correlation id survives into the dead-letter topic.
 
 ## Handler Multiplexing
 

@@ -13,8 +13,8 @@ use eventuary_core::io::filter::EventFilter;
 use eventuary_core::io::{Reader, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{
-    Event, EventId, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt, Topic,
-    TopicPattern,
+    Event, Metadata, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt,
+    Topic, TopicPattern,
 };
 use eventuary_postgres::database::PgDatabase;
 use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
@@ -130,23 +130,32 @@ async fn default_writer_rows_are_readable_by_default_reader() {
 }
 
 #[tokio::test]
-async fn reader_roundtrips_lineage_fields() {
+async fn reader_roundtrips_metadata_lineage() {
     let (_c, pool) = start_postgres().await;
     let writer = make_writer(pool.clone());
-    let parent_id = EventId::new();
-    let event = Event::builder(
+    let parent = Event::create(
         "acme",
         "/x",
         "thing.happened",
         "k",
+        Payload::from_string("parent"),
+    )
+    .unwrap();
+    let event = Event::builder(
+        "acme",
+        "/x",
+        "thing.derived",
+        "k",
         Payload::from_string("payload"),
     )
     .unwrap()
-    .parent_id(parent_id)
-    .correlation_id("corr")
-    .unwrap()
-    .causation_id("cause")
-    .unwrap()
+    .metadata(
+        Metadata::new()
+            .with("correlation_id", "corr")
+            .unwrap()
+            .with("causation_id", parent.id().to_string())
+            .unwrap(),
+    )
     .build()
     .unwrap();
     writer.write(&event).await.unwrap();
@@ -159,9 +168,11 @@ async fn reader_roundtrips_lineage_fields() {
         .unwrap()
         .unwrap();
     let event = msg.event();
-    assert_eq!(event.parent_id(), Some(parent_id));
-    assert_eq!(event.correlation_id().map(|id| id.as_str()), Some("corr"));
-    assert_eq!(event.causation_id().map(|id| id.as_str()), Some("cause"));
+    assert_eq!(event.metadata().get("correlation_id"), Some("corr"));
+    assert_eq!(
+        event.metadata().get("causation_id"),
+        Some(parent.id().to_string().as_str())
+    );
 }
 
 #[tokio::test]

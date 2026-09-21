@@ -61,9 +61,6 @@ pub struct Event<P = Payload> {
     metadata: Metadata,
     timestamp: DateTime<Utc>,
     version: u64,
-    parent_id: Option<EventId>,
-    correlation_id: Option<EventKey>,
-    causation_id: Option<EventKey>,
 }
 
 pub struct EventBuilder<P = Payload> {
@@ -73,9 +70,6 @@ pub struct EventBuilder<P = Payload> {
     key: EventKey,
     payload: P,
     metadata: Metadata,
-    parent_id: Option<EventId>,
-    correlation_id: Option<EventKey>,
-    causation_id: Option<EventKey>,
 }
 
 impl<P> EventBuilder<P> {
@@ -93,25 +87,7 @@ impl<P> EventBuilder<P> {
             key,
             payload,
             metadata: Metadata::new(),
-            parent_id: None,
-            correlation_id: None,
-            causation_id: None,
         }
-    }
-
-    pub fn parent_id(mut self, parent_id: EventId) -> Self {
-        self.parent_id = Some(parent_id);
-        self
-    }
-
-    pub fn correlation_id(mut self, correlation_id: impl Into<String>) -> Result<Self> {
-        self.correlation_id = Some(EventKey::new(correlation_id)?);
-        Ok(self)
-    }
-
-    pub fn causation_id(mut self, causation_id: impl Into<String>) -> Result<Self> {
-        self.causation_id = Some(EventKey::new(causation_id)?);
-        Ok(self)
     }
 
     pub fn metadata(mut self, metadata: Metadata) -> Self {
@@ -130,9 +106,6 @@ impl<P> EventBuilder<P> {
             self.metadata,
             Utc::now(),
             1,
-            self.parent_id,
-            self.correlation_id,
-            self.causation_id,
         )
     }
 }
@@ -149,9 +122,6 @@ impl<P> Event<P> {
         metadata: Metadata,
         timestamp: DateTime<Utc>,
         version: u64,
-        parent_id: Option<EventId>,
-        correlation_id: Option<EventKey>,
-        causation_id: Option<EventKey>,
     ) -> Result<Self> {
         Ok(Self {
             id,
@@ -163,9 +133,6 @@ impl<P> Event<P> {
             metadata,
             timestamp,
             version,
-            parent_id,
-            correlation_id,
-            causation_id,
         })
     }
 
@@ -231,16 +198,6 @@ impl<P> Event<P> {
         &self.key
     }
 
-    pub fn parent_id(&self) -> Option<EventId> {
-        self.parent_id
-    }
-    pub fn correlation_id(&self) -> Option<&EventKey> {
-        self.correlation_id.as_ref()
-    }
-    pub fn causation_id(&self) -> Option<&EventKey> {
-        self.causation_id.as_ref()
-    }
-
     pub fn map_payload<Q, F>(self, f: F) -> Event<Q>
     where
         F: FnOnce(P) -> Q,
@@ -255,9 +212,6 @@ impl<P> Event<P> {
             metadata: self.metadata,
             timestamp: self.timestamp,
             version: self.version,
-            parent_id: self.parent_id,
-            correlation_id: self.correlation_id,
-            causation_id: self.causation_id,
         }
     }
 
@@ -275,9 +229,6 @@ impl<P> Event<P> {
             metadata: self.metadata,
             timestamp: self.timestamp,
             version: self.version,
-            parent_id: self.parent_id,
-            correlation_id: self.correlation_id,
-            causation_id: self.causation_id,
         })
     }
 
@@ -295,9 +246,6 @@ impl<P> Event<P> {
             self.metadata.clone(),
             self.timestamp,
             self.version,
-            self.parent_id,
-            self.correlation_id.clone(),
-            self.causation_id.clone(),
         )
     }
 }
@@ -323,41 +271,7 @@ mod tests {
         assert_eq!(event.namespace().as_str(), "/task");
         assert_eq!(event.topic().as_str(), "task.created");
         assert_eq!(event.key().as_str(), "task-123");
-        assert_eq!(event.parent_id(), None);
-        assert_eq!(event.correlation_id(), None);
-        assert_eq!(event.causation_id(), None);
         assert_eq!(event.version(), 1);
-    }
-
-    #[test]
-    fn builder_sets_optional_lineage_fields() {
-        let parent_id = EventId::new();
-        let event = Event::builder(
-            "acme",
-            "/x",
-            "thing.happened",
-            "entity-1",
-            Payload::from_string("p"),
-        )
-        .unwrap()
-        .parent_id(parent_id)
-        .correlation_id("workflow-7")
-        .unwrap()
-        .causation_id("command-9")
-        .unwrap()
-        .build()
-        .unwrap();
-
-        assert_eq!(event.key().as_str(), "entity-1");
-        assert_eq!(event.parent_id(), Some(parent_id));
-        assert_eq!(
-            event.correlation_id().map(EventKey::as_str),
-            Some("workflow-7")
-        );
-        assert_eq!(
-            event.causation_id().map(EventKey::as_str),
-            Some("command-9")
-        );
     }
 
     #[test]
@@ -372,29 +286,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn builder_rejects_empty_optional_ids() {
-        let builder = Event::builder(
-            "acme",
-            "/x",
-            "thing.happened",
-            "k",
-            Payload::from_string("p"),
-        )
-        .unwrap();
-        assert!(builder.correlation_id("").is_err());
-
-        let builder = Event::builder(
-            "acme",
-            "/x",
-            "thing.happened",
-            "k",
-            Payload::from_string("p"),
-        )
-        .unwrap();
-        assert!(builder.causation_id("").is_err());
     }
 
     #[test]
@@ -415,24 +306,38 @@ mod tests {
     }
 
     #[test]
-    fn correlation_and_causation_are_first_class_fields() {
-        let event = Event::builder(
+    fn lineage_lives_in_metadata() {
+        let parent = Event::create(
             "acme",
             "/x",
             "thing.happened",
             "k",
-            Payload::from_string("test"),
+            Payload::from_string("p"),
+        )
+        .unwrap();
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.derived",
+            "k",
+            Payload::from_string("p"),
         )
         .unwrap()
-        .correlation_id("corr-1")
-        .unwrap()
-        .causation_id("cause-1")
-        .unwrap()
+        .metadata(
+            Metadata::new()
+                .with("correlation_id", "workflow-7")
+                .unwrap()
+                .with("causation_id", parent.id().to_string())
+                .unwrap(),
+        )
         .build()
         .unwrap();
-        assert_eq!(event.correlation_id().map(EventKey::as_str), Some("corr-1"));
-        assert_eq!(event.causation_id().map(EventKey::as_str), Some("cause-1"));
-        assert!(event.metadata().is_empty());
+
+        assert_eq!(event.metadata().get("correlation_id"), Some("workflow-7"));
+        assert_eq!(
+            event.metadata().get("causation_id"),
+            Some(parent.id().to_string().as_str())
+        );
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

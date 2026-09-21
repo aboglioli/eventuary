@@ -103,11 +103,11 @@ impl PgWriter {
         let insert_sql = format!(
             "INSERT INTO {events} \
              (id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, parent_id, correlation_id, causation_id, \
+             timestamp, version, \
              partition_key, partition_hash, partition_id, partition_count, partition_strategy) \
              VALUES \
              ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, \
-             $11::uuid, $12, $13, $14, $15, $16, $17, $18)",
+             $11, $12, $13, $14, $15)",
             events = config.events_relation.render(),
         );
         Self {
@@ -157,9 +157,6 @@ impl Writer for PgWriter {
             .bind(&row.metadata)
             .bind(&row.timestamp)
             .bind(row.version)
-            .bind(&row.parent_id)
-            .bind(&row.correlation_id)
-            .bind(&row.causation_id)
             .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
             .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
             .bind(pd.partition_id)
@@ -195,9 +192,6 @@ impl Writer for PgWriter {
                 .bind(&row.metadata)
                 .bind(&row.timestamp)
                 .bind(row.version)
-                .bind(&row.parent_id)
-                .bind(&row.correlation_id)
-                .bind(&row.causation_id)
                 .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
                 .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
                 .bind(pd.partition_id)
@@ -232,9 +226,6 @@ struct EventRow {
     metadata: String,
     timestamp: String,
     version: i64,
-    parent_id: Option<String>,
-    correlation_id: Option<String>,
-    causation_id: Option<String>,
 }
 
 impl EventRow {
@@ -256,9 +247,6 @@ impl EventRow {
             metadata,
             timestamp: serialized.timestamp.to_rfc3339(),
             version: serialized.version as i64,
-            parent_id: serialized.parent_id.map(|id| id.to_string()),
-            correlation_id: serialized.correlation_id,
-            causation_id: serialized.causation_id,
         })
     }
 }

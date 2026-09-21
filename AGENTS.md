@@ -191,6 +191,12 @@ Every event has two identities:
 
 `key` is not unique. Use it for partitioning, Kafka record keys, aggregate/entity routing, and deterministic lane assignment. Use `id` for dedupe and event occurrence identity.
 
+Those two are the only identities the envelope carries. Correlation, causation
+and parent pointers are **application context and live in `Metadata`**, not in
+`Event` fields — see the decisions log entry on lineage. When a wrapper derives
+an event from another (`DeadLetterWriter`), it copies the source event's
+metadata forward so a metadata-carried correlation id survives the derivation.
+
 ### Constructor Convention
 
 | Pattern | Purpose | Validates? |
@@ -829,6 +835,30 @@ Use `Arc::clone(&x)` instead of `x.clone()` for ref-counted pointers (the
   `git -c commit.gpgsign=false commit ...` only when the agent is
   executing the commit and interactive signing would block.
 
+### Lineage in Metadata
+
+`Event` has no `correlation_id`, `causation_id` or `parent_id`. Applications
+that need lineage put it in `metadata`:
+
+```rust
+let event = Event::builder(org, ns, topic, key, payload)?
+    .metadata(
+        Metadata::new()
+            .with("correlation_id", correlation)?
+            .with("causation_id", parent.id().to_string())?,
+    )
+    .build()?;
+```
+
+Eventuary reserves no metadata keys and populates no lineage. `EventFilter`
+already matches metadata subsets, so a metadata-carried correlation id is
+filterable through the public API; the removed fields never were. Both SQL
+backends can index the key when it becomes a query path — Postgres with an
+expression index over `metadata->>'...'` or a `jsonb_path_ops` GIN index,
+SQLite with an index over `json_extract(metadata, '$....')`. Those indexes
+serve the application's own SQL: eventuary's readers scan by `sequence` and
+apply `EventFilter` after the fetch, so they never plan against them.
+
 ### Import Style
 
 Import types, use short names everywhere except where module qualification
@@ -1303,6 +1333,23 @@ Worth knowing when changing the codebase:
   entry report. Promote `batch` to `eventuary-core` only when a second backend
   needs it; until then it stays private rather than committing the umbrella to a
   public API with one consumer.
+- **Lineage is metadata, not envelope fields.** `parent_id`,
+  `correlation_id` and `causation_id` were removed from `Event`,
+  `SerializedEvent`, and both SQL event-log schemas. Nothing in the library
+  read `causation_id`; only `DeadLetterWriter` read the other two. They were
+  unqueryable — `EventFilter` has no lineage field, so neither SQL reader could
+  filter on them and neither schema indexed them — while `metadata` is both
+  persisted by every backend and already matched by `EventFilter`. Typing
+  `correlation_id` and `causation_id` as `EventKey` also made them
+  indistinguishable from `Event::key`, so nothing separated "the entity this
+  event is about" from "the message that caused it". A fixed trio cannot hold
+  what applications actually carry (a W3C `traceparent`, a request id, a saga
+  id, often several at once); an open map can. The counter-case — a typed field
+  is a firmer cross-language contract than a reserved map key — was weighed and
+  deferred: there is no port and no envelope spec yet, and promoting a proven
+  metadata key to a typed field later is a cheaper migration than deprecating a
+  field nobody populated consistently. CloudEvents keeps correlation and
+  causation out of its core attributes for the same reason.
 - **`eventuary-sqs` is retired, not yanked.** Published versions keep resolving
   for existing dependents; the crate simply stops receiving new versions.
   Yanking is reserved for broken or insecure releases, not renames.

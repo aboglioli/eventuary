@@ -257,9 +257,6 @@ mod tests {
             Metadata::new(),
             ts,
             1,
-            None,
-            None,
-            None,
         )
         .unwrap()
     }

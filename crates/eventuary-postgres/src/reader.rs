@@ -482,8 +482,7 @@ async fn fetch_batch(
     let mut sql = format!(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
-         timestamp::text AS timestamp_text, version, parent_id::text AS parent_id_text, \
-         correlation_id, causation_id, partition_id, partition_count \
+         timestamp::text AS timestamp_text, version, partition_id, partition_count \
          FROM {events_relation} WHERE sequence > $1",
     );
     let mut bind_index = 2usize;
@@ -581,12 +580,6 @@ async fn fetch_batch(
             let id_text: String = row.get("id_text");
             let id = uuid::Uuid::parse_str(&id_text)
                 .map_err(|e| Error::Serialization(format!("decode id: {e}")))?;
-            let parent_id = row
-                .get::<Option<String>, _>("parent_id_text")
-                .as_deref()
-                .map(uuid::Uuid::parse_str)
-                .transpose()
-                .map_err(|e| Error::Serialization(format!("decode parent_id: {e}")))?;
             let payload_str: String = row.get("payload_text");
             let payload: SerializedPayload = serde_json::from_str(&payload_str)
                 .map_err(|e| Error::Serialization(format!("decode payload: {e}")))?;
@@ -607,9 +600,6 @@ async fn fetch_batch(
                 timestamp,
                 version: row.get::<i64, _>("version") as u64,
                 key: row.get("event_key"),
-                parent_id,
-                correlation_id: row.get("correlation_id"),
-                causation_id: row.get("causation_id"),
             };
             let partition_id: Option<i64> = row.get("partition_id");
             let partition_count: Option<i64> = row.get("partition_count");
