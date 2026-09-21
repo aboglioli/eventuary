@@ -56,7 +56,7 @@ crates/
 ├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
 │   └── src/
 │       ├── event.rs        # Event<P = Payload> aggregate, EventId
-│       ├── event_key.rs    # EventKey + Partition + fnv1a_u64 (crate-internal)
+│       ├── event_key.rs    # EventKey (routing/stream key)
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
@@ -67,6 +67,9 @@ crates/
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
 │       ├── serialization.rs # SerializedEvent wire format
+│       ├── payload_codec.rs # PayloadCodec + EventCodec + Json/Passthrough codecs
+│       ├── partition.rs    # Partition, PartitionGroup, PartitionHasher, PartitionSelection, HasPartition
+│       ├── partition/      # per-resolver modules (event_key, organization, topic, namespace, metadata, composite)
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
 │           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt + submod owner
@@ -78,12 +81,15 @@ crates/
 │           │   ├── retry.rs     # RetryWriter + RetryWriterConfig
 │           │   ├── timeout.rs   # TimeoutWriter
 │           │   ├── inspect.rs   # InspectWriter + InspectWriterHooks
+│           │   ├── encode.rs    # EncodeWriter + WriterTypedExt
 │           │   └── batch.rs     # BatchWriter + BatchWriterConfig
 │           ├── reader.rs   # Reader trait + Dyn/Box/Arc + ReaderExt + BoxStream + submod owner
 │           ├── reader/
 │           │   ├── filtered.rs        # FilteredReader + FilteredStream
-│           │   ├── map.rs             # MapReader (Event -> Event)
-│           │   ├── try_map.rs         # TryMapReader (Event -> Result<Event>)
+│           │   ├── map.rs             # MapReader + TryMapReader
+│           │   ├── decode.rs          # DecodeReader + ReaderTypedExt + DecodeErrorDisposition
+│           │   ├── encoded_cursor.rs  # EncodedCursorReader + EncodedCursorSubscription
+│           │   ├── claim_buffer.rs    # ClaimedBufferStore + ClaimedBufferEntry
 │           │   ├── inspect.rs         # InspectReader + InspectHooks trait + InspectAcker
 │           │   ├── timeout.rs         # TimeoutReader (shared DelayQueue) + TimeoutAcker
 │           │   ├── rate_limit.rs      # RateLimitReader + RateLimit (MessagesPerSec)
@@ -98,6 +104,7 @@ crates/
 │           │   ├── replay_then_live.rs # ReplayThenLiveReader + ReplayThenLiveConfig (overlap dedupe) + ReplayLiveAcker + ReplayLiveCursor
 │           │   ├── buffer.rs           # BufferedReader + BufferStore trait + BufferAcker + BufferEntry
 │           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
+│           │   ├── coordinated.rs     # CoordinatedReader + PartitionCoordinator + PartitionLease + Generation
 │           │   └── checkpoint.rs      # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope + MissingCheckpointPolicy / InvalidCursorPolicy
 │           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
@@ -112,6 +119,8 @@ crates/
 │           │   ├── timeout.rs    # TimeoutHandler
 │           │   ├── inspect.rs    # InspectHandler + InspectHandlerHooks
 │           │   ├── rate_limit.rs # RateLimitHandler + HandlerRateLimit
+│           │   ├── multiplexer.rs # Multiplexer + SubscriberId + MultiplexerStore
+│           │   ├── subscriber_work.rs # SubscriberWorkRouter
 │           │   └── retry.rs      # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
 │           ├── consumer.rs # BackgroundConsumer + ConsumerHandle re-exports (submod owner)
 │           ├── consumer/
@@ -126,6 +135,7 @@ crates/
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
+│           ├── owner_id.rs        # OwnerId (coordinated-reader instance identity)
 │           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
@@ -397,8 +407,8 @@ audit, and side-channel flows are not hardcoded into handlers.
   (FNV-1a u64 by default via `Fnv1a64PartitionHasher`). Built-in
   resolvers (`EventKeyPartitionKeyResolver`, `Organization`, `Topic`,
   `Namespace`, `Metadata`, `Composite<P>`) impl `PartitionKeyResolver<P>`
-  for any `P`. `Partition` and `fnv1a_u64` live in `event_key.rs`; the
-  full resolver/hasher API lives in the `partition` module. The Kafka
+  for any `P`. `Partition` and `fnv1a_u64` live in `partition.rs`, which
+  also owns the full resolver/hasher API. The Kafka
   writer reuses the same FNV-1a hash for record-key partition selection,
   and `PartitionedReader` routes lanes via the resolver/hasher pipeline
   carried by `PartitionedReaderConfig<P>` (defaults:
