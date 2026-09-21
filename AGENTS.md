@@ -56,7 +56,7 @@ crates/
 ├── eventuary-core/         # core: model, traits, serialization, retry/DLQ, consumer driver
 │   └── src/
 │       ├── event.rs        # Event<P = Payload> aggregate, EventId
-│       ├── event_key.rs    # EventKey + Partition + fnv1a_u64 (crate-internal)
+│       ├── event_key.rs    # EventKey (routing/stream key)
 │       ├── topic.rs        # Topic (dot-separated, lowercase/digits/_/-)
 │       ├── namespace.rs    # Namespace (slash-rooted hierarchy)
 │       ├── organization.rs # OrganizationId (tenant; "_platform" sentinel)
@@ -67,6 +67,9 @@ crates/
 │       ├── collector.rs    # EventCollector (aggregate -> drain -> persist)
 │       ├── snapshot.rs     # Snapshot + SnapshotEventId
 │       ├── serialization.rs # SerializedEvent wire format
+│       ├── payload_codec.rs # PayloadCodec + EventCodec + Json/Passthrough codecs
+│       ├── partition.rs    # Partition, PartitionGroup, PartitionHasher, PartitionSelection, HasPartition
+│       ├── partition/      # per-resolver modules (event_key, organization, topic, namespace, metadata, composite)
 │       ├── error.rs        # Error enum, Result alias
 │       └── io/
 │           ├── writer.rs   # Writer trait + Dyn/Box/Arc + WriterExt + submod owner
@@ -78,12 +81,15 @@ crates/
 │           │   ├── retry.rs     # RetryWriter + RetryWriterConfig
 │           │   ├── timeout.rs   # TimeoutWriter
 │           │   ├── inspect.rs   # InspectWriter + InspectWriterHooks
+│           │   ├── encode.rs    # EncodeWriter + WriterTypedExt
 │           │   └── batch.rs     # BatchWriter + BatchWriterConfig
 │           ├── reader.rs   # Reader trait + Dyn/Box/Arc + ReaderExt + BoxStream + submod owner
 │           ├── reader/
 │           │   ├── filtered.rs        # FilteredReader + FilteredStream
-│           │   ├── map.rs             # MapReader (Event -> Event)
-│           │   ├── try_map.rs         # TryMapReader (Event -> Result<Event>)
+│           │   ├── map.rs             # MapReader + TryMapReader
+│           │   ├── decode.rs          # DecodeReader + ReaderTypedExt + DecodeErrorDisposition
+│           │   ├── encoded_cursor.rs  # EncodedCursorReader + EncodedCursorSubscription
+│           │   ├── claim_buffer.rs    # ClaimedBufferStore + ClaimedBufferEntry
 │           │   ├── inspect.rs         # InspectReader + InspectHooks trait + InspectAcker
 │           │   ├── timeout.rs         # TimeoutReader (shared DelayQueue) + TimeoutAcker
 │           │   ├── rate_limit.rs      # RateLimitReader + RateLimit (MessagesPerSec)
@@ -98,6 +104,7 @@ crates/
 │           │   ├── replay_then_live.rs # ReplayThenLiveReader + ReplayThenLiveConfig (overlap dedupe) + ReplayLiveAcker + ReplayLiveCursor
 │           │   ├── buffer.rs           # BufferedReader + BufferStore trait + BufferAcker + BufferEntry
 │           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
+│           │   ├── coordinated.rs     # CoordinatedReader + PartitionCoordinator + PartitionLease + Generation
 │           │   └── checkpoint.rs      # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope + MissingCheckpointPolicy / InvalidCursorPolicy
 │           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
@@ -112,6 +119,8 @@ crates/
 │           │   ├── timeout.rs    # TimeoutHandler
 │           │   ├── inspect.rs    # InspectHandler + InspectHandlerHooks
 │           │   ├── rate_limit.rs # RateLimitHandler + HandlerRateLimit
+│           │   ├── multiplexer.rs # Multiplexer + SubscriberId + MultiplexerStore
+│           │   ├── subscriber_work.rs # SubscriberWorkRouter
 │           │   └── retry.rs      # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
 │           ├── consumer.rs # BackgroundConsumer + ConsumerHandle re-exports (submod owner)
 │           ├── consumer/
@@ -126,6 +135,7 @@ crates/
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
+│           ├── owner_id.rs        # OwnerId (coordinated-reader instance identity)
 │           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
@@ -190,6 +200,12 @@ Every event has two identities:
 - `key`: required routing/stream identity, shared by related events such as all events for `order-123`.
 
 `key` is not unique. Use it for partitioning, Kafka record keys, aggregate/entity routing, and deterministic lane assignment. Use `id` for dedupe and event occurrence identity.
+
+Those two are the only identities the envelope carries. Correlation, causation
+and parent pointers are **application context and live in `Metadata`**, not in
+`Event` fields — see the decisions log entry on lineage. When a wrapper derives
+an event from another (`DeadLetterWriter`), it copies the source event's
+metadata forward so a metadata-carried correlation id survives the derivation.
 
 ### Constructor Convention
 
@@ -391,8 +407,8 @@ audit, and side-channel flows are not hardcoded into handlers.
   (FNV-1a u64 by default via `Fnv1a64PartitionHasher`). Built-in
   resolvers (`EventKeyPartitionKeyResolver`, `Organization`, `Topic`,
   `Namespace`, `Metadata`, `Composite<P>`) impl `PartitionKeyResolver<P>`
-  for any `P`. `Partition` and `fnv1a_u64` live in `event_key.rs`; the
-  full resolver/hasher API lives in the `partition` module. The Kafka
+  for any `P`. `Partition` and `fnv1a_u64` live in `partition.rs`, which
+  also owns the full resolver/hasher API. The Kafka
   writer reuses the same FNV-1a hash for record-key partition selection,
   and `PartitionedReader` routes lanes via the resolver/hasher pipeline
   carried by `PartitionedReaderConfig<P>` (defaults:
@@ -828,6 +844,30 @@ Use `Arc::clone(&x)` instead of `x.clone()` for ref-counted pointers (the
   signed commits often fail because GPG prompts. Use a one-off
   `git -c commit.gpgsign=false commit ...` only when the agent is
   executing the commit and interactive signing would block.
+
+### Lineage in Metadata
+
+`Event` has no `correlation_id`, `causation_id` or `parent_id`. Applications
+that need lineage put it in `metadata`:
+
+```rust
+let event = Event::builder(org, ns, topic, key, payload)?
+    .metadata(
+        Metadata::new()
+            .with("correlation_id", correlation)?
+            .with("causation_id", parent.id().to_string())?,
+    )
+    .build()?;
+```
+
+Eventuary reserves no metadata keys and populates no lineage. `EventFilter`
+already matches metadata subsets, so a metadata-carried correlation id is
+filterable through the public API; the removed fields never were. Both SQL
+backends can index the key when it becomes a query path — Postgres with an
+expression index over `metadata->>'...'` or a `jsonb_path_ops` GIN index,
+SQLite with an index over `json_extract(metadata, '$....')`. Those indexes
+serve the application's own SQL: eventuary's readers scan by `sequence` and
+apply `EventFilter` after the fetch, so they never plan against them.
 
 ### Import Style
 
@@ -1303,6 +1343,23 @@ Worth knowing when changing the codebase:
   entry report. Promote `batch` to `eventuary-core` only when a second backend
   needs it; until then it stays private rather than committing the umbrella to a
   public API with one consumer.
+- **Lineage is metadata, not envelope fields.** `parent_id`,
+  `correlation_id` and `causation_id` were removed from `Event`,
+  `SerializedEvent`, and both SQL event-log schemas. Nothing in the library
+  read `causation_id`; only `DeadLetterWriter` read the other two. They were
+  unqueryable — `EventFilter` has no lineage field, so neither SQL reader could
+  filter on them and neither schema indexed them — while `metadata` is both
+  persisted by every backend and already matched by `EventFilter`. Typing
+  `correlation_id` and `causation_id` as `EventKey` also made them
+  indistinguishable from `Event::key`, so nothing separated "the entity this
+  event is about" from "the message that caused it". A fixed trio cannot hold
+  what applications actually carry (a W3C `traceparent`, a request id, a saga
+  id, often several at once); an open map can. The counter-case — a typed field
+  is a firmer cross-language contract than a reserved map key — was weighed and
+  deferred: there is no port and no envelope spec yet, and promoting a proven
+  metadata key to a typed field later is a cheaper migration than deprecating a
+  field nobody populated consistently. CloudEvents keeps correlation and
+  causation out of its core attributes for the same reason.
 - **`eventuary-sqs` is retired, not yanked.** Published versions keep resolving
   for existing dependents; the crate simply stops receiving new versions.
   Yanking is reserved for broken or insecure releases, not renames.

@@ -767,7 +767,6 @@ mod tests {
                 event.key().as_str(),
                 Payload::from_string(format!("failed:{}", event.id())),
             )?
-            .parent_id(event.id())
             .build()
         });
         let acker = CountingAcker::default();

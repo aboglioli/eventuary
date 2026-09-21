@@ -20,6 +20,28 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Breaking changes
 
+- `Event` drops `parent_id`, `correlation_id` and `causation_id`, along with
+  their builder setters and getters, their three `SerializedEvent` wire fields,
+  and their columns in the PostgreSQL and SQLite event-log schemas. Nothing in
+  the library read `causation_id`, and only `DeadLetterWriter` read the other
+  two, so the trio was a wire and schema cost that bought no behaviour. They
+  were also unqueryable: `EventFilter` carries no lineage field, so neither SQL
+  reader could filter on them, and neither schema indexed them. `causation_id`
+  and `correlation_id` were typed as `EventKey` — the same value object as
+  `Event::key` — so nothing distinguished "the entity this event is about" from
+  "the message that caused it". Carry lineage in `metadata` instead, which every
+  backend already persists and which `EventFilter` already matches on; see
+  *Correlation and causation* in the README for the indexing recipes.
+  On an existing database the three columns are left in place: the event-log
+  migration is an idempotent `CREATE TABLE IF NOT EXISTS`, so upgrading neither
+  drops nor rewrites them, and new inserts simply stop naming them. Copy any
+  values you still need into `metadata` before dropping the columns yourself.
+- `Event::new` takes 9 arguments instead of 12. Callers reconstructing an event
+  from persisted state drop the three trailing `Option` arguments.
+- `DeadLetterWriter` copies the original event's `metadata` onto the dead-letter
+  event. It previously propagated only `correlation_id` and set `parent_id`;
+  copying metadata is how a metadata-carried correlation id now survives into
+  the dead-letter topic.
 - `SqsReaderConfig` drops `start_from` and `consumer_group_id`. Neither could
   hold a value SQS could honour, so both existed only to be rejected by
   `validate` at runtime; removing them turns that into a compile error. SQS

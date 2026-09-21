@@ -16,8 +16,8 @@ use crate::topic::Topic;
 /// Wire-format representation of an [`Event`]. Field order matches
 /// `Event` so the JSON shape is predictable and self-documenting.
 ///
-/// `id` and `parent_id` carry `Uuid` directly so backends with native
-/// UUID columns can bind/fetch without a String round-trip.
+/// `id` carries a `Uuid` directly so backends with native UUID columns
+/// can bind/fetch without a String round-trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedEvent {
     pub id: Uuid,
@@ -29,12 +29,6 @@ pub struct SerializedEvent {
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub version: u64,
-    #[serde(default)]
-    pub parent_id: Option<Uuid>,
-    #[serde(default)]
-    pub correlation_id: Option<String>,
-    #[serde(default)]
-    pub causation_id: Option<String>,
 }
 
 /// Wire-format representation of a [`Payload`].
@@ -129,26 +123,12 @@ impl SerializedEvent {
                 .collect(),
             timestamp: event.timestamp(),
             version: event.version(),
-            parent_id: event.parent_id().map(|id| *id.as_uuid()),
-            correlation_id: event.correlation_id().map(|id| id.to_string()),
-            causation_id: event.causation_id().map(|id| id.to_string()),
         })
     }
 
     pub fn to_event(&self) -> Result<Event<Payload>> {
         let key = EventKey::new(&self.key)?;
         let payload = self.payload.clone().into_payload()?;
-        let parent_id = self.parent_id.map(EventId::from_uuid);
-        let correlation_id = self
-            .correlation_id
-            .as_deref()
-            .map(EventKey::new)
-            .transpose()?;
-        let causation_id = self
-            .causation_id
-            .as_deref()
-            .map(EventKey::new)
-            .transpose()?;
 
         Event::new(
             EventId::from_uuid(self.id),
@@ -160,9 +140,6 @@ impl SerializedEvent {
             Metadata::try_from(self.metadata.clone())?,
             self.timestamp,
             self.version,
-            parent_id,
-            correlation_id,
-            causation_id,
         )
     }
 
@@ -385,8 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn lineage_fields_roundtrip() {
-        let parent_id = EventId::new();
+    fn metadata_roundtrips_as_lineage_carrier() {
         let event = Event::builder(
             "acme",
             "/x",
@@ -395,28 +371,21 @@ mod tests {
             Payload::from_string("p"),
         )
         .unwrap()
-        .parent_id(parent_id)
-        .correlation_id("corr")
-        .unwrap()
-        .causation_id("cause")
-        .unwrap()
+        .metadata(Metadata::new().with("correlation_id", "corr").unwrap())
         .build()
         .unwrap();
 
         let serialized = SerializedEvent::from_event(&event).unwrap();
-        assert_eq!(serialized.key.as_str(), "k");
-        assert_eq!(serialized.parent_id, Some(*parent_id.as_uuid()));
-        assert_eq!(serialized.correlation_id.as_deref(), Some("corr"));
-        assert_eq!(serialized.causation_id.as_deref(), Some("cause"));
-
-        let restored = serialized.to_event().unwrap();
-        assert_eq!(restored.key().as_str(), "k");
-        assert_eq!(restored.parent_id(), Some(parent_id));
         assert_eq!(
-            restored.correlation_id().map(EventKey::as_str),
+            serialized
+                .metadata
+                .get("correlation_id")
+                .map(String::as_str),
             Some("corr")
         );
-        assert_eq!(restored.causation_id().map(EventKey::as_str), Some("cause"));
+
+        let restored = serialized.to_event().unwrap();
+        assert_eq!(restored.metadata().get("correlation_id"), Some("corr"));
     }
 
     #[test]

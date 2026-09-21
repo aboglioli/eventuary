@@ -156,17 +156,15 @@ where
         });
 
         let dead_letter_topic = Topic::new(format!("{}.dead_letter", encoded.topic().as_str()))?;
-        let mut builder = Event::builder(
+        let dead_letter_event = Event::builder(
             encoded.organization().as_str(),
             encoded.namespace().as_str(),
             dead_letter_topic.as_str(),
             encoded.key().as_str(),
             Payload::from_json(&dead_letter_payload)?,
-        )?;
-        if let Some(correlation_id) = encoded.correlation_id() {
-            builder = builder.correlation_id(correlation_id.as_str())?;
-        }
-        let dead_letter_event = builder.parent_id(encoded.id()).build()?;
+        )?
+        .metadata(encoded.metadata().clone())
+        .build()?;
         self.writer.write(&dead_letter_event).await
     }
 }
