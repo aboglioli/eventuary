@@ -255,6 +255,7 @@ fn retention_by_size_drops_oldest_segments_and_keeps_the_active_one() {
             max_bytes: Some(800),
             max_age: None,
         },
+        lock_wait: std::time::Duration::ZERO,
     };
     let mut log = PartitionLog::open_writable(dir.path(), 0, config).unwrap();
     for i in 0..80 {

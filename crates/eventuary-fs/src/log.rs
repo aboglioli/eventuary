@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use eventuary_core::{Result, SerializedEvent};
 use fs4::fs_std::FileExt;
@@ -48,6 +48,12 @@ pub struct LogConfig {
     pub segment: SegmentConfig,
     pub sync: SyncPolicy,
     pub retention: RetentionPolicy,
+    /// How long to keep retrying a partition lock another writer holds.
+    ///
+    /// Zero, the default, tries once and fails — right for a broker, where a held lock means
+    /// another process legitimately owns the partition. Short-lived writers that expect to
+    /// take turns should set a small wait instead of treating contention as an error.
+    pub lock_wait: Duration,
 }
 
 pub struct PartitionLog {
@@ -84,18 +90,16 @@ impl PartitionLog {
                 .write(true)
                 .open(&path)
                 .map_err(|e| io_at("open partition lock", &path, e))?;
-            file.try_lock_exclusive()
-                .map_err(|e| store(format!("lock partition {partition_id}"), e))
-                .and_then(|acquired| {
-                    if acquired {
-                        Ok(())
-                    } else {
-                        Err(store(
-                            format!("lock partition {partition_id}"),
-                            "already held by another writer",
-                        ))
-                    }
-                })?;
+            acquire(&file, partition_id, config.lock_wait).and_then(|acquired| {
+                if acquired {
+                    Ok(())
+                } else {
+                    Err(store(
+                        format!("lock partition {partition_id}"),
+                        "already held by another writer",
+                    ))
+                }
+            })?;
             Some(file)
         } else {
             None
@@ -309,6 +313,27 @@ impl Drop for PartitionLog {
     fn drop(&mut self) {
         if let Some(lock) = self.lock.take() {
             let _ = FileExt::unlock(&lock);
+        }
+    }
+}
+
+/// Try once when `wait` is zero, otherwise poll until the deadline. `flock` has no timed
+/// variant, so a bounded retry is the portable way to wait for a writer that is about to let
+/// go — a single append holds the lock for microseconds.
+fn acquire(file: &File, partition_id: u32, wait: Duration) -> Result<bool> {
+    const POLL: Duration = Duration::from_millis(5);
+
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(true) => return Ok(true),
+            Ok(false) => {
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                std::thread::sleep(POLL.min(wait.max(POLL)));
+            }
+            Err(e) => return Err(store(format!("lock partition {partition_id}"), e)),
         }
     }
 }

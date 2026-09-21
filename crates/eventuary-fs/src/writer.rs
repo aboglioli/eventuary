@@ -93,8 +93,17 @@ pub struct FsWriterConfig {
 
 pub struct FsWriter {
     root: PathBuf,
+    config: LogConfig,
     partitioning: FsPartitioningConfig,
-    partitions: BTreeMap<u32, Arc<Mutex<PartitionLog>>>,
+    owned: Vec<u32>,
+    /// Opened on first write to each partition, never at construction.
+    ///
+    /// Opening a partition takes an exclusive `flock` and recovers its segment tail. Doing
+    /// that eagerly for every partition means a writer owns the whole log the moment it
+    /// exists, so two processes cannot coexist however the data is partitioned — which
+    /// defeats the point of partitioning. Opening on demand lets writers that touch disjoint
+    /// keys run concurrently without ever meeting.
+    opened: Mutex<BTreeMap<u32, Arc<Mutex<PartitionLog>>>>,
 }
 
 impl FsWriter {
@@ -125,15 +134,12 @@ impl FsWriter {
     }
 
     fn open_partitions(root: PathBuf, config: FsWriterConfig, owned: Vec<u32>) -> Result<Self> {
-        let mut partitions = BTreeMap::new();
-        for id in owned {
-            let log = PartitionLog::open_writable(&root, id, config.log)?;
-            partitions.insert(id, Arc::new(Mutex::new(log)));
-        }
         Ok(Self {
             root,
+            config: config.log,
             partitioning: config.partitioning,
-            partitions,
+            owned,
+            opened: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -146,19 +152,20 @@ impl FsWriter {
     }
 
     pub fn owned_partitions(&self) -> Vec<u32> {
-        self.partitions.keys().copied().collect()
+        self.owned.clone()
     }
 
     pub async fn next_offset(&self, partition_id: u32) -> Result<u64> {
-        let log = Arc::clone(self.partition(partition_id)?);
+        let log = self.partition(partition_id).await?;
         tokio::task::spawn_blocking(move || Ok(log.blocking_lock().next_offset()))
             .await
             .map_err(join)?
     }
 
+    /// Only partitions this writer has actually opened: an untouched one has nothing to
+    /// flush, and opening it here would take a lock for no reason.
     pub async fn sync(&self) -> Result<()> {
-        for log in self.partitions.values() {
-            let log = Arc::clone(log);
+        for log in self.opened_logs().await {
             tokio::task::spawn_blocking(move || log.blocking_lock().sync())
                 .await
                 .map_err(join)??;
@@ -168,8 +175,7 @@ impl FsWriter {
 
     pub async fn enforce_retention(&self) -> Result<usize> {
         let mut removed = 0;
-        for log in self.partitions.values() {
-            let log = Arc::clone(log);
+        for log in self.opened_logs().await {
             removed += tokio::task::spawn_blocking(move || log.blocking_lock().enforce_retention())
                 .await
                 .map_err(join)??;
@@ -177,24 +183,45 @@ impl FsWriter {
         Ok(removed)
     }
 
-    fn partition(&self, partition_id: u32) -> Result<&Arc<Mutex<PartitionLog>>> {
-        self.partitions.get(&partition_id).ok_or_else(|| {
-            Error::Config(format!(
-                "partition {partition_id} is not owned by this writer"
-            ))
-        })
+    async fn opened_logs(&self) -> Vec<Arc<Mutex<PartitionLog>>> {
+        self.opened.lock().await.values().map(Arc::clone).collect()
     }
 
-    fn route(&self, event: &Event) -> Result<(u32, Arc<Mutex<PartitionLog>>)> {
+    async fn partition(&self, partition_id: u32) -> Result<Arc<Mutex<PartitionLog>>> {
+        if !self.owned.contains(&partition_id) {
+            return Err(Error::Config(format!(
+                "partition {partition_id} is not owned by this writer"
+            )));
+        }
+
+        let mut opened = self.opened.lock().await;
+        if let Some(log) = opened.get(&partition_id) {
+            return Ok(Arc::clone(log));
+        }
+
+        let root = self.root.clone();
+        let config = self.config;
+        let log = tokio::task::spawn_blocking(move || {
+            PartitionLog::open_writable(&root, partition_id, config)
+        })
+        .await
+        .map_err(join)??;
+
+        let log = Arc::new(Mutex::new(log));
+        opened.insert(partition_id, Arc::clone(&log));
+        Ok(log)
+    }
+
+    async fn route(&self, event: &Event) -> Result<(u32, Arc<Mutex<PartitionLog>>)> {
         let partition = self.partitioning.partition_for(event)?;
-        let log = self.partition(partition.id())?;
-        Ok((partition.id(), Arc::clone(log)))
+        let log = self.partition(partition.id()).await?;
+        Ok((partition.id(), log))
     }
 }
 
 impl Writer for FsWriter {
     async fn write(&self, event: &Event) -> Result<()> {
-        let (_, log) = self.route(event)?;
+        let (_, log) = self.route(event).await?;
         let serialized = SerializedEvent::from_event(event)?;
         tokio::task::spawn_blocking(move || {
             let mut guard = log.blocking_lock();
@@ -211,7 +238,7 @@ impl Writer for FsWriter {
         let mut batches: BTreeMap<u32, (Arc<Mutex<PartitionLog>>, Vec<SerializedEvent>)> =
             BTreeMap::new();
         for event in events {
-            let (id, log) = self.route(event)?;
+            let (id, log) = self.route(event).await?;
             batches
                 .entry(id)
                 .or_insert_with(|| (log, Vec::new()))

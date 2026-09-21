@@ -8,7 +8,7 @@ use eventuary_core::io::filter::{EventFilter, TopicPattern};
 use eventuary_core::io::{Reader, Writer};
 use eventuary_core::partition::{
     EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher, Partition, PartitionGroup,
-    PartitionSelection,
+    PartitionHasher, PartitionKeyResolver, PartitionSelection,
 };
 use eventuary_core::{Error, Event, OrganizationId, Payload, StartFrom, StopAt, Topic};
 use eventuary_fs::log::{LogConfig, RetentionPolicy, SegmentConfig};
@@ -551,13 +551,123 @@ async fn writing_to_an_unowned_partition_is_rejected() {
 }
 
 #[tokio::test]
-async fn a_second_writer_for_the_same_partitions_is_rejected() {
+async fn a_second_writer_is_rejected_when_it_reaches_a_held_partition() {
     let dir = tempfile::tempdir().unwrap();
-    let _held = FsWriter::open(dir.path(), FsWriterConfig::default()).unwrap();
+    let held = FsWriter::open(dir.path(), FsWriterConfig::default()).unwrap();
+    held.write(&ev("t", "k")).await.unwrap();
 
-    let second = FsWriter::open(dir.path(), FsWriterConfig::default());
+    // constructing a writer no longer claims anything: partitions are taken on first write
+    let second = FsWriter::open(dir.path(), FsWriterConfig::default())
+        .expect("opening a writer takes no locks");
 
-    assert!(second.is_err(), "a partition has at most one writer");
+    let refused = second.write(&ev("t", "k")).await;
+    assert!(
+        refused.is_err(),
+        "a partition still has at most one writer, enforced where it matters"
+    );
+}
+
+#[tokio::test]
+async fn writers_touching_different_partitions_do_not_meet() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = || FsWriterConfig {
+        partitioning: FsPartitioningConfig::by_event_key(NonZeroU32::new(8).unwrap()),
+        ..FsWriterConfig::default()
+    };
+
+    let first = FsWriter::open(dir.path(), config()).unwrap();
+    let second = FsWriter::open(dir.path(), config()).unwrap();
+
+    // two keys that hash to different partitions
+    let resolver = FsPartitioningConfig::by_event_key(NonZeroU32::new(8).unwrap());
+    let mut pair = None;
+    for a in 0..40 {
+        for b in (a + 1)..40 {
+            let (ka, kb) = (format!("k{a}"), format!("k{b}"));
+            if partition_of(&resolver, &ka) != partition_of(&resolver, &kb) {
+                pair = Some((ka, kb));
+                break;
+            }
+        }
+        if pair.is_some() {
+            break;
+        }
+    }
+    let (ka, kb) = pair.expect("eight partitions must separate some pair of keys");
+
+    first.write(&ev("t", &ka)).await.unwrap();
+    second
+        .write(&ev("t", &kb))
+        .await
+        .expect("disjoint partitions are the whole point of partitioning");
+}
+
+fn partition_of(config: &FsPartitioningConfig, key: &str) -> u32 {
+    let count = config.partition_count();
+    Fnv1a64PartitionHasher
+        .partition_for(
+            &EventKeyPartitionKeyResolver::new()
+                .partition_key(&ev("t", key))
+                .unwrap(),
+            count,
+        )
+        .id()
+}
+
+#[tokio::test]
+async fn a_lock_wait_lets_a_contending_writer_take_its_turn() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let patient = || FsWriterConfig {
+        log: LogConfig {
+            lock_wait: Duration::from_secs(2),
+            ..LogConfig::default()
+        },
+        ..FsWriterConfig::default()
+    };
+
+    let first = FsWriter::open(dir.path(), patient()).unwrap();
+    first.write(&ev("t", "k")).await.unwrap();
+
+    let second = FsWriter::open(dir.path(), patient()).unwrap();
+
+    // the holder lets go while the contender is waiting
+    let releasing = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        drop(first);
+    });
+
+    second
+        .write(&ev("t", "k"))
+        .await
+        .expect("a bounded wait should outlast a writer that is about to finish");
+    releasing.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_lock_wait_still_gives_up_rather_than_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = FsWriter::open(dir.path(), FsWriterConfig::default()).unwrap();
+    held.write(&ev("t", "k")).await.unwrap();
+
+    let impatient = FsWriter::open(
+        dir.path(),
+        FsWriterConfig {
+            log: LogConfig {
+                lock_wait: Duration::from_millis(100),
+                ..LogConfig::default()
+            },
+            ..FsWriterConfig::default()
+        },
+    )
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    assert!(impatient.write(&ev("t", "k")).await.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the wait must be bounded, not indefinite"
+    );
 }
 
 #[tokio::test]
