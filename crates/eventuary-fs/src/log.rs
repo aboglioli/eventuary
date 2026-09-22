@@ -1,15 +1,16 @@
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use eventuary_core::{Result, SerializedEvent};
 
-use crate::error::{contended, corrupt, io_at, store};
+use crate::error::{corrupt, io_at};
 use crate::index::{OffsetIndex, TimeIndex};
 use crate::layout::{
     LOG_SUFFIX, OFFSET_INDEX_SUFFIX, TIME_INDEX_SUFFIX, lock_path, parse_segment_base,
     partition_dir, segment_path,
 };
+use crate::lock::FileLock;
 use crate::segment::Segment;
 
 pub use crate::record::Record;
@@ -42,7 +43,7 @@ impl RetentionPolicy {
     }
 }
 
-pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
+pub use crate::lock::DEFAULT_LOCK_WAIT;
 
 /// How long a writer holds a partition's lock.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -85,58 +86,12 @@ impl LogConfig {
     }
 }
 
-#[must_use = "dropping the lock releases the partition to other writers"]
-struct PartitionLock {
-    file: File,
-}
-
-impl PartitionLock {
-    /// `flock` has no timed variant, so the wait is a bounded poll. The deadline is what
-    /// keeps contention from becoming a deadlock.
-    fn acquire(dir: &Path, partition_id: u32, wait: Duration) -> Result<Self> {
-        const POLL: Duration = Duration::from_millis(5);
-
-        let path = lock_path(dir);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|e| io_at("open partition lock", &path, e))?;
-
-        let deadline = Instant::now() + wait;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { file }),
-                Err(TryLockError::WouldBlock) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return Err(contended(format!(
-                            "partition {partition_id} is held by another writer"
-                        )));
-                    }
-                    std::thread::sleep(POLL.min(left));
-                }
-                Err(TryLockError::Error(e)) => {
-                    return Err(store(format!("lock partition {partition_id}"), e));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for PartitionLock {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
 pub struct PartitionLog {
     dir: PathBuf,
     segments: Vec<Segment>,
     config: LogConfig,
     bytes_since_sync: u64,
-    _lock: Option<PartitionLock>,
+    _lock: Option<FileLock>,
 }
 
 impl PartitionLog {
@@ -158,9 +113,9 @@ impl PartitionLog {
         fs::create_dir_all(&dir).map_err(|e| io_at("create partition dir", &dir, e))?;
 
         let lock = if writable {
-            Some(PartitionLock::acquire(
-                &dir,
-                partition_id,
+            Some(FileLock::acquire(
+                &lock_path(&dir),
+                &format!("partition {partition_id}"),
                 config.lock_wait(),
             )?)
         } else {

@@ -35,6 +35,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `PartitionLog::append_all` no longer flushes when `SyncPolicy::Never` is
   configured. It flushed unconditionally at the end of a batch, which is the one
   thing that policy asks it not to do.
+- `FsPartitionCoordinator` waits for a held partition record with a deadline instead
+  of blocking indefinitely, and reports `Error::Contended` when it expires. Both
+  places `eventuary-fs` locks now share one `FileLock`, so neither can acquire
+  without a bound. `FsPartitionCoordinatorConfig` gains `lock_wait`. Callers are
+  unaffected: `CoordinatedReader` already treats a failed claim or renew that is not
+  `OwnershipLost` as transient and retries on the next tick.
 - An `FsWriter` waiting for one partition's lock no longer stalls writes to every
   other partition in the same process. The acquisition ran while holding the map of
   open partitions, so a wait of up to `lock_wait` blocked unrelated partitions.

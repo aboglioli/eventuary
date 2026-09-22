@@ -1379,8 +1379,10 @@ Worth knowing when changing the codebase:
   has no dependency beyond `eventuary-core` and the workspace declares
   `rust-version = "1.89"` to make the requirement explicit rather than accidental.
 - **Every lock acquisition has a deadline, which is what rules out deadlock.**
-  `PartitionLock::acquire` polls `try_lock_exclusive` until `lock_wait` elapses and
-  then reports `Error::Contended`; nothing ever blocks on a lock indefinitely.
+  `FileLock::acquire` polls `try_lock` until its deadline and then reports
+  `Error::Contended`; nothing ever blocks on a lock indefinitely. One type serves
+  both places the crate locks — the writer's partition and the coordinator's
+  partition record — so neither can grow an unbounded wait on its own.
   Two further rules keep it that way: a `Shared` writer holds one partition at a
   time, and `FsWriter::group` orders a batch by partition id so writers that do
   accumulate locks take them in the same order. The wait's default follows the mode

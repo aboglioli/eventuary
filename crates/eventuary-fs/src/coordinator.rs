@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,8 +14,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::atomic;
-use crate::error::{io_at, join, store};
+use crate::error::{io_at, join};
 use crate::layout::encode_component;
+use crate::lock::{DEFAULT_LOCK_WAIT, FileLock};
 
 const DIR: &str = "coordinator";
 const CONSUMERS: &str = "consumers";
@@ -25,6 +26,10 @@ const LOCK: &str = ".lock";
 #[derive(Debug, Clone, Default)]
 pub struct FsPartitionCoordinatorConfig {
     pub dir: Option<PathBuf>,
+    /// How long to wait for a partition record another process is rewriting, before
+    /// reporting [`Error::Contended`](eventuary_core::Error::Contended). `None` takes
+    /// [`DEFAULT_LOCK_WAIT`].
+    pub lock_wait: Option<Duration>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,6 +48,7 @@ struct PartitionRecord<C> {
 
 pub struct FsPartitionCoordinator<C> {
     dir: Arc<PathBuf>,
+    lock_wait: Duration,
     _cursor: std::marker::PhantomData<fn() -> C>,
 }
 
@@ -50,6 +56,7 @@ impl<C> Clone for FsPartitionCoordinator<C> {
     fn clone(&self) -> Self {
         Self {
             dir: Arc::clone(&self.dir),
+            lock_wait: self.lock_wait,
             _cursor: std::marker::PhantomData,
         }
     }
@@ -61,6 +68,7 @@ impl<C> FsPartitionCoordinator<C> {
         fs::create_dir_all(&dir).map_err(|e| io_at("create coordinator dir", &dir, e))?;
         Ok(Self {
             dir: Arc::new(dir),
+            lock_wait: config.lock_wait.unwrap_or(DEFAULT_LOCK_WAIT),
             _cursor: std::marker::PhantomData,
         })
     }
@@ -96,32 +104,6 @@ impl<C> FsPartitionCoordinator<C> {
     fn partition_lock_path(&self, scope: &CheckpointScope, partition: Partition) -> PathBuf {
         self.partitions_dir(scope)
             .join(format!("{:05}{LOCK}", partition.id()))
-    }
-}
-
-struct PartitionGuard {
-    file: File,
-}
-
-impl PartitionGuard {
-    fn acquire(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| io_at("create partitions dir", parent, e))?;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|e| io_at("open partition lock", path, e))?;
-        file.lock().map_err(|e| store("lock partition record", e))?;
-        Ok(Self { file })
-    }
-}
-
-impl Drop for PartitionGuard {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
     }
 }
 
@@ -236,12 +218,13 @@ where
     ) -> Result<Option<PartitionLease<C>>> {
         let path = self.partition_path(scope, partition);
         let lock = self.partition_lock_path(scope, partition);
+        let lock_wait = self.lock_wait;
         let until = lease_until(lease_duration)?;
         let scope_owned = scope.clone();
         let owner_owned = owner_id.clone();
 
         tokio::task::spawn_blocking(move || {
-            let _guard = PartitionGuard::acquire(&lock)?;
+            let _guard = FileLock::acquire(&lock, &record_label(partition), lock_wait)?;
             let existing: Option<PartitionRecord<C>> = read_partition(&path)?;
             let now = Utc::now();
 
@@ -290,6 +273,7 @@ where
     async fn renew(&self, lease: &PartitionLease<C>, lease_duration: Duration) -> Result<()> {
         let path = self.partition_path(&lease.scope, lease.partition);
         let lock = self.partition_lock_path(&lease.scope, lease.partition);
+        let lock_wait = self.lock_wait;
         let until = lease_until(lease_duration)?;
         let scope_owned = lease.scope.clone();
         let owner = lease.owner_id.as_str().to_owned();
@@ -297,7 +281,7 @@ where
         let partition = lease.partition;
 
         tokio::task::spawn_blocking(move || {
-            let _guard = PartitionGuard::acquire(&lock)?;
+            let _guard = FileLock::acquire(&lock, &record_label(partition), lock_wait)?;
             let mut record: PartitionRecord<C> =
                 read_partition(&path)?.ok_or_else(|| ownership_lost(partition, generation))?;
             if record.partition_count != partition.count() {
@@ -322,13 +306,14 @@ where
     async fn release(&self, lease: &PartitionLease<C>) -> Result<()> {
         let path = self.partition_path(&lease.scope, lease.partition);
         let lock = self.partition_lock_path(&lease.scope, lease.partition);
+        let lock_wait = self.lock_wait;
         let scope_owned = lease.scope.clone();
         let owner = lease.owner_id.as_str().to_owned();
         let generation = lease.generation;
         let partition = lease.partition;
 
         tokio::task::spawn_blocking(move || {
-            let _guard = PartitionGuard::acquire(&lock)?;
+            let _guard = FileLock::acquire(&lock, &record_label(partition), lock_wait)?;
             let mut record: PartitionRecord<C> =
                 read_partition(&path)?.ok_or_else(|| ownership_lost(partition, generation))?;
             if record.partition_count != partition.count() {
@@ -355,13 +340,14 @@ where
     async fn checkpoint(&self, lease: &PartitionLease<C>, cursor: C) -> Result<()> {
         let path = self.partition_path(&lease.scope, lease.partition);
         let lock = self.partition_lock_path(&lease.scope, lease.partition);
+        let lock_wait = self.lock_wait;
         let scope_owned = lease.scope.clone();
         let owner = lease.owner_id.as_str().to_owned();
         let generation = lease.generation;
         let partition = lease.partition;
 
         tokio::task::spawn_blocking(move || {
-            let _guard = PartitionGuard::acquire(&lock)?;
+            let _guard = FileLock::acquire(&lock, &record_label(partition), lock_wait)?;
             let mut record: PartitionRecord<C> =
                 read_partition(&path)?.ok_or_else(|| ownership_lost(partition, generation))?;
             if record.partition_count != partition.count() {
@@ -392,4 +378,8 @@ where
         .await
         .map_err(join)?
     }
+}
+
+fn record_label(partition: Partition) -> String {
+    format!("the record for partition {}", partition.id())
 }

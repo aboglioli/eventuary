@@ -441,3 +441,59 @@ async fn coordinator_state_survives_reopening() {
     assert!(blocked.is_none());
     assert_eq!(resumed.checkpoint_cursor.map(|c| c.offset), Some(7));
 }
+
+#[tokio::test]
+async fn a_held_partition_record_is_waited_for_within_a_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let coordinator: FsPartitionCoordinator<FsCursor> = FsPartitionCoordinator::open(
+        dir.path(),
+        FsPartitionCoordinatorConfig {
+            lock_wait: Some(Duration::from_millis(100)),
+            ..FsPartitionCoordinatorConfig::default()
+        },
+    )
+    .unwrap();
+
+    coordinator
+        .claim(&scope(), &owner("a"), partition(0), Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("a free partition is claimable");
+
+    let lock_path = find_lock(&dir.path().join("coordinator"))
+        .expect("the coordinator keeps a lock file per partition record");
+    let blocker = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    blocker.lock().unwrap();
+
+    let started = std::time::Instant::now();
+    let refused = coordinator
+        .claim(&scope(), &owner("b"), partition(0), Duration::from_secs(30))
+        .await
+        .expect_err("the record is held");
+    assert!(matches!(refused, Error::Contended(_)), "{refused:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the coordinator must give up at its deadline, not block forever"
+    );
+
+    blocker.unlock().unwrap();
+}
+
+fn find_lock(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_lock(&path) {
+                return Some(found);
+            }
+        } else if path.extension().is_some_and(|e| e == "lock") {
+            return Some(path);
+        }
+    }
+    None
+}

@@ -108,6 +108,7 @@ pub mod dedupe;
 mod error;
 mod index;
 pub mod layout;
+mod lock;
 pub mod log;
 mod meta;
 pub mod multiplexer;
