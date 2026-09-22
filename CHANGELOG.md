@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `atomic::write` gives each write its own temporary file. The name was derived from
+  the target alone, so two processes writing the same file shared one temporary path
+  where `File::create` truncated what the other was still writing, and the rename
+  could then publish a torn file. This affected every `eventuary-fs` store that
+  publishes a whole file — checkpoints, watermarks, buffers and log metadata. A
+  failed rename now also cleans up its temporary instead of leaving it behind.
+
 ## [0.3.0-rc.3] - 2026-09-21
 
 ### Fixed

@@ -287,3 +287,51 @@ async fn checkpoint_resume_is_independent_per_partition() {
     all.dedup();
     assert_eq!(all.len(), 32);
 }
+
+#[tokio::test]
+async fn concurrent_commits_to_one_key_never_publish_a_torn_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = CheckpointKey::new(
+        CheckpointScope::new(
+            ConsumerGroupId::new("group").unwrap(),
+            StreamId::new("stream").unwrap(),
+        ),
+        CursorId::global(),
+    );
+
+    let mut committers = Vec::new();
+    for n in 0..8u64 {
+        let store: FsCheckpointStore<FsCursor> =
+            FsCheckpointStore::open(dir.path(), FsCheckpointStoreConfig::default()).unwrap();
+        let key = key.clone();
+        committers.push(tokio::spawn(async move {
+            for round in 0..25 {
+                let offset = n * 100 + round;
+                store
+                    .commit(
+                        &key,
+                        FsCursor::new(
+                            Partition::new(0, NonZeroU32::new(1).unwrap()).unwrap(),
+                            offset,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }));
+    }
+    for task in committers {
+        task.await.unwrap();
+    }
+
+    let store: FsCheckpointStore<FsCursor> =
+        FsCheckpointStore::open(dir.path(), FsCheckpointStoreConfig::default()).unwrap();
+    let loaded = store
+        .load(&key)
+        .await
+        .expect("a committed checkpoint must always decode");
+    assert!(
+        loaded.is_some(),
+        "the last rename must publish a whole cursor"
+    );
+}
