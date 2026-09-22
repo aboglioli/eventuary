@@ -46,6 +46,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `eventuary-fs` drops its `fs4` dependency and uses `std::fs` file locking, stable
+  since Rust 1.89 and the same `flock(2)` / `LockFileEx` underneath. The crate now
+  depends on nothing but `eventuary-core`. The workspace declares
+  `rust-version = "1.89"`.
+
 - `eventuary-sqlite` and `eventuary-postgres` convert driver errors through a single
   per-crate error module, as `eventuary-fs` already did, instead of mapping them
   inline at 121 and 51 call sites. This is what lets a classification such as

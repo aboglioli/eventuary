@@ -1126,7 +1126,9 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
 ### fs
 
 - Stores each partition as a directory of size-rolled segments under a log root.
-  No server, no driver, and no C dependency.
+  No server, no driver, no C dependency, and no dependency beyond `eventuary-core`:
+  locking is `std::fs::File::lock` (`flock(2)` on Unix, `LockFileEx` on Windows),
+  which requires Rust 1.89.
 - Segment files are JSON lines carrying a flat `offset` field, so a log stays
   readable with `cat`, `grep` and `jq`.
 - Sparse offset and time indexes let a read seek near its target instead of

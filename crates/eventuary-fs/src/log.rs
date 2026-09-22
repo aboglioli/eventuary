@@ -1,9 +1,8 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use eventuary_core::{Result, SerializedEvent};
-use fs4::fs_std::FileExt;
 
 use crate::error::{contended, corrupt, io_at, store};
 use crate::index::{OffsetIndex, TimeIndex};
@@ -107,9 +106,9 @@ impl PartitionLock {
 
         let deadline = Instant::now() + wait;
         loop {
-            match file.try_lock_exclusive() {
-                Ok(true) => return Ok(Self { file }),
-                Ok(false) => {
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(TryLockError::WouldBlock) => {
                     let left = deadline.saturating_duration_since(Instant::now());
                     if left.is_zero() {
                         return Err(contended(format!(
@@ -118,7 +117,9 @@ impl PartitionLock {
                     }
                     std::thread::sleep(POLL.min(left));
                 }
-                Err(e) => return Err(store(format!("lock partition {partition_id}"), e)),
+                Err(TryLockError::Error(e)) => {
+                    return Err(store(format!("lock partition {partition_id}"), e));
+                }
             }
         }
     }
@@ -126,7 +127,7 @@ impl PartitionLock {
 
 impl Drop for PartitionLock {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 

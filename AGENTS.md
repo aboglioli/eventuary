@@ -155,7 +155,7 @@ crates/
 |-------|-----------|---------------|
 | `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, tokio-util (`rt` + `time`), either, base64, bytes | any other eventuary crate |
 | `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate |
-| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka / fs4) | any other backend crate |
+| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka; `eventuary-fs` needs none) | any other backend crate |
 | `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
 
 Key invariants:
@@ -1371,6 +1371,13 @@ Worth knowing when changing the codebase:
   every acquisition, which `Segment::open` already did via the offset index, so the
   revalidation costs one index read and a scan bounded by `index_interval_bytes`
   rather than a full segment.
+- **File locking is `std::fs`, not a crate.** `File::lock`, `try_lock` and `unlock`
+  have been stable since Rust 1.89 and are `flock(2)` on Unix and `LockFileEx` on
+  Windows — the same syscalls `fs4` wrapped, and `std::fs::TryLockError`'s
+  `WouldBlock`/`Error` split is the contention/failure distinction we need. That
+  left `eventuary-fs` with a dependency it used for nothing else, so the crate now
+  has no dependency beyond `eventuary-core` and the workspace declares
+  `rust-version = "1.89"` to make the requirement explicit rather than accidental.
 - **Every lock acquisition has a deadline, which is what rules out deadlock.**
   `PartitionLock::acquire` polls `try_lock_exclusive` until `lock_wait` elapses and
   then reports `Error::Contended`; nothing ever blocks on a lock indefinitely.

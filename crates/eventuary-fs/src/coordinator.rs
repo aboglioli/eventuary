@@ -10,7 +10,6 @@ use eventuary_core::io::reader::{
     CheckpointScope, Generation, PartitionCoordinator, PartitionLease,
 };
 use eventuary_core::{Error, Partition, Result};
-use fs4::fs_std::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -115,14 +114,14 @@ impl PartitionGuard {
             .write(true)
             .open(path)
             .map_err(|e| io_at("open partition lock", path, e))?;
-        FileExt::lock_exclusive(&file).map_err(|e| store("lock partition record", e))?;
+        file.lock().map_err(|e| store("lock partition record", e))?;
         Ok(Self { file })
     }
 }
 
 impl Drop for PartitionGuard {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
     }
 }
 
