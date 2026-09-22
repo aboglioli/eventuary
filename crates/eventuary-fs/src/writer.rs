@@ -96,8 +96,6 @@ pub struct FsWriter {
     config: LogConfig,
     partitioning: FsPartitioningConfig,
     owned: BTreeSet<u32>,
-    /// What `sync` and `enforce_retention` act on: an untouched partition has nothing to
-    /// flush and opening one would take its lock for no reason.
     touched: Mutex<BTreeSet<u32>>,
     /// Empty under [`WriterAccess::Shared`], which keeps no state between writes.
     held: Mutex<BTreeMap<u32, Arc<Mutex<PartitionLog>>>>,
@@ -153,9 +151,8 @@ impl FsWriter {
         self.owned.iter().copied().collect()
     }
 
-    /// Reads the partition tail without taking its lock, so asking does not claim the
-    /// partition or disturb the writer that holds it. The answer is a snapshot: under
-    /// [`WriterAccess::Shared`] another process may append before you use it.
+    /// Reads the tail without taking the partition's lock, so the answer is a snapshot
+    /// another writer may already have moved.
     pub async fn next_offset(&self, partition_id: u32) -> Result<u64> {
         self.ensure_owned(partition_id)?;
         let (root, config) = (self.root.clone(), self.config);
@@ -194,10 +191,6 @@ impl FsWriter {
         self.touched.lock().await.iter().copied().collect()
     }
 
-    /// Runs `op` against a partition while its lock is held, and — under
-    /// [`WriterAccess::Shared`] — only while it is held. The mode decides the lock's
-    /// lifetime, so no call site can append outside the lock or hold a partition longer
-    /// than its mode allows.
     async fn with_log<T, F>(&self, partition_id: u32, op: F) -> Result<T>
     where
         F: FnOnce(&mut PartitionLog) -> Result<T> + Send + 'static,
@@ -225,9 +218,8 @@ impl FsWriter {
         }
     }
 
-    /// Opens a partition and keeps it, for [`WriterAccess::Exclusive`]. The acquisition
-    /// happens outside the `held` lock, so waiting for one partition cannot stall writes to
-    /// every other partition in this process.
+    /// The acquisition runs outside the `held` lock, so waiting for one partition cannot
+    /// stall writes to every other partition in this process.
     async fn hold(&self, partition_id: u32) -> Result<Arc<Mutex<PartitionLog>>> {
         if let Some(log) = self.held.lock().await.get(&partition_id) {
             return Ok(Arc::clone(log));
@@ -249,10 +241,6 @@ impl FsWriter {
         Ok(log)
     }
 
-    /// Groups a batch by partition, checking ownership and serializing before any lock is
-    /// taken, so a batch naming an unowned partition fails having written nothing. Ordering
-    /// by partition id also fixes the order locks are taken in, which is what keeps two
-    /// [`WriterAccess::Exclusive`] writers from each holding what the other needs.
     fn group(&self, events: &[Event]) -> Result<BTreeMap<u32, Vec<SerializedEvent>>> {
         let mut batches: BTreeMap<u32, Vec<SerializedEvent>> = BTreeMap::new();
         for event in events {

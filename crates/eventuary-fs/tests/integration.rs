@@ -550,8 +550,6 @@ async fn writing_to_an_unowned_partition_is_rejected() {
     assert!(rejected);
 }
 
-/// Reads one partition back as `(offset, key)` pairs, so a test can assert that concurrent
-/// writers left one contiguous offset sequence and lost nothing.
 async fn offsets_and_keys(root: &std::path::Path, expected: usize) -> Vec<(u64, String)> {
     let reader = FsReader::open(root, FsReaderConfig::default()).unwrap();
     let mut stream = reader

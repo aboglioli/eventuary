@@ -43,40 +43,22 @@ impl RetentionPolicy {
     }
 }
 
-/// How long a [`WriterAccess::Shared`] writer waits for a partition lock before reporting
-/// contention.
-///
-/// Generous on purpose: a shared holder keeps the lock for one write, so a wait this long
-/// means something is wrong rather than busy.
 pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
 
-/// How long a writer holds a partition's lock, which decides how many processes can append
-/// to one partition.
+/// How long a writer holds a partition's lock.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum WriterAccess {
-    /// Lock for the duration of each write, then release.
-    ///
-    /// Any number of processes can append to the same partition. Each write re-reads the
-    /// partition tail while holding the lock, so two writers cannot assign the same offset,
-    /// and a writer keeps no state between writes that another could invalidate. This is the
-    /// default because it is the only mode that is safe when the number of writers is not
-    /// known up front.
+    /// Lock around each write, so any number of processes can append to one partition.
     #[default]
     Shared,
-    /// Lock on first write to a partition and hold it until the writer is dropped.
-    ///
-    /// One process owns each partition it touches, so its in-memory tail stays valid and a
-    /// write costs one `write` syscall. Faster for a single long-lived writer, and a second
-    /// process reaching the same partition is reported as contention.
+    /// Lock on first write and hold it until dropped, so one process owns each partition
+    /// it touches and a write costs one `write` syscall.
     Exclusive,
 }
 
 impl WriterAccess {
-    /// How long waiting is worth it in this mode.
-    ///
-    /// A shared holder releases after one write, so waiting almost always succeeds. An
-    /// exclusive holder keeps the partition until it exits, so waiting for one is futile
-    /// and the writer fails immediately instead.
+    /// Waiting out a `Shared` holder succeeds, since it releases after one write; waiting
+    /// out an `Exclusive` one is futile, since it releases only when the writer drops.
     pub fn default_lock_wait(self) -> Duration {
         match self {
             Self::Shared => DEFAULT_LOCK_WAIT,
@@ -91,12 +73,9 @@ pub struct LogConfig {
     pub sync: SyncPolicy,
     pub retention: RetentionPolicy,
     pub access: WriterAccess,
-    /// How long to wait for a partition lock another writer holds, before reporting
-    /// [`Error::Contended`](eventuary_core::Error::Contended).
-    ///
-    /// `None`, the default, takes [`WriterAccess::default_lock_wait`] for the configured
-    /// mode, which is the right answer in both: waiting out a shared holder works, waiting
-    /// out an exclusive one does not. `Some(Duration::ZERO)` never waits.
+    /// How long to wait before reporting
+    /// [`Error::Contended`](eventuary_core::Error::Contended). `None` takes
+    /// [`WriterAccess::default_lock_wait`].
     pub lock_wait: Option<Duration>,
 }
 
@@ -107,21 +86,14 @@ impl LogConfig {
     }
 }
 
-/// Proof that this process holds a partition's exclusive lock: it exists only while the
-/// lock is held, and releases on drop. Every writable [`PartitionLog`] owns one, so an
-/// append cannot happen outside the lock.
 #[must_use = "dropping the lock releases the partition to other writers"]
 struct PartitionLock {
     file: File,
 }
 
 impl PartitionLock {
-    /// Poll `try_lock_exclusive` until `wait` elapses.
-    ///
-    /// `flock` has no timed variant, so a bounded retry is the portable way to wait for a
-    /// writer that is about to let go — under [`WriterAccess::Shared`] a holder keeps the
-    /// lock only for one write. The deadline is what keeps contention from becoming a
-    /// deadlock: no caller ever blocks here indefinitely.
+    /// `flock` has no timed variant, so the wait is a bounded poll. The deadline is what
+    /// keeps contention from becoming a deadlock.
     fn acquire(dir: &Path, partition_id: u32, wait: Duration) -> Result<Self> {
         const POLL: Duration = Duration::from_millis(5);
 
@@ -251,8 +223,6 @@ impl PartitionLog {
         Ok(offset)
     }
 
-    /// Appends every event and, unless [`SyncPolicy::Never`] is set, flushes once at the
-    /// end rather than per event.
     pub fn append_all(&mut self, events: Vec<SerializedEvent>) -> Result<Vec<u64>> {
         let mut offsets = Vec::with_capacity(events.len());
         for event in events {

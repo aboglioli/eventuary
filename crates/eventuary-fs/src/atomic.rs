@@ -7,12 +7,8 @@ use eventuary_core::Result;
 
 use crate::error::io_at;
 
-/// Writes `bytes` to `path` by renaming a temporary file over it, so a reader sees either
-/// the previous contents or the new ones.
-///
-/// The temporary name is unique per call. Deriving it from the target alone lets two
-/// processes writing the same file share one temporary path, where `File::create` truncates
-/// what the other is still writing and the rename then publishes a torn file.
+/// The temporary name is unique per call: derived from the target alone, two processes
+/// writing one file share it, and `File::create` truncates what the other is still writing.
 pub(crate) fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent();
     if let Some(parent) = parent {
