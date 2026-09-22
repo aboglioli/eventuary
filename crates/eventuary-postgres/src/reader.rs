@@ -25,6 +25,7 @@ use eventuary_core::{
 };
 
 use crate::coordinator::PgPartitionCoordinator;
+use crate::error::store;
 use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
@@ -397,10 +398,7 @@ async fn resolve_initial_position(
             if let Some(org) = subscription.filter.organization.as_ref() {
                 q = q.bind(org.as_str());
             }
-            let row = q
-                .fetch_one(pool)
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let row = q.fetch_one(pool).await.map_err(store)?;
             Ok((row.get::<i64, _>("s"), None))
         }
         StartFrom::Timestamp(ts) => {
@@ -419,10 +417,7 @@ async fn resolve_initial_position(
                 q = q.bind(org.as_str());
             }
             q = q.bind(ts.to_rfc3339());
-            let row = q
-                .fetch_one(pool)
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let row = q.fetch_one(pool).await.map_err(store)?;
             Ok((row.get::<i64, _>("s").max(0), Some(ts)))
         }
     }
@@ -447,10 +442,7 @@ async fn resolve_stop_position(
             if let Some(org) = subscription.filter.organization.as_ref() {
                 query = query.bind(org.as_str());
             }
-            let row = query
-                .fetch_one(pool)
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let row = query.fetch_one(pool).await.map_err(store)?;
             Ok(Some(row.get::<i64, _>("s")))
         }
     }
@@ -569,10 +561,7 @@ async fn fetch_batch(
     }
     q = q.bind(take as i64);
 
-    let rows = q
-        .fetch_all(pool)
-        .await
-        .map_err(|e| Error::Store(e.to_string()))?;
+    let rows = q.fetch_all(pool).await.map_err(store)?;
 
     rows.into_iter()
         .map(|row| {

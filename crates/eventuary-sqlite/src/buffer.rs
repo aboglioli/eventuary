@@ -14,6 +14,7 @@ use eventuary_core::io::reader::{BufferEntry, BufferStore};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -86,7 +87,7 @@ impl<C> SqliteBufferStore<C> {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteBufferStoreConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         crate::schema::apply_schema(
             &guard,
             BUFFER_STORE_MIGRATIONS,
@@ -141,29 +142,27 @@ where
         let event_json = encode_event(event)?;
         let cursor_json = encode_cursor(cursor)?;
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql =
                 format!("INSERT INTO {relation} (event, cursor) VALUES (?1, ?2) RETURNING id");
             let id: i64 = guard
                 .query_row(&sql, rusqlite::params![event_json, cursor_json], |r| {
                     r.get(0)
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(SqliteBufferStoreId(id))
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn pending(&self) -> Result<Vec<BufferEntry<C, Self::Id>>> {
         let conn = Arc::clone(&self.conn);
         let relation = Arc::clone(&self.relation);
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!("SELECT id, event, cursor FROM {relation} ORDER BY id");
-            let mut stmt = guard
-                .prepare(&sql)
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let mut stmt = guard.prepare(&sql).map_err(store)?;
             let rows = stmt
                 .query_map([], |r| {
                     Ok((
@@ -172,10 +171,10 @@ where
                         r.get::<_, String>(2)?,
                     ))
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             let mut out = Vec::new();
             for row in rows {
-                let (id, event_json, cursor_json) = row.map_err(|e| Error::Store(e.to_string()))?;
+                let (id, event_json, cursor_json) = row.map_err(store)?;
                 out.push(BufferEntry {
                     id: SqliteBufferStoreId(id),
                     event: decode_event(&event_json)?,
@@ -185,7 +184,7 @@ where
             Ok(out)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn ack(&self, id: &Self::Id) -> Result<()> {
@@ -193,15 +192,15 @@ where
         let relation = Arc::clone(&self.relation);
         let id_value = id.0;
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!("DELETE FROM {relation} WHERE id = ?1");
             guard
                 .execute(&sql, rusqlite::params![id_value])
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn nack(&self, _id: &Self::Id) -> Result<()> {

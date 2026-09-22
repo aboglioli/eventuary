@@ -9,6 +9,7 @@ use eventuary_core::partition::{
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 use crate::relation::SqliteRelationName;
 
@@ -79,7 +80,7 @@ impl SqliteWriter {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteWriterConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         SqliteEventLogSchema::prepare(
             &guard,
             &SqliteEventLogSchemaConfig {
@@ -146,11 +147,11 @@ impl Writer for SqliteWriter {
         let event = event.clone();
         let sql = Arc::clone(&self.insert_sql);
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             insert_event(&guard, &sql, &event, &pd)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
@@ -164,18 +165,16 @@ impl Writer for SqliteWriter {
         let events = events.to_vec();
         let sql = Arc::clone(&self.insert_sql);
         tokio::task::spawn_blocking(move || {
-            let mut guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
-            let tx = guard
-                .transaction()
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let mut guard = conn.lock().map_err(poisoned)?;
+            let tx = guard.transaction().map_err(store)?;
             for (event, pd) in events.iter().zip(partition_data.iter()) {
                 insert_event(&tx, &sql, event, pd)?;
             }
-            tx.commit().map_err(|e| Error::Store(e.to_string()))?;
+            tx.commit().map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 
@@ -220,7 +219,7 @@ fn insert_event(
             pd.partition_strategy.as_ref().map(|s| s.as_str()),
         ],
     )
-    .map_err(|e| Error::Store(e.to_string()))?;
+    .map_err(store)?;
     Ok(())
 }
 

@@ -1,7 +1,9 @@
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use eventuary_core::{Error, Result};
+use eventuary_core::Result;
+
+use crate::error::store;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PgDatabaseConfig {
@@ -37,7 +39,7 @@ impl PgDatabase {
             .max_connections(config.max_connections)
             .connect(url)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(Self { pool, config })
     }
 

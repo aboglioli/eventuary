@@ -25,6 +25,7 @@ use eventuary_core::{
 };
 
 use crate::coordinator::SqlitePartitionCoordinator;
+use crate::error::{join, poisoned, store};
 
 use crate::database::SqliteConn;
 use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
@@ -185,7 +186,7 @@ impl SqliteReader {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteReaderConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         SqliteEventLogSchema::prepare(
             &guard,
             &SqliteEventLogSchemaConfig {
@@ -366,7 +367,8 @@ async fn resolve_initial_position(
                 .map(|o| o.as_str().to_owned());
             let relation = events_relation.to_owned();
             tokio::task::spawn_blocking(move || {
-                let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+                let guard = conn.lock()
+            .map_err(poisoned)?;
                 let seq: i64 = match org {
                     Some(o) => guard
                         .query_row(
@@ -376,19 +378,19 @@ async fn resolve_initial_position(
                             rusqlite::params![o],
                             |r| r.get(0),
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?,
+                        .map_err(store)?,
                     None => guard
                         .query_row(
                             &format!("SELECT COALESCE(MAX(sequence), 0) FROM {relation}"),
                             [],
                             |r| r.get(0),
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?,
+                        .map_err(store)?,
                 };
                 Ok::<(i64, Option<DateTime<Utc>>), Error>((seq, None))
             })
             .await
-            .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+            .map_err(join)?
         }
         StartFrom::Timestamp(ts) => {
             let conn = Arc::clone(conn);
@@ -400,7 +402,7 @@ async fn resolve_initial_position(
             let ts_str = ts.to_rfc3339();
             let relation = events_relation.to_owned();
             tokio::task::spawn_blocking(move || {
-                let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+                let guard = conn.lock().map_err(poisoned)?;
                 let seq: i64 = match org {
                     Some(o) => guard
                         .query_row(
@@ -411,7 +413,7 @@ async fn resolve_initial_position(
                             rusqlite::params![o, ts_str],
                             |r| r.get(0),
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?,
+                        .map_err(store)?,
                     None => guard
                         .query_row(
                             &format!(
@@ -421,12 +423,12 @@ async fn resolve_initial_position(
                             rusqlite::params![ts_str],
                             |r| r.get(0),
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?,
+                        .map_err(store)?,
                 };
                 Ok::<(i64, Option<DateTime<Utc>>), Error>((seq.max(0), Some(ts)))
             })
             .await
-            .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+            .map_err(join)?
         }
     }
 }
@@ -448,7 +450,8 @@ async fn resolve_stop_position(
                 .map(|o| o.as_str().to_owned());
             let relation = events_relation.to_owned();
             tokio::task::spawn_blocking(move || {
-                let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+                let guard = conn.lock()
+            .map_err(poisoned)?;
                 let seq: i64 = match org {
                     Some(o) => guard
                         .query_row(
@@ -458,19 +461,19 @@ async fn resolve_stop_position(
                             rusqlite::params![o],
                             |r| r.get(0),
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?,
+                        .map_err(store)?,
                     None => guard
                         .query_row(
                             &format!("SELECT COALESCE(MAX(sequence), 0) FROM {relation}"),
                             [],
                             |r| r.get(0),
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?,
+                        .map_err(store)?,
                 };
                 Ok::<Option<i64>, Error>(Some(seq))
             })
             .await
-            .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+            .map_err(join)?
         }
     }
 }
@@ -512,7 +515,8 @@ async fn fetch_batch(
     let partitions = partitions.clone();
 
     tokio::task::spawn_blocking(move || {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock()
+            .map_err(poisoned)?;
 
         let mut sql = format!(
             "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, \
@@ -583,7 +587,7 @@ async fn fetch_batch(
 
         let mut stmt = guard
             .prepare(&sql)
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         let rows = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 let sequence: i64 = row.get(0)?;
@@ -615,7 +619,7 @@ async fn fetch_batch(
                     partition_count,
                 ))
             })
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
 
         let mut out = Vec::new();
         for row in rows {
@@ -633,7 +637,7 @@ async fn fetch_batch(
                 version,
                 partition_id,
                 partition_count,
-            ) = row.map_err(|e| Error::Store(e.to_string()))?;
+            ) = row.map_err(store)?;
 
             let payload: SerializedPayload = serde_json::from_str(&payload_str)
                 .map_err(|e| Error::Serialization(format!("decode payload: {e}")))?;
@@ -665,7 +669,7 @@ async fn fetch_batch(
         Ok(out)
     })
     .await
-    .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+    .map_err(join)?
 }
 
 fn decode_partition(partition_id: Option<i64>, partition_count: Option<i64>) -> Result<Partition> {

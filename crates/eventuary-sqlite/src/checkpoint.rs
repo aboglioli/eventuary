@@ -7,6 +7,7 @@ use eventuary_core::io::{Cursor, CursorId};
 use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -71,7 +72,7 @@ impl<C> SqliteCheckpointStore<C> {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteCheckpointStoreConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         crate::schema::apply_schema(
             &guard,
             CHECKPOINT_STORE_MIGRATIONS,
@@ -122,7 +123,7 @@ where
         let group = key.scope.consumer_group_id.as_str().to_owned();
         let stream = key.scope.stream_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "SELECT cursor FROM {relation} \
                  WHERE consumer_group_id = ?1 \
@@ -138,14 +139,14 @@ where
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             match row {
                 Some(json) => Ok(Some(decode_cursor::<C>(json)?)),
                 None => Ok(None),
             }
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn load_scope(&self, scope: &CheckpointScope) -> Result<Vec<(CursorId, C)>> {
@@ -154,28 +155,26 @@ where
         let group = scope.consumer_group_id.as_str().to_owned();
         let stream = scope.stream_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "SELECT cursor_id, cursor FROM {relation} \
                  WHERE consumer_group_id = ?1 AND stream_id = ?2"
             );
-            let mut stmt = guard
-                .prepare(&sql)
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let mut stmt = guard.prepare(&sql).map_err(store)?;
             let rows = stmt
                 .query_map(rusqlite::params![group, stream], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             let mut out = Vec::new();
             for row in rows {
-                let (cursor_id_str, json) = row.map_err(|e| Error::Store(e.to_string()))?;
+                let (cursor_id_str, json) = row.map_err(store)?;
                 out.push((decode_cursor_id(&cursor_id_str), decode_cursor::<C>(json)?));
             }
             Ok(out)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
@@ -187,7 +186,7 @@ where
         let cursor_json = encode_cursor(&cursor)?;
         let cursor_order = cursor.order_key();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {relation} \
                    (consumer_group_id, stream_id, cursor_id, cursor, cursor_order) \
@@ -208,11 +207,11 @@ where
                         cursor_order.as_bytes()
                     ],
                 )
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 

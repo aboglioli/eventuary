@@ -9,8 +9,9 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use eventuary_core::io::reader::DedupeStore;
-use eventuary_core::{Error, Event, Result};
+use eventuary_core::{Event, Result};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -92,7 +93,7 @@ impl DedupeStore for PgDedupeStore {
             .bind(event_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(row.is_some())
     }
 
@@ -106,7 +107,7 @@ impl DedupeStore for PgDedupeStore {
             .bind(event_id)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 
@@ -122,7 +123,7 @@ impl DedupeStore for PgDedupeStore {
             .bind(event_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(row.is_some())
     }
 }

@@ -16,8 +16,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first write and held until the writer is dropped, which is faster for a single
   long-lived writer.
 - `Error::Contended` reports a busy resource distinctly from a backend failure, so
-  a caller can retry contention without matching on message text. `eventuary-fs`
-  returns it when a partition lock cannot be taken within `lock_wait`.
+  a caller can retry contention without matching on message text, in the same way
+  whichever backend raised it. `eventuary-fs` returns it when a partition lock
+  cannot be taken within `lock_wait`, `eventuary-sqlite` when SQLite reports
+  `DatabaseBusy` or `DatabaseLocked`, and `eventuary-postgres` on SQLSTATE `40001`
+  (serialization failure), `40P01` (deadlock detected) or `55P03` (lock not
+  available). Previously every one of these was an opaque `Error::Store`.
 
 ### Fixed
 
@@ -39,6 +43,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the process that was about to write.
 - `FsWriter::write_all` checks ownership for the whole batch before taking any lock,
   so a batch naming an unowned partition fails having written nothing.
+
+### Changed
+
+- `eventuary-sqlite` and `eventuary-postgres` convert driver errors through a single
+  per-crate error module, as `eventuary-fs` already did, instead of mapping them
+  inline at 121 and 51 call sites. This is what lets a classification such as
+  `Error::Contended` be added in one place per backend rather than swept across
+  every query.
 
 ### Breaking changes
 

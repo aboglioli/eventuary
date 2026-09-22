@@ -11,6 +11,7 @@ use sqlx::{PgPool, Row};
 use eventuary_core::io::reader::WatermarkStore;
 use eventuary_core::{Error, Result};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -93,7 +94,7 @@ impl WatermarkStore for PgWatermarkStore {
             .bind(key)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         match row {
             Some(r) => {
                 let ts_str: String = r.get("ts");
@@ -117,7 +118,7 @@ impl WatermarkStore for PgWatermarkStore {
             .bind(ts.to_rfc3339())
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 }

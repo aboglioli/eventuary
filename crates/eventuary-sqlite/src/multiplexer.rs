@@ -8,10 +8,11 @@
 
 use std::sync::Arc;
 
+use eventuary_core::Result;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore};
-use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -63,7 +64,7 @@ impl SqliteMultiplexerStore {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteMultiplexerStoreConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         crate::schema::apply_schema(
             &guard,
             MULTIPLEXER_STORE_MIGRATIONS,
@@ -92,7 +93,7 @@ impl MultiplexerStore for SqliteMultiplexerStore {
         let event_id = key.event_id.to_string();
         let subscriber_id = key.subscriber_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "SELECT 1 FROM {relation} \
                  WHERE event_id = ?1 AND subscriber_id = ?2"
@@ -104,11 +105,11 @@ impl MultiplexerStore for SqliteMultiplexerStore {
                     rusqlite::Error::QueryReturnedNoRows => Ok(false),
                     other => Err(other),
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(row)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn mark_completed(&self, key: &MultiplexerKey) -> Result<()> {
@@ -117,7 +118,7 @@ impl MultiplexerStore for SqliteMultiplexerStore {
         let event_id = key.event_id.to_string();
         let subscriber_id = key.subscriber_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {relation} (event_id, subscriber_id) \
                  VALUES (?1, ?2) \
@@ -125,11 +126,11 @@ impl MultiplexerStore for SqliteMultiplexerStore {
             );
             guard
                 .execute(&sql, rusqlite::params![event_id, subscriber_id])
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 

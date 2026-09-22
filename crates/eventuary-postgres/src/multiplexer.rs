@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use eventuary_core::Result;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore};
-use eventuary_core::{Error, Result};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -98,7 +99,7 @@ impl MultiplexerStore for PgMultiplexerStore {
             .bind(key.subscriber_id.as_str())
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(row.is_some())
     }
 
@@ -115,7 +116,7 @@ impl MultiplexerStore for PgMultiplexerStore {
             .bind(key.subscriber_id.as_str())
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 }

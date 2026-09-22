@@ -1379,11 +1379,25 @@ Worth knowing when changing the codebase:
   accumulate locks take them in the same order. The wait's default follows the mode
   (`WriterAccess::default_lock_wait`) because waiting out a `Shared` holder succeeds
   in microseconds while waiting out an `Exclusive` one is futile.
-- **Contention is `Error::Contended`, not `Error::Store`.** A caller that shares a
-  log needs to tell "busy, retry" from "the disk failed", and matching on a message
-  string is not an API. The variant is generic: any backend with a busy resource
-  (a lock timeout, a throttled request, a rebalance in progress) reports it the
-  same way.
+- **Contention is `Error::Contended` in every backend, not `Error::Store`.** A
+  caller needs to tell "busy, retry" from "the disk failed", and matching on a
+  message string is not an API. The variant is core, and the classification is the
+  one thing each backend must do for itself because only it knows its driver's
+  vocabulary: `eventuary-fs` reports it when `lock_wait` expires on a partition
+  `flock`, `eventuary-sqlite` when rusqlite returns `DatabaseBusy` or
+  `DatabaseLocked`, `eventuary-postgres` on SQLSTATE `40001`, `40P01` or `55P03`.
+  The shape is the same across all three — a bounded wait (`lock_wait`, SQLite's
+  `busy_timeout`, Postgres' `lock_timeout`) and then `Error::Contended` — so retry
+  logic written against it is backend-independent.
+- **Each backend owns one error module, and every driver error goes through it.**
+  `eventuary-fs` had `error.rs` from the start; `eventuary-sqlite` and
+  `eventuary-postgres` repeated `Error::Store(e.to_string())` inline 121 and 51
+  times, which is why a busy database looked exactly like a failed one and why
+  fs's `join` helper existed 27 more times in sqlite under another name. A driver
+  error now converts in exactly one place per backend, which is what makes adding
+  a classification like `Contended` a one-function change rather than a sweep.
+  `kafka`, `aws` and `memory` still map inline; they have 12, 3 and 2 sites and no
+  contention condition worth classifying yet, so they get a module when they do.
 - **`atomic::write` names its temporary uniquely.** Deriving the name from the
   target alone gave two processes writing one file the same temporary path, where
   `File::create` truncates what the other is still writing and the rename then
