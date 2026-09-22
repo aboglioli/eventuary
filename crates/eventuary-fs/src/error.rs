@@ -7,6 +7,10 @@ pub(crate) fn store(context: impl AsRef<str>, error: impl std::fmt::Display) -> 
     Error::Store(format!("{}: {error}", context.as_ref()))
 }
 
+pub(crate) fn contended(detail: impl std::fmt::Display) -> Error {
+    Error::Contended(detail.to_string())
+}
+
 pub(crate) fn io_at(context: &str, path: &Path, error: io::Error) -> Error {
     Error::Store(format!("{context} {}: {error}", path.display()))
 }

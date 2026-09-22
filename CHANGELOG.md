@@ -6,14 +6,52 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `eventuary-fs` supports **many producer processes on one log**, including on the
+  same partition. `WriterAccess::Shared`, the new default, takes a partition's
+  exclusive lock around each write and releases it again, re-reading the partition
+  tail while holding it so two writers cannot assign the same offset.
+  `WriterAccess::Exclusive` keeps the previous behaviour — the lock is taken on
+  first write and held until the writer is dropped, which is faster for a single
+  long-lived writer.
+- `Error::Contended` reports a busy resource distinctly from a backend failure, so
+  a caller can retry contention without matching on message text. `eventuary-fs`
+  returns it when a partition lock cannot be taken within `lock_wait`.
+
 ### Fixed
 
 - `atomic::write` gives each write its own temporary file. The name was derived from
   the target alone, so two processes writing the same file shared one temporary path
   where `File::create` truncated what the other was still writing, and the rename
   could then publish a torn file. This affected every `eventuary-fs` store that
-  publishes a whole file — checkpoints, watermarks, buffers and log metadata. A
-  failed rename now also cleans up its temporary instead of leaving it behind.
+  publishes a whole file — checkpoints, watermarks, buffers and log metadata — and
+  became reachable as soon as more than one process shared a log. A failed rename
+  now also cleans up its temporary instead of leaving it behind.
+- `PartitionLog::append_all` no longer flushes when `SyncPolicy::Never` is
+  configured. It flushed unconditionally at the end of a batch, which is the one
+  thing that policy asks it not to do.
+- An `FsWriter` waiting for one partition's lock no longer stalls writes to every
+  other partition in the same process. The acquisition ran while holding the map of
+  open partitions, so a wait of up to `lock_wait` blocked unrelated partitions.
+- `FsWriter::next_offset` no longer takes a partition's lock. Observing a partition
+  claimed it for the writer's lifetime, so asking where a log ended could deny it
+  to the process that was about to write.
+- `FsWriter::write_all` checks ownership for the whole batch before taking any lock,
+  so a batch naming an unowned partition fails having written nothing.
+
+### Breaking changes
+
+- `LogConfig` gains `access: WriterAccess` and its `lock_wait` becomes
+  `Option<Duration>`, where `None` takes the mode's default. Construct it with
+  `..LogConfig::default()` rather than exhaustively.
+- `eventuary-fs` writers no longer take any lock when opened. A partition is claimed
+  by the first write that needs it, so two writers over disjoint partitions coexist,
+  and under the default `WriterAccess::Shared` two writers over the *same* partition
+  also coexist. Code that relied on `FsWriter::open` failing to detect a second
+  producer should select `WriterAccess::Exclusive` and handle `Error::Contended` on
+  write.
+- `Error` gains a variant. Exhaustive matches over it need a new arm.
 
 ## [0.3.0-rc.3] - 2026-09-21
 

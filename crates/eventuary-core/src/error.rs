@@ -41,6 +41,9 @@ pub enum Error {
     #[error("store error: {0}")]
     Store(String),
 
+    #[error("contended: {0}")]
+    Contended(String),
+
     #[error("handler error: {0}")]
     Handler(String),
 
@@ -69,6 +72,16 @@ mod tests {
         let err = Error::InvalidCursor("partition count changed".to_owned());
         assert!(matches!(err, Error::InvalidCursor(_)));
         assert_eq!(err.to_string(), "invalid cursor: partition count changed");
+    }
+
+    #[test]
+    fn contended_variant_is_constructible() {
+        let err = Error::Contended("partition 3 is held by another writer".to_owned());
+        assert!(matches!(err, Error::Contended(_)));
+        assert_eq!(
+            err.to_string(),
+            "contended: partition 3 is held by another writer"
+        );
     }
 
     #[test]

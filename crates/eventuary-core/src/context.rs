@@ -48,6 +48,7 @@ impl From<&Error> for ContextError {
             Error::InvalidCursor(m) => ("invalid_cursor", m.clone()),
             Error::Serialization(m) => ("serialization", m.clone()),
             Error::Store(m) => ("store", m.clone()),
+            Error::Contended(m) => ("contended", m.clone()),
             Error::Handler(m) => ("handler", m.clone()),
             Error::Timeout(m) => ("timeout", m.clone()),
             Error::Config(m) => ("config", m.clone()),

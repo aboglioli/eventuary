@@ -579,7 +579,7 @@ possible: route failed messages with `OutcomeRouterReader`, map the event with
 |---|---|---|---|---|
 | `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<C>` (JSON cursor column) | ✅ `PgPartitionCoordinator` (`event_stream_consumers` + `event_stream_partitions`) | composes with `PartitionedReader` + `CheckpointReader`; `PgCoordinatedReader` for multi-instance ownership |
 | `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | ✅ `SqlitePartitionCoordinator` | composes with `PartitionedReader` + `CheckpointReader`; `SqliteCoordinatedReader` for multi-instance ownership |
-| `eventuary-fs` | `FsCursor` | ✅ `FsCheckpointStore<C>` (one JSON file per cursor id) | ✅ `FsPartitionCoordinator` (`coordinator/<group>/<stream>/{consumers,partitions}`) | dense per-partition offsets; `FsCoordinatedReader` for multi-instance ownership; one producer process per log |
+| `eventuary-fs` | `FsCursor` | ✅ `FsCheckpointStore<C>` (one JSON file per cursor id) | ✅ `FsPartitionCoordinator` (`coordinator/<group>/<stream>/{consumers,partitions}`) | dense per-partition offsets; `FsCoordinatedReader` for multi-instance ownership; many producer processes per partition (`WriterAccess::Shared`) |
 | `eventuary-memory` | `NoCursor` | — | ✅ `MemoryPartitionCoordinator<C>` (testing) | mpsc source; no replay/checkpoint semantics |
 | `eventuary-aws` (sqs) | `NoCursor` | — | — | queue visibility/delete is the native progress model |
 | `eventuary-aws` (sns) | — | — | — | publish-only; SNS has no receive API, so no reader |
@@ -1360,6 +1360,35 @@ Worth knowing when changing the codebase:
   metadata key to a typed field later is a cheaper migration than deprecating a
   field nobody populated consistently. CloudEvents keeps correlation and
   causation out of its core attributes for the same reason.
+- **An fs partition's lock belongs to the write, not the writer.** `WriterAccess`
+  picks which: `Shared`, the default, takes a partition's `flock` around each write
+  and releases it, so any number of processes append to one partition; `Exclusive`
+  holds it until the writer drops, which is faster for a single long-lived writer.
+  Holding for the writer's lifetime cannot support an unknown number of short-lived
+  producers — the case eventuary-fs is most often reached for — and only moves the
+  failure later: a writer that claims partitions as its data happens to need them
+  fails midway through a run rather than at startup. `Shared` re-reads the tail on
+  every acquisition, which `Segment::open` already did via the offset index, so the
+  revalidation costs one index read and a scan bounded by `index_interval_bytes`
+  rather than a full segment.
+- **Every lock acquisition has a deadline, which is what rules out deadlock.**
+  `PartitionLock::acquire` polls `try_lock_exclusive` until `lock_wait` elapses and
+  then reports `Error::Contended`; nothing ever blocks on a lock indefinitely.
+  Two further rules keep it that way: a `Shared` writer holds one partition at a
+  time, and `FsWriter::group` orders a batch by partition id so writers that do
+  accumulate locks take them in the same order. The wait's default follows the mode
+  (`WriterAccess::default_lock_wait`) because waiting out a `Shared` holder succeeds
+  in microseconds while waiting out an `Exclusive` one is futile.
+- **Contention is `Error::Contended`, not `Error::Store`.** A caller that shares a
+  log needs to tell "busy, retry" from "the disk failed", and matching on a message
+  string is not an API. The variant is generic: any backend with a busy resource
+  (a lock timeout, a throttled request, a rebalance in progress) reports it the
+  same way.
+- **`atomic::write` names its temporary uniquely.** Deriving the name from the
+  target alone gave two processes writing one file the same temporary path, where
+  `File::create` truncates what the other is still writing and the rename then
+  publishes a torn file. This is reachable for every fs store the moment more than
+  one process shares a log, which `WriterAccess::Shared` makes the normal case.
 - **`eventuary-sqs` is retired, not yanked.** Published versions keep resolving
   for existing dependents; the crate simply stops receiving new versions.
   Yanking is reserved for broken or insecure releases, not renames.

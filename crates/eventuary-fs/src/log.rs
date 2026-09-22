@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 use eventuary_core::{Result, SerializedEvent};
 use fs4::fs_std::FileExt;
 
-use crate::error::{corrupt, io_at, store};
+use crate::error::{contended, corrupt, io_at, store};
 use crate::index::{OffsetIndex, TimeIndex};
 use crate::layout::{
     LOG_SUFFIX, OFFSET_INDEX_SUFFIX, TIME_INDEX_SUFFIX, lock_path, parse_segment_base,
@@ -43,17 +43,119 @@ impl RetentionPolicy {
     }
 }
 
+/// How long a [`WriterAccess::Shared`] writer waits for a partition lock before reporting
+/// contention.
+///
+/// Generous on purpose: a shared holder keeps the lock for one write, so a wait this long
+/// means something is wrong rather than busy.
+pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a writer holds a partition's lock, which decides how many processes can append
+/// to one partition.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum WriterAccess {
+    /// Lock for the duration of each write, then release.
+    ///
+    /// Any number of processes can append to the same partition. Each write re-reads the
+    /// partition tail while holding the lock, so two writers cannot assign the same offset,
+    /// and a writer keeps no state between writes that another could invalidate. This is the
+    /// default because it is the only mode that is safe when the number of writers is not
+    /// known up front.
+    #[default]
+    Shared,
+    /// Lock on first write to a partition and hold it until the writer is dropped.
+    ///
+    /// One process owns each partition it touches, so its in-memory tail stays valid and a
+    /// write costs one `write` syscall. Faster for a single long-lived writer, and a second
+    /// process reaching the same partition is reported as contention.
+    Exclusive,
+}
+
+impl WriterAccess {
+    /// How long waiting is worth it in this mode.
+    ///
+    /// A shared holder releases after one write, so waiting almost always succeeds. An
+    /// exclusive holder keeps the partition until it exits, so waiting for one is futile
+    /// and the writer fails immediately instead.
+    pub fn default_lock_wait(self) -> Duration {
+        match self {
+            Self::Shared => DEFAULT_LOCK_WAIT,
+            Self::Exclusive => Duration::ZERO,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogConfig {
     pub segment: SegmentConfig,
     pub sync: SyncPolicy,
     pub retention: RetentionPolicy,
-    /// How long to keep retrying a partition lock another writer holds.
+    pub access: WriterAccess,
+    /// How long to wait for a partition lock another writer holds, before reporting
+    /// [`Error::Contended`](eventuary_core::Error::Contended).
     ///
-    /// Zero, the default, tries once and fails — right for a broker, where a held lock means
-    /// another process legitimately owns the partition. Short-lived writers that expect to
-    /// take turns should set a small wait instead of treating contention as an error.
-    pub lock_wait: Duration,
+    /// `None`, the default, takes [`WriterAccess::default_lock_wait`] for the configured
+    /// mode, which is the right answer in both: waiting out a shared holder works, waiting
+    /// out an exclusive one does not. `Some(Duration::ZERO)` never waits.
+    pub lock_wait: Option<Duration>,
+}
+
+impl LogConfig {
+    fn lock_wait(&self) -> Duration {
+        self.lock_wait
+            .unwrap_or_else(|| self.access.default_lock_wait())
+    }
+}
+
+/// Proof that this process holds a partition's exclusive lock: it exists only while the
+/// lock is held, and releases on drop. Every writable [`PartitionLog`] owns one, so an
+/// append cannot happen outside the lock.
+#[must_use = "dropping the lock releases the partition to other writers"]
+struct PartitionLock {
+    file: File,
+}
+
+impl PartitionLock {
+    /// Poll `try_lock_exclusive` until `wait` elapses.
+    ///
+    /// `flock` has no timed variant, so a bounded retry is the portable way to wait for a
+    /// writer that is about to let go — under [`WriterAccess::Shared`] a holder keeps the
+    /// lock only for one write. The deadline is what keeps contention from becoming a
+    /// deadlock: no caller ever blocks here indefinitely.
+    fn acquire(dir: &Path, partition_id: u32, wait: Duration) -> Result<Self> {
+        const POLL: Duration = Duration::from_millis(5);
+
+        let path = lock_path(dir);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| io_at("open partition lock", &path, e))?;
+
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(true) => return Ok(Self { file }),
+                Ok(false) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(contended(format!(
+                            "partition {partition_id} is held by another writer"
+                        )));
+                    }
+                    std::thread::sleep(POLL.min(left));
+                }
+                Err(e) => return Err(store(format!("lock partition {partition_id}"), e)),
+            }
+        }
+    }
+}
+
+impl Drop for PartitionLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 pub struct PartitionLog {
@@ -61,7 +163,7 @@ pub struct PartitionLog {
     segments: Vec<Segment>,
     config: LogConfig,
     bytes_since_sync: u64,
-    lock: Option<File>,
+    _lock: Option<PartitionLock>,
 }
 
 impl PartitionLog {
@@ -83,24 +185,11 @@ impl PartitionLog {
         fs::create_dir_all(&dir).map_err(|e| io_at("create partition dir", &dir, e))?;
 
         let lock = if writable {
-            let path = lock_path(&dir);
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-                .map_err(|e| io_at("open partition lock", &path, e))?;
-            acquire(&file, partition_id, config.lock_wait).and_then(|acquired| {
-                if acquired {
-                    Ok(())
-                } else {
-                    Err(store(
-                        format!("lock partition {partition_id}"),
-                        "already held by another writer",
-                    ))
-                }
-            })?;
-            Some(file)
+            Some(PartitionLock::acquire(
+                &dir,
+                partition_id,
+                config.lock_wait(),
+            )?)
         } else {
             None
         };
@@ -125,7 +214,7 @@ impl PartitionLog {
             segments,
             config,
             bytes_since_sync: 0,
-            lock,
+            _lock: lock,
         })
     }
 
@@ -162,12 +251,16 @@ impl PartitionLog {
         Ok(offset)
     }
 
+    /// Appends every event and, unless [`SyncPolicy::Never`] is set, flushes once at the
+    /// end rather than per event.
     pub fn append_all(&mut self, events: Vec<SerializedEvent>) -> Result<Vec<u64>> {
         let mut offsets = Vec::with_capacity(events.len());
         for event in events {
             offsets.push(self.append(event)?);
         }
-        self.sync()?;
+        if self.config.sync != SyncPolicy::Never {
+            self.sync()?;
+        }
         Ok(offsets)
     }
 
@@ -305,35 +398,6 @@ impl PartitionLog {
             Ok(i) => i,
             Err(0) => 0,
             Err(i) => i - 1,
-        }
-    }
-}
-
-impl Drop for PartitionLog {
-    fn drop(&mut self) {
-        if let Some(lock) = self.lock.take() {
-            let _ = FileExt::unlock(&lock);
-        }
-    }
-}
-
-/// Try once when `wait` is zero, otherwise poll until the deadline. `flock` has no timed
-/// variant, so a bounded retry is the portable way to wait for a writer that is about to let
-/// go — a single append holds the lock for microseconds.
-fn acquire(file: &File, partition_id: u32, wait: Duration) -> Result<bool> {
-    const POLL: Duration = Duration::from_millis(5);
-
-    let deadline = Instant::now() + wait;
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(true) => return Ok(true),
-            Ok(false) => {
-                if Instant::now() >= deadline {
-                    return Ok(false);
-                }
-                std::thread::sleep(POLL.min(wait.max(POLL)));
-            }
-            Err(e) => return Err(store(format!("lock partition {partition_id}"), e)),
         }
     }
 }

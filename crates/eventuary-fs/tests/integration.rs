@@ -11,7 +11,7 @@ use eventuary_core::partition::{
     PartitionHasher, PartitionKeyResolver, PartitionSelection,
 };
 use eventuary_core::{Error, Event, OrganizationId, Payload, StartFrom, StopAt, Topic};
-use eventuary_fs::log::{LogConfig, RetentionPolicy, SegmentConfig};
+use eventuary_fs::log::{LogConfig, RetentionPolicy, SegmentConfig, WriterAccess};
 use eventuary_fs::reader::{FsCursor, FsReader, FsReaderConfig, FsSubscription};
 use eventuary_fs::writer::{FsPartitioningConfig, FsWriter, FsWriterConfig};
 
@@ -550,50 +550,160 @@ async fn writing_to_an_unowned_partition_is_rejected() {
     assert!(rejected);
 }
 
+/// Reads one partition back as `(offset, key)` pairs, so a test can assert that concurrent
+/// writers left one contiguous offset sequence and lost nothing.
+async fn offsets_and_keys(root: &std::path::Path, expected: usize) -> Vec<(u64, String)> {
+    let reader = FsReader::open(root, FsReaderConfig::default()).unwrap();
+    let mut stream = reader
+        .read(FsSubscription {
+            stop_at: StopAt::CurrentEnd,
+            ..FsSubscription::earliest()
+        })
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    while out.len() < expected {
+        let Ok(Some(item)) = timeout(Duration::from_secs(5), stream.next()).await else {
+            break;
+        };
+        let message = item.unwrap();
+        out.push((
+            message.cursor().offset(),
+            message.event().key().as_str().to_owned(),
+        ));
+        message.ack().await.unwrap();
+    }
+    out
+}
+
+fn exclusive(partitions: u32) -> FsWriterConfig {
+    FsWriterConfig {
+        log: LogConfig {
+            access: WriterAccess::Exclusive,
+            ..LogConfig::default()
+        },
+        partitioning: FsPartitioningConfig::by_event_key(NonZeroU32::new(partitions).unwrap()),
+    }
+}
+
+fn shared(partitions: u32) -> FsWriterConfig {
+    FsWriterConfig {
+        partitioning: FsPartitioningConfig::by_event_key(NonZeroU32::new(partitions).unwrap()),
+        ..FsWriterConfig::default()
+    }
+}
+
 #[tokio::test]
-async fn a_second_writer_is_rejected_when_it_reaches_a_held_partition() {
+async fn a_batch_naming_an_unowned_partition_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let held = FsWriter::open(dir.path(), FsWriterConfig::default()).unwrap();
-    held.write(&ev("t", "k")).await.unwrap();
+    let writer = FsWriter::open_partitions_subset(dir.path(), shared(4), vec![0]).unwrap();
 
-    // constructing a writer no longer claims anything: partitions are taken on first write
-    let second = FsWriter::open(dir.path(), FsWriterConfig::default())
-        .expect("opening a writer takes no locks");
+    let mut batch = Vec::new();
+    for i in 0..40 {
+        batch.push(ev("t", &format!("k{i}")));
+    }
+    let refused = writer
+        .write_all(&batch)
+        .await
+        .expect_err("partition 0 is the only one this writer owns");
+    assert!(matches!(refused, Error::Config(_)), "{refused:?}");
 
-    let refused = second.write(&ev("t", "k")).await;
-    assert!(
-        refused.is_err(),
-        "a partition still has at most one writer, enforced where it matters"
+    assert_eq!(
+        writer.next_offset(0).await.unwrap(),
+        0,
+        "a rejected batch must not have appended part of itself"
     );
 }
 
 #[tokio::test]
-async fn writers_touching_different_partitions_do_not_meet() {
+async fn shared_writers_append_to_one_partition_without_losing_events() {
     let dir = tempfile::tempdir().unwrap();
-    let config = || FsWriterConfig {
-        partitioning: FsPartitioningConfig::by_event_key(NonZeroU32::new(8).unwrap()),
-        ..FsWriterConfig::default()
-    };
+    let first = FsWriter::open(dir.path(), shared(1)).unwrap();
+    let second = FsWriter::open(dir.path(), shared(1)).unwrap();
 
-    let first = FsWriter::open(dir.path(), config()).unwrap();
-    let second = FsWriter::open(dir.path(), config()).unwrap();
-
-    // two keys that hash to different partitions
-    let resolver = FsPartitioningConfig::by_event_key(NonZeroU32::new(8).unwrap());
-    let mut pair = None;
-    for a in 0..40 {
-        for b in (a + 1)..40 {
-            let (ka, kb) = (format!("k{a}"), format!("k{b}"));
-            if partition_of(&resolver, &ka) != partition_of(&resolver, &kb) {
-                pair = Some((ka, kb));
-                break;
-            }
-        }
-        if pair.is_some() {
-            break;
-        }
+    for i in 0..25 {
+        first.write(&ev("t", &format!("a{i}"))).await.unwrap();
+        second.write(&ev("t", &format!("b{i}"))).await.unwrap();
     }
-    let (ka, kb) = pair.expect("eight partitions must separate some pair of keys");
+
+    assert_eq!(first.next_offset(0).await.unwrap(), 50);
+
+    let records = offsets_and_keys(dir.path(), 50).await;
+    let offsets: Vec<u64> = records.iter().map(|(offset, _)| *offset).collect();
+    assert_eq!(
+        offsets,
+        (0..50).collect::<Vec<u64>>(),
+        "neither writer may reuse an offset or leave a hole"
+    );
+}
+
+#[tokio::test]
+async fn shared_writers_interleave_concurrently_on_one_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    let mut writers = Vec::new();
+    for w in 0..4 {
+        let root = root.clone();
+        writers.push(tokio::spawn(async move {
+            let writer = FsWriter::open(&root, shared(1)).unwrap();
+            for i in 0..25 {
+                writer.write(&ev("t", &format!("w{w}-{i}"))).await.unwrap();
+            }
+        }));
+    }
+    for task in writers {
+        task.await.unwrap();
+    }
+
+    let records = offsets_and_keys(dir.path(), 100).await;
+    let offsets: Vec<u64> = records.iter().map(|(offset, _)| *offset).collect();
+    assert_eq!(offsets, (0..100).collect::<Vec<u64>>());
+
+    let mut keys: Vec<String> = records.iter().map(|(_, key)| key.clone()).collect();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 100, "every event survives, none overwritten");
+}
+
+#[tokio::test]
+async fn a_shared_writer_does_not_have_to_be_dropped_to_release_a_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let holder = FsWriter::open(dir.path(), shared(1)).unwrap();
+    holder.write(&ev("t", "k")).await.unwrap();
+
+    let other = FsWriter::open(dir.path(), shared(1)).unwrap();
+    other
+        .write(&ev("t", "k"))
+        .await
+        .expect("a shared writer releases its partition after each write");
+}
+
+#[tokio::test]
+async fn an_exclusive_writer_keeps_its_partition_until_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = FsWriter::open(dir.path(), exclusive(1)).unwrap();
+    held.write(&ev("t", "k")).await.unwrap();
+
+    let second = FsWriter::open(dir.path(), exclusive(1)).expect("opening takes no locks");
+
+    let refused = second
+        .write(&ev("t", "k"))
+        .await
+        .expect_err("an exclusive partition has one writer");
+    assert!(
+        matches!(refused, Error::Contended(_)),
+        "contention is reported as such, so a caller can retry it: {refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn exclusive_writers_touching_different_partitions_do_not_meet() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = FsWriter::open(dir.path(), exclusive(8)).unwrap();
+    let second = FsWriter::open(dir.path(), exclusive(8)).unwrap();
+
+    let (ka, kb) = keys_on_different_partitions(8);
 
     first.write(&ev("t", &ka)).await.unwrap();
     second
@@ -602,14 +712,26 @@ async fn writers_touching_different_partitions_do_not_meet() {
         .expect("disjoint partitions are the whole point of partitioning");
 }
 
+fn keys_on_different_partitions(count: u32) -> (String, String) {
+    let config = FsPartitioningConfig::by_event_key(NonZeroU32::new(count).unwrap());
+    for a in 0..40 {
+        for b in (a + 1)..40 {
+            let (ka, kb) = (format!("k{a}"), format!("k{b}"));
+            if partition_of(&config, &ka) != partition_of(&config, &kb) {
+                return (ka, kb);
+            }
+        }
+    }
+    panic!("{count} partitions must separate some pair of keys");
+}
+
 fn partition_of(config: &FsPartitioningConfig, key: &str) -> u32 {
-    let count = config.partition_count();
     Fnv1a64PartitionHasher
         .partition_for(
             &EventKeyPartitionKeyResolver::new()
                 .partition_key(&ev("t", key))
                 .unwrap(),
-            count,
+            config.partition_count(),
         )
         .id()
 }
@@ -617,13 +739,12 @@ fn partition_of(config: &FsPartitioningConfig, key: &str) -> u32 {
 #[tokio::test]
 async fn a_lock_wait_lets_a_contending_writer_take_its_turn() {
     let dir = tempfile::tempdir().unwrap();
-
     let patient = || FsWriterConfig {
         log: LogConfig {
-            lock_wait: Duration::from_secs(2),
-            ..LogConfig::default()
+            lock_wait: Some(Duration::from_secs(2)),
+            ..exclusive(1).log
         },
-        ..FsWriterConfig::default()
+        ..exclusive(1)
     };
 
     let first = FsWriter::open(dir.path(), patient()).unwrap();
@@ -631,7 +752,6 @@ async fn a_lock_wait_lets_a_contending_writer_take_its_turn() {
 
     let second = FsWriter::open(dir.path(), patient()).unwrap();
 
-    // the holder lets go while the contender is waiting
     let releasing = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(60)).await;
         drop(first);
@@ -645,29 +765,45 @@ async fn a_lock_wait_lets_a_contending_writer_take_its_turn() {
 }
 
 #[tokio::test]
-async fn a_lock_wait_still_gives_up_rather_than_hanging() {
+async fn a_lock_wait_gives_up_rather_than_hanging() {
     let dir = tempfile::tempdir().unwrap();
-    let held = FsWriter::open(dir.path(), FsWriterConfig::default()).unwrap();
-    held.write(&ev("t", "k")).await.unwrap();
+    let _held = FsWriter::open(dir.path(), exclusive(1)).unwrap();
+    _held.write(&ev("t", "k")).await.unwrap();
 
     let impatient = FsWriter::open(
         dir.path(),
         FsWriterConfig {
             log: LogConfig {
-                lock_wait: Duration::from_millis(100),
+                access: WriterAccess::Exclusive,
+                lock_wait: Some(Duration::from_millis(100)),
                 ..LogConfig::default()
             },
-            ..FsWriterConfig::default()
+            ..exclusive(1)
         },
     )
     .unwrap();
 
     let started = std::time::Instant::now();
-    assert!(impatient.write(&ev("t", "k")).await.is_err());
+    let refused = impatient.write(&ev("t", "k")).await.unwrap_err();
+    assert!(matches!(refused, Error::Contended(_)));
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "the wait must be bounded, not indefinite"
     );
+}
+
+#[tokio::test]
+async fn asking_for_the_next_offset_does_not_claim_the_partition() {
+    let dir = tempfile::tempdir().unwrap();
+    let observer = FsWriter::open(dir.path(), exclusive(1)).unwrap();
+    assert_eq!(observer.next_offset(0).await.unwrap(), 0);
+
+    let writer = FsWriter::open(dir.path(), exclusive(1)).unwrap();
+    writer
+        .write(&ev("t", "k"))
+        .await
+        .expect("observing a partition must not take its lock");
+    assert_eq!(observer.next_offset(0).await.unwrap(), 1);
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ use std::io::Write;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use eventuary_core::{Event, Payload, SerializedEvent};
+use eventuary_core::{Error, Event, Payload, SerializedEvent};
 use eventuary_fs::layout::{LOG_SUFFIX, partition_dir, segment_path};
 use eventuary_fs::log::SegmentConfig;
 use eventuary_fs::log::{LogConfig, PartitionLog, RetentionPolicy, SyncPolicy};
@@ -185,11 +185,15 @@ fn reopen_recovers_after_torn_trailing_write() {
 #[test]
 fn second_writer_on_same_partition_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let _first = PartitionLog::open_writable(dir.path(), 0, LogConfig::default()).unwrap();
+    let impatient = LogConfig {
+        lock_wait: Some(Duration::ZERO),
+        ..LogConfig::default()
+    };
+    let _first = PartitionLog::open_writable(dir.path(), 0, impatient).unwrap();
 
-    let second = PartitionLog::open_writable(dir.path(), 0, LogConfig::default());
+    let second = PartitionLog::open_writable(dir.path(), 0, impatient);
 
-    assert!(second.is_err());
+    assert!(matches!(second, Err(Error::Contended(_))));
 }
 
 #[test]
@@ -255,7 +259,7 @@ fn retention_by_size_drops_oldest_segments_and_keeps_the_active_one() {
             max_bytes: Some(800),
             max_age: None,
         },
-        lock_wait: std::time::Duration::ZERO,
+        ..LogConfig::default()
     };
     let mut log = PartitionLog::open_writable(dir.path(), 0, config).unwrap();
     for i in 0..80 {
