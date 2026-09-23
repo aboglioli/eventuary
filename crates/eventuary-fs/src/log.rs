@@ -146,6 +146,10 @@ impl PartitionLog {
         })
     }
 
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     pub fn start_offset(&self) -> u64 {
         self.segments
             .first()
@@ -228,21 +232,28 @@ impl PartitionLog {
         if bases.is_empty() {
             return Ok(());
         }
-        let last = bases.len() - 1;
-        for (i, base) in bases.iter().enumerate() {
-            let known = self.segments.get(i).map(Segment::base_offset) == Some(*base);
-            if known && (i < last || !self.segments[i].has_changed_on_disk()?) {
+        for (i, base) in bases.iter().copied().enumerate() {
+            if self.is_cached(i, base)? {
                 continue;
             }
-            let segment = Segment::open(&self.dir, *base, self.config.segment, false)?;
-            if i < self.segments.len() {
-                self.segments[i] = segment;
-            } else {
-                self.segments.push(segment);
+            let segment = Segment::open(&self.dir, base, self.config.segment, false)?;
+            match self.segments.get_mut(i) {
+                Some(slot) => *slot = segment,
+                None => self.segments.push(segment),
             }
         }
         self.segments.truncate(bases.len());
         Ok(())
+    }
+
+    /// A segment that is no longer the active one still has to be checked: it may have grown
+    /// after the last refresh and before it rolled, and those records would otherwise stay
+    /// invisible for the life of the reader.
+    fn is_cached(&self, i: usize, base: u64) -> Result<bool> {
+        let Some(segment) = self.segments.get(i) else {
+            return Ok(false);
+        };
+        Ok(segment.base_offset() == base && !segment.has_changed_on_disk()?)
     }
 
     pub fn sync(&mut self) -> Result<()> {

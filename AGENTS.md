@@ -1371,6 +1371,15 @@ Worth knowing when changing the codebase:
   every acquisition, which `Segment::open` already did via the offset index, so the
   revalidation costs one index read and a scan bounded by `index_interval_bytes`
   rather than a full segment.
+- **A sealed segment is not a finished segment.** `PartitionLog::refresh` re-reads any
+  segment whose file has changed, including ones that are no longer active. Skipping
+  non-active segments looks safe — a rolled segment never grows again — but the reader
+  may have cached one *while* it was growing, and its stale length then hid every event
+  appended between the last refresh and the roll. The reader also checks that a batch
+  runs contiguously from its cursor: offsets are dense per partition, so a gap is either
+  a stale view (refresh) or a lost event (an error). A log that silently skips an offset
+  is worse than one that stops, which is the same reason a poison record ends a
+  partition's stream rather than being passed over.
 - **File locking is `std::fs`, not a crate.** `File::lock`, `try_lock` and `unlock`
   have been stable since Rust 1.89 and are `flock(2)` on Unix and `LockFileEx` on
   Windows — the same syscalls `fs4` wrapped, and `std::fs::TryLockError`'s

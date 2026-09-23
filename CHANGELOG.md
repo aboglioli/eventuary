@@ -25,6 +25,21 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A reader tailing an `eventuary-fs` log no longer misses events. `PartitionLog::refresh`
+  skipped any segment that was not the last one without re-checking it, so a segment the
+  reader had cached while it was still being written kept a stale length, and
+  `Segment::read_from` bounds reads by that length. Every event appended to a segment
+  after the reader's last refresh but before that segment rolled was invisible for the
+  life of the reader. A sealed segment is now re-read when its file has changed, like any
+  other. The bug needed only one writer — a reader that polled between an append and a
+  roll lost the events in between — but concurrent writers made it likely, reproducing in
+  about one run in four.
+- The `eventuary-fs` reader reports a missing offset instead of skipping it. Offsets are
+  dense within a partition, so a batch that is not contiguous from the cursor means the
+  reader's view is stale — answered by a refresh — or, if the gap survives one, that the
+  log lost an event it once held, which is now an error naming the partition and offset.
+  This is what turned the `refresh` defect above into silent data loss rather than a
+  visible failure.
 - `atomic::write` gives each write its own temporary file. The name was derived from
   the target alone, so two processes writing the same file shared one temporary path
   where `File::create` truncated what the other was still writing, and the rename

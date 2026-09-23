@@ -372,3 +372,51 @@ fn the_default_sync_policy_fsyncs_periodically() {
     );
     assert_ne!(LogConfig::default().sync, SyncPolicy::Never);
 }
+
+#[test]
+fn refresh_picks_up_appends_made_to_a_segment_before_it_rolled() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = small_segments(512);
+
+    let mut reader = PartitionLog::open_readonly(dir.path(), 0, config).unwrap();
+    let mut writer = PartitionLog::open_writable(dir.path(), 0, config).unwrap();
+
+    writer.append(serialized("first", "t")).unwrap();
+    reader.refresh().unwrap();
+    assert_eq!(
+        reader.read(0, 10).unwrap().len(),
+        1,
+        "the reader caches segment 0 here"
+    );
+
+    writer.append(serialized("second", "t")).unwrap();
+    let mut rolled = false;
+    for i in 0..10 {
+        writer
+            .append(serialized(&format!("filler-{i}"), "t"))
+            .unwrap();
+        if writer.segment_count() > 1 {
+            rolled = true;
+            break;
+        }
+    }
+    assert!(
+        rolled,
+        "the segment cap must roll for this test to mean anything"
+    );
+
+    reader.refresh().unwrap();
+    let offsets: Vec<u64> = reader
+        .read(1, 100)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.offset)
+        .collect();
+
+    let want: Vec<u64> = (1..writer.next_offset()).collect();
+    assert_eq!(
+        offsets, want,
+        "every offset after the first must be readable, including those written to \
+         segment 0 after the reader last refreshed it"
+    );
+}
