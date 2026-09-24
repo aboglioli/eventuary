@@ -16,8 +16,7 @@ pub(crate) fn store(error: rusqlite::Error) -> Error {
     Error::Store(error.to_string())
 }
 
-/// A poisoned mutex means another thread panicked mid-statement: a defect, not contention,
-/// so it must not be retried.
+/// A panic mid-statement is a defect, not contention, so it must not be retried.
 pub(crate) fn poisoned<T>(error: PoisonError<T>) -> Error {
     Error::Store(format!("sqlite connection poisoned: {error}"))
 }

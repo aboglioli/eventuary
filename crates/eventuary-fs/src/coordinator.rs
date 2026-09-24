@@ -26,9 +26,6 @@ const LOCK: &str = ".lock";
 #[derive(Debug, Clone, Default)]
 pub struct FsPartitionCoordinatorConfig {
     pub dir: Option<PathBuf>,
-    /// How long to wait for a partition record another process is rewriting, before
-    /// reporting [`Error::Contended`](eventuary_core::Error::Contended). `None` takes
-    /// [`DEFAULT_LOCK_WAIT`].
     pub lock_wait: Option<Duration>,
 }
 

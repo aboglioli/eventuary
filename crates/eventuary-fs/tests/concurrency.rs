@@ -41,8 +41,6 @@ fn config(partitions: u32, segment_bytes: u64) -> FsWriterConfig {
     }
 }
 
-/// Every `(partition, offset)` the log holds, so a test can assert each partition is a
-/// contiguous run and no event was lost or written twice.
 async fn read_back(root: &Path, expected: usize) -> Vec<(u32, u64, String)> {
     let reader = FsReader::open(root, FsReaderConfig::default()).unwrap();
     let mut stream = reader

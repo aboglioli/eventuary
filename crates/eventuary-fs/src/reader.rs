@@ -415,8 +415,8 @@ fn advance(cursors: &mut [PartitionCursor], partition_id: u32, offset: u64) {
     }
 }
 
-/// Offsets are dense within a partition, so a gap means either that this view of the log is
-/// behind — worth a refresh — or, if it survives one, that the log lost an event it held.
+/// Offsets are dense within a partition, so a gap means either a stale view — worth a
+/// refresh — or, if it survives one, an event the log lost.
 fn first_gap(records: &[Record], next: u64) -> Option<u64> {
     (next..)
         .zip(records)

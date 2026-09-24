@@ -6,23 +6,18 @@ use eventuary_core::Result;
 
 use crate::error::{contended, io_at, store};
 
-/// How long to wait for a lock another process holds before reporting contention.
-///
-/// Generous on purpose: every holder in this crate releases within one write or one record
-/// rewrite, so a wait this long means something is wrong rather than busy.
 pub const DEFAULT_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 const POLL: Duration = Duration::from_millis(5);
 
-/// An exclusive advisory lock on a file, released on drop or when the process dies.
 #[must_use = "dropping the lock releases the resource to other processes"]
 pub(crate) struct FileLock {
     file: File,
 }
 
 impl FileLock {
-    /// `flock` has no timed variant, so the wait is a bounded poll. The deadline is what
-    /// keeps contention from becoming a deadlock: no caller blocks here indefinitely.
+    /// `flock` has no timed variant, so the bounded poll is what keeps contention from
+    /// becoming a deadlock.
     pub(crate) fn acquire(path: &Path, resource: &str, wait: Duration) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| io_at("create lock dir", parent, e))?;

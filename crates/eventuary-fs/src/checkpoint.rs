@@ -115,9 +115,6 @@ where
         .map_err(crate::error::join)?
     }
 
-    /// Only ever moves a checkpoint forward, matching the SQL stores, whose upsert updates
-    /// `WHERE cursor_order < EXCLUDED.cursor_order`. The read and the write happen under the
-    /// key's lock so two processes committing at once cannot interleave into a rewind.
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
         let path = self.key_path(key);
         let lock_path = self.key_lock_path(key);

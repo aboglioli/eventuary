@@ -45,20 +45,17 @@ impl RetentionPolicy {
 
 pub use crate::lock::DEFAULT_LOCK_WAIT;
 
-/// How long a writer holds a partition's lock.
+/// How long a writer holds a partition's lock, which decides how many processes can append
+/// to one partition.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum WriterAccess {
-    /// Lock around each write, so any number of processes can append to one partition.
     #[default]
     Shared,
-    /// Lock on first write and hold it until dropped, so one process owns each partition
-    /// it touches and a write costs one `write` syscall.
     Exclusive,
 }
 
 impl WriterAccess {
-    /// Waiting out a `Shared` holder succeeds, since it releases after one write; waiting
-    /// out an `Exclusive` one is futile, since it releases only when the writer drops.
+    /// Waiting out a `Shared` holder succeeds; an `Exclusive` one holds until it exits.
     pub fn default_lock_wait(self) -> Duration {
         match self {
             Self::Shared => DEFAULT_LOCK_WAIT,
@@ -73,9 +70,7 @@ pub struct LogConfig {
     pub sync: SyncPolicy,
     pub retention: RetentionPolicy,
     pub access: WriterAccess,
-    /// How long to wait before reporting
-    /// [`Error::Contended`](eventuary_core::Error::Contended). `None` takes
-    /// [`WriterAccess::default_lock_wait`].
+    /// `None` takes [`WriterAccess::default_lock_wait`].
     pub lock_wait: Option<Duration>,
 }
 
@@ -247,8 +242,7 @@ impl PartitionLog {
     }
 
     /// A segment that is no longer the active one still has to be checked: it may have grown
-    /// after the last refresh and before it rolled, and those records would otherwise stay
-    /// invisible for the life of the reader.
+    /// after the last refresh and before it rolled.
     fn is_cached(&self, i: usize, base: u64) -> Result<bool> {
         let Some(segment) = self.segments.get(i) else {
             return Ok(false);

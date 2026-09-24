@@ -97,7 +97,6 @@ pub struct FsWriter {
     partitioning: FsPartitioningConfig,
     owned: BTreeSet<u32>,
     touched: Mutex<BTreeSet<u32>>,
-    /// Empty under [`WriterAccess::Shared`], which keeps no state between writes.
     held: Mutex<BTreeMap<u32, Arc<Mutex<PartitionLog>>>>,
 }
 
@@ -151,8 +150,6 @@ impl FsWriter {
         self.owned.iter().copied().collect()
     }
 
-    /// Reads the tail without taking the partition's lock, so the answer is a snapshot
-    /// another writer may already have moved.
     pub async fn next_offset(&self, partition_id: u32) -> Result<u64> {
         self.ensure_owned(partition_id)?;
         let (root, config) = (self.root.clone(), self.config);
@@ -218,8 +215,6 @@ impl FsWriter {
         }
     }
 
-    /// The acquisition runs outside the `held` lock, so waiting for one partition cannot
-    /// stall writes to every other partition in this process.
     async fn hold(&self, partition_id: u32) -> Result<Arc<Mutex<PartitionLog>>> {
         if let Some(log) = self.held.lock().await.get(&partition_id) {
             return Ok(Arc::clone(log));

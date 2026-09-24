@@ -175,12 +175,6 @@ pub struct WatermarkAcker<A: Acker, S: WatermarkStore> {
 }
 
 impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
-    /// A watermark is a high-water mark, so an ack that does not raise it writes nothing.
-    /// Acks arrive out of order whenever more than one event is in flight, and storing each
-    /// one unconditionally would leave the older timestamp behind for the next run to load.
-    ///
-    /// The cache is raised only after the store accepts the write, so a failed save cannot
-    /// leave this reader believing an event was handled and dropping its redelivery.
     async fn ack(&self) -> Result<()> {
         if self.raises_watermark().await {
             self.store.save_watermark(&self.key, self.event_ts).await?;
