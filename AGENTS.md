@@ -1371,6 +1371,13 @@ Worth knowing when changing the codebase:
   every acquisition, which `Segment::open` already did via the offset index, so the
   revalidation costs one index read and a scan bounded by `index_interval_bytes`
   rather than a full segment.
+- **A high-water mark is raised in one place, not stored in three.** `WatermarkAcker`
+  already had to know whether an ack advanced the mark, to update its cache; it now skips
+  the store write when it does not. Pushing the comparison into each `WatermarkStore`
+  would have been the same rule written three times, each paying a read and a lock for
+  something the caller already knew. The cache is raised only after the store accepts the
+  write, so a failed save cannot leave the reader dropping the redelivery of an event it
+  never recorded.
 - **A checkpoint only moves forward, in every backend.** Postgres and SQLite enforce it
   in the upsert (`WHERE cursor_order < EXCLUDED.cursor_order`); `FsCheckpointStore`
   compares `Cursor::order_key` under the key's `FileLock` before writing. A store that

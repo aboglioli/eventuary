@@ -40,6 +40,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   log lost an event it once held, which is now an error naming the partition and offset.
   This is what turned the `refresh` defect above into silent data loss rather than a
   visible failure.
+- `WatermarkReader` no longer stores a watermark that would lower it. The acker wrote
+  every acked event's timestamp while keeping only the highest in memory, so the two
+  disagreed as soon as acks arrived out of order — which they do whenever more than one
+  event is in flight — and the next run loaded the lower value and replayed the events
+  between them. The check lives in the acker, which already computed it for its cache, so
+  every `WatermarkStore` gets it without a per-backend read-modify-write, and a redundant
+  write now becomes no write at all.
 - `FsCheckpointStore::commit` only ever moves a checkpoint forward, and does its read
   and write under the key's lock. It overwrote blindly, so a late commit from a slower
   process silently rewound durable progress and the events in between were replayed.
