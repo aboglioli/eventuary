@@ -12,7 +12,6 @@ repository.workspace = true
 [dependencies]
 eventuary-core.workspace = true
 chrono.workspace = true
-fs4.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

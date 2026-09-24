@@ -7,6 +7,7 @@ use eventuary_core::io::reader::{CheckpointKey, CheckpointScope, CheckpointStore
 use eventuary_core::io::{Cursor, CursorId};
 use eventuary_core::{Error, Result};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -128,7 +129,7 @@ where
             .bind(cursor_id)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         match row {
             Some(r) => Ok(Some(decode_cursor::<C>(
                 r.get::<serde_json::Value, _>("cursor"),
@@ -148,7 +149,7 @@ where
             .bind(scope.stream_id.as_str())
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let cursor_id: String = row.get("cursor_id");
@@ -180,7 +181,7 @@ where
             .bind(cursor_order.as_bytes())
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 }

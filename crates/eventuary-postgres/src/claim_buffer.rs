@@ -13,6 +13,7 @@ use eventuary_core::io::OwnerId;
 use eventuary_core::io::reader::claim_buffer::{ClaimedBufferEntry, ClaimedBufferStore};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -128,7 +129,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             .bind(encode_event(event)?)
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(row.get::<i64, _>("id"))
     }
 
@@ -145,11 +146,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
         .to_string();
         let max_i64 = max as i64;
 
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+        let mut tx = self.pool.begin().await.map_err(store)?;
 
         let sql = format!(
             "WITH picked AS ( \
@@ -175,9 +172,9 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             .bind(claimed_until)
             .fetch_all(&mut *tx)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
 
-        tx.commit().await.map_err(|e| Error::Store(e.to_string()))?;
+        tx.commit().await.map_err(store)?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
@@ -205,7 +202,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             .bind(id)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 
@@ -218,7 +215,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             .bind(id)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 }

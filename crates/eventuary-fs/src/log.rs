@@ -1,16 +1,16 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use eventuary_core::{Result, SerializedEvent};
-use fs4::fs_std::FileExt;
 
-use crate::error::{corrupt, io_at, store};
+use crate::error::{corrupt, io_at};
 use crate::index::{OffsetIndex, TimeIndex};
 use crate::layout::{
     LOG_SUFFIX, OFFSET_INDEX_SUFFIX, TIME_INDEX_SUFFIX, lock_path, parse_segment_base,
     partition_dir, segment_path,
 };
+use crate::lock::FileLock;
 use crate::segment::Segment;
 
 pub use crate::record::Record;
@@ -43,11 +43,42 @@ impl RetentionPolicy {
     }
 }
 
+pub use crate::lock::DEFAULT_LOCK_WAIT;
+
+/// How long a writer holds a partition's lock, which decides how many processes can append
+/// to one partition.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum WriterAccess {
+    #[default]
+    Shared,
+    Exclusive,
+}
+
+impl WriterAccess {
+    /// Waiting out a `Shared` holder succeeds; an `Exclusive` one holds until it exits.
+    pub fn default_lock_wait(self) -> Duration {
+        match self {
+            Self::Shared => DEFAULT_LOCK_WAIT,
+            Self::Exclusive => Duration::ZERO,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogConfig {
     pub segment: SegmentConfig,
     pub sync: SyncPolicy,
     pub retention: RetentionPolicy,
+    pub access: WriterAccess,
+    /// `None` takes [`WriterAccess::default_lock_wait`].
+    pub lock_wait: Option<Duration>,
+}
+
+impl LogConfig {
+    fn lock_wait(&self) -> Duration {
+        self.lock_wait
+            .unwrap_or_else(|| self.access.default_lock_wait())
+    }
 }
 
 pub struct PartitionLog {
@@ -55,7 +86,7 @@ pub struct PartitionLog {
     segments: Vec<Segment>,
     config: LogConfig,
     bytes_since_sync: u64,
-    lock: Option<File>,
+    _lock: Option<FileLock>,
 }
 
 impl PartitionLog {
@@ -77,26 +108,11 @@ impl PartitionLog {
         fs::create_dir_all(&dir).map_err(|e| io_at("create partition dir", &dir, e))?;
 
         let lock = if writable {
-            let path = lock_path(&dir);
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-                .map_err(|e| io_at("open partition lock", &path, e))?;
-            file.try_lock_exclusive()
-                .map_err(|e| store(format!("lock partition {partition_id}"), e))
-                .and_then(|acquired| {
-                    if acquired {
-                        Ok(())
-                    } else {
-                        Err(store(
-                            format!("lock partition {partition_id}"),
-                            "already held by another writer",
-                        ))
-                    }
-                })?;
-            Some(file)
+            Some(FileLock::acquire(
+                &lock_path(&dir),
+                &format!("partition {partition_id}"),
+                config.lock_wait(),
+            )?)
         } else {
             None
         };
@@ -121,8 +137,12 @@ impl PartitionLog {
             segments,
             config,
             bytes_since_sync: 0,
-            lock,
+            _lock: lock,
         })
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     pub fn start_offset(&self) -> u64 {
@@ -163,7 +183,9 @@ impl PartitionLog {
         for event in events {
             offsets.push(self.append(event)?);
         }
-        self.sync()?;
+        if self.config.sync != SyncPolicy::Never {
+            self.sync()?;
+        }
         Ok(offsets)
     }
 
@@ -205,21 +227,27 @@ impl PartitionLog {
         if bases.is_empty() {
             return Ok(());
         }
-        let last = bases.len() - 1;
-        for (i, base) in bases.iter().enumerate() {
-            let known = self.segments.get(i).map(Segment::base_offset) == Some(*base);
-            if known && (i < last || !self.segments[i].has_changed_on_disk()?) {
+        for (i, base) in bases.iter().copied().enumerate() {
+            if self.is_cached(i, base)? {
                 continue;
             }
-            let segment = Segment::open(&self.dir, *base, self.config.segment, false)?;
-            if i < self.segments.len() {
-                self.segments[i] = segment;
-            } else {
-                self.segments.push(segment);
+            let segment = Segment::open(&self.dir, base, self.config.segment, false)?;
+            match self.segments.get_mut(i) {
+                Some(slot) => *slot = segment,
+                None => self.segments.push(segment),
             }
         }
         self.segments.truncate(bases.len());
         Ok(())
+    }
+
+    /// A segment that is no longer the active one still has to be checked: it may have grown
+    /// after the last refresh and before it rolled.
+    fn is_cached(&self, i: usize, base: u64) -> Result<bool> {
+        let Some(segment) = self.segments.get(i) else {
+            return Ok(false);
+        };
+        Ok(segment.base_offset() == base && !segment.has_changed_on_disk()?)
     }
 
     pub fn sync(&mut self) -> Result<()> {
@@ -301,14 +329,6 @@ impl PartitionLog {
             Ok(i) => i,
             Err(0) => 0,
             Err(i) => i - 1,
-        }
-    }
-}
-
-impl Drop for PartitionLog {
-    fn drop(&mut self) {
-        if let Some(lock) = self.lock.take() {
-            let _ = FileExt::unlock(&lock);
         }
     }
 }

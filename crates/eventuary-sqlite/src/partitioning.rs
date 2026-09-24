@@ -10,6 +10,7 @@ use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver, Partition
 use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
 use crate::relation::SqliteRelationName;
 
@@ -77,7 +78,7 @@ impl SqlitePartitionBackfill {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqlitePartitionBackfillConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         SqliteEventLogSchema::prepare(
             &guard,
             &SqliteEventLogSchemaConfig {
@@ -121,19 +122,17 @@ impl SqlitePartitionBackfill {
 
         tokio::task::spawn_blocking(move || {
             let mut report = BackfillReport::default();
-            let mut guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let mut guard = conn.lock().map_err(poisoned)?;
 
             loop {
                 let rows = {
-                    let mut stmt = guard
-                        .prepare(&fetch_sql)
-                        .map_err(|e| Error::Store(e.to_string()))?;
+                    let mut stmt = guard.prepare(&fetch_sql).map_err(store)?;
                     let mapped = stmt
                         .query_map([Value::Integer(batch_size as i64)], decode_row)
-                        .map_err(|e| Error::Store(e.to_string()))?;
+                        .map_err(store)?;
                     let mut out: Vec<(i64, SerializedEvent)> = Vec::new();
                     for row in mapped {
-                        out.push(row.map_err(|e| Error::Store(e.to_string()))?);
+                        out.push(row.map_err(store)?);
                     }
                     out
                 };
@@ -142,9 +141,7 @@ impl SqlitePartitionBackfill {
                     break;
                 }
 
-                let tx = guard
-                    .transaction()
-                    .map_err(|e| Error::Store(e.to_string()))?;
+                let tx = guard.transaction().map_err(store)?;
 
                 for (sequence, serialized) in &rows {
                     let event = serialized.to_event()?;
@@ -165,18 +162,18 @@ impl SqlitePartitionBackfill {
                                 *sequence,
                             ],
                         )
-                        .map_err(|e| Error::Store(e.to_string()))?;
+                        .map_err(store)?;
                     report.rows_updated += updated as u64;
                 }
 
-                tx.commit().map_err(|e| Error::Store(e.to_string()))?;
+                tx.commit().map_err(store)?;
                 report.batches += 1;
             }
 
             Ok(report)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 

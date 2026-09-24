@@ -52,6 +52,14 @@ fn scope() -> CheckpointScope {
     )
 }
 
+fn global_key() -> CheckpointKey {
+    CheckpointKey::new(scope(), CursorId::global())
+}
+
+fn cursor(offset: u64) -> FsCursor {
+    FsCursor::new(partition(0, 1), offset)
+}
+
 fn partition(id: u32, count: u32) -> Partition {
     Partition::new(id, NonZeroU32::new(count).unwrap()).unwrap()
 }
@@ -286,4 +294,96 @@ async fn checkpoint_resume_is_independent_per_partition() {
     all.sort();
     all.dedup();
     assert_eq!(all.len(), 32);
+}
+
+#[tokio::test]
+async fn concurrent_commits_to_one_key_never_publish_a_torn_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = CheckpointKey::new(
+        CheckpointScope::new(
+            ConsumerGroupId::new("group").unwrap(),
+            StreamId::new("stream").unwrap(),
+        ),
+        CursorId::global(),
+    );
+
+    let mut committers = Vec::new();
+    for n in 0..8u64 {
+        let store: FsCheckpointStore<FsCursor> =
+            FsCheckpointStore::open(dir.path(), FsCheckpointStoreConfig::default()).unwrap();
+        let key = key.clone();
+        committers.push(tokio::spawn(async move {
+            for round in 0..25 {
+                let offset = n * 100 + round;
+                store
+                    .commit(
+                        &key,
+                        FsCursor::new(
+                            Partition::new(0, NonZeroU32::new(1).unwrap()).unwrap(),
+                            offset,
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }));
+    }
+    for task in committers {
+        task.await.unwrap();
+    }
+
+    let store: FsCheckpointStore<FsCursor> =
+        FsCheckpointStore::open(dir.path(), FsCheckpointStoreConfig::default()).unwrap();
+    let loaded = store
+        .load(&key)
+        .await
+        .expect("a committed checkpoint must always decode");
+    assert!(
+        loaded.is_some(),
+        "the last rename must publish a whole cursor"
+    );
+}
+
+#[tokio::test]
+async fn a_checkpoint_only_moves_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: FsCheckpointStore<FsCursor> =
+        FsCheckpointStore::open(dir.path(), FsCheckpointStoreConfig::default()).unwrap();
+    let key = global_key();
+
+    store.commit(&key, cursor(100)).await.unwrap();
+    store.commit(&key, cursor(50)).await.unwrap();
+
+    assert_eq!(
+        store.load(&key).await.unwrap().unwrap().offset(),
+        100,
+        "a stale commit must not rewind the checkpoint, as in the SQL stores"
+    );
+
+    store.commit(&key, cursor(200)).await.unwrap();
+    assert_eq!(store.load(&key).await.unwrap().unwrap().offset(), 200);
+}
+
+#[tokio::test]
+async fn concurrent_commits_settle_on_the_highest_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = global_key();
+
+    let mut committers = Vec::new();
+    for offset in [70u64, 10, 90, 30, 50] {
+        let root = dir.path().to_path_buf();
+        let key = key.clone();
+        committers.push(tokio::spawn(async move {
+            let store: FsCheckpointStore<FsCursor> =
+                FsCheckpointStore::open(&root, FsCheckpointStoreConfig::default()).unwrap();
+            store.commit(&key, cursor(offset)).await.unwrap();
+        }));
+    }
+    for task in committers {
+        task.await.unwrap();
+    }
+
+    let store: FsCheckpointStore<FsCursor> =
+        FsCheckpointStore::open(dir.path(), FsCheckpointStoreConfig::default()).unwrap();
+    assert_eq!(store.load(&key).await.unwrap().unwrap().offset(), 90);
 }

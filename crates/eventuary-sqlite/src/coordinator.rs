@@ -9,6 +9,7 @@ use eventuary_core::io::reader::{
 use eventuary_core::{Error, Partition, Result};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::reader::SqliteCursor;
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
@@ -100,7 +101,7 @@ impl SqlitePartitionCoordinator {
         conn: &SqliteConn,
         config: &SqlitePartitionCoordinatorConfig,
     ) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         crate::schema::apply_schema(
             &guard,
             PARTITION_COORDINATOR_MIGRATIONS,
@@ -155,7 +156,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = scope.stream_id.as_str().to_owned();
         let owner = owner_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {consumers} (consumer_group_id, stream_id, owner_id, lease_until) \
                  VALUES (?1, ?2, ?3, ?4) \
@@ -164,11 +165,11 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             );
             guard
                 .execute(&sql, rusqlite::params![group, stream, owner, lease_until])
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn live_consumers<'a>(&'a self, scope: &'a CheckpointScope) -> Result<usize> {
@@ -178,7 +179,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = scope.stream_id.as_str().to_owned();
         let now = Utc::now().to_rfc3339();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "SELECT COUNT(*) FROM {consumers} \
                  WHERE consumer_group_id = ?1 \
@@ -187,11 +188,11 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             );
             let count: i64 = guard
                 .query_row(&sql, rusqlite::params![group, stream, now], |r| r.get(0))
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(count as usize)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn release_consumer<'a>(
@@ -205,18 +206,18 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let stream = scope.stream_id.as_str().to_owned();
         let owner = owner_id.as_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "DELETE FROM {consumers} \
                  WHERE consumer_group_id = ?1 AND stream_id = ?2 AND owner_id = ?3"
             );
             guard
                 .execute(&sql, rusqlite::params![group, stream, owner])
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn claim<'a>(
@@ -238,7 +239,8 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let scope = scope.clone();
         let owner_id = owner_id.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock()
+            .map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {partitions} \
                    (consumer_group_id, stream_id, partition_id, partition_count, owner_id, lease_until, generation, checkpoint_sequence) \
@@ -281,7 +283,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             match row {
                 None => {
                     let check_sql = format!(
@@ -299,7 +301,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                             rusqlite::Error::QueryReturnedNoRows => Ok(None),
                             other => Err(other),
                         })
-                        .map_err(|e| Error::Store(e.to_string()))?
+                        .map_err(store)?
                         .flatten();
                     if let Some(stored) = stored
                         && stored != partition_count_i64
@@ -330,7 +332,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             }
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn renew<'a>(
@@ -348,7 +350,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "UPDATE {partitions} \
                  SET lease_until = ?5 \
@@ -372,7 +374,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         partition_count_i64
                     ],
                 )
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             if affected == 0 {
                 check_partition_count_mismatch(
                     &guard,
@@ -389,7 +391,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn release<'a>(&'a self, lease: &'a PartitionLease<SqliteCursor>) -> Result<()> {
@@ -402,7 +404,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let partition_count_i64 = lease.partition.count() as i64;
         let generation = lease.generation.get();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "UPDATE {partitions} \
                  SET owner_id = NULL, \
@@ -427,7 +429,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         partition_count_i64
                     ],
                 )
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             if affected == 0 {
                 check_partition_count_mismatch(
                     &guard,
@@ -444,7 +446,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn checkpoint<'a>(
@@ -462,7 +464,8 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
         let generation = lease.generation.get();
         let sequence = cursor.sequence;
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock()
+            .map_err(poisoned)?;
             let sql = format!(
                 "UPDATE {partitions} \
                  SET checkpoint_sequence = ?6 \
@@ -487,7 +490,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         partition_count_i64
                     ],
                 )
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             if affected == 0 {
                 let check_sql = format!(
                     "SELECT owner_id, generation, partition_count FROM {partitions} \
@@ -510,7 +513,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
                         rusqlite::Error::QueryReturnedNoRows => Ok(None),
                         other => Err(other),
                     })
-                    .map_err(|e| Error::Store(e.to_string()))?;
+                    .map_err(store)?;
                 match check_row {
                     Some((current_owner, current_generation, current_count)) => {
                         if let Some(stored) = current_count
@@ -538,7 +541,7 @@ impl PartitionCoordinator<SqliteCursor> for SqlitePartitionCoordinator {
             }
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 
@@ -563,7 +566,7 @@ fn check_partition_count_mismatch(
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(other),
         })
-        .map_err(|e| Error::Store(e.to_string()))?
+        .map_err(store)?
         .flatten();
     if let Some(stored) = stored
         && stored != requested_count

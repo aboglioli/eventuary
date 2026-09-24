@@ -3,7 +3,7 @@ use std::io::Write;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use eventuary_core::{Event, Payload, SerializedEvent};
+use eventuary_core::{Error, Event, Payload, SerializedEvent};
 use eventuary_fs::layout::{LOG_SUFFIX, partition_dir, segment_path};
 use eventuary_fs::log::SegmentConfig;
 use eventuary_fs::log::{LogConfig, PartitionLog, RetentionPolicy, SyncPolicy};
@@ -185,11 +185,15 @@ fn reopen_recovers_after_torn_trailing_write() {
 #[test]
 fn second_writer_on_same_partition_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let _first = PartitionLog::open_writable(dir.path(), 0, LogConfig::default()).unwrap();
+    let impatient = LogConfig {
+        lock_wait: Some(Duration::ZERO),
+        ..LogConfig::default()
+    };
+    let _first = PartitionLog::open_writable(dir.path(), 0, impatient).unwrap();
 
-    let second = PartitionLog::open_writable(dir.path(), 0, LogConfig::default());
+    let second = PartitionLog::open_writable(dir.path(), 0, impatient);
 
-    assert!(second.is_err());
+    assert!(matches!(second, Err(Error::Contended(_))));
 }
 
 #[test]
@@ -255,6 +259,7 @@ fn retention_by_size_drops_oldest_segments_and_keeps_the_active_one() {
             max_bytes: Some(800),
             max_age: None,
         },
+        ..LogConfig::default()
     };
     let mut log = PartitionLog::open_writable(dir.path(), 0, config).unwrap();
     for i in 0..80 {
@@ -366,4 +371,52 @@ fn the_default_sync_policy_fsyncs_periodically() {
         SyncPolicy::EveryBytes(eventuary_fs::log::DEFAULT_SYNC_INTERVAL_BYTES)
     );
     assert_ne!(LogConfig::default().sync, SyncPolicy::Never);
+}
+
+#[test]
+fn refresh_picks_up_appends_made_to_a_segment_before_it_rolled() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = small_segments(512);
+
+    let mut reader = PartitionLog::open_readonly(dir.path(), 0, config).unwrap();
+    let mut writer = PartitionLog::open_writable(dir.path(), 0, config).unwrap();
+
+    writer.append(serialized("first", "t")).unwrap();
+    reader.refresh().unwrap();
+    assert_eq!(
+        reader.read(0, 10).unwrap().len(),
+        1,
+        "the reader caches segment 0 here"
+    );
+
+    writer.append(serialized("second", "t")).unwrap();
+    let mut rolled = false;
+    for i in 0..10 {
+        writer
+            .append(serialized(&format!("filler-{i}"), "t"))
+            .unwrap();
+        if writer.segment_count() > 1 {
+            rolled = true;
+            break;
+        }
+    }
+    assert!(
+        rolled,
+        "the segment cap must roll for this test to mean anything"
+    );
+
+    reader.refresh().unwrap();
+    let offsets: Vec<u64> = reader
+        .read(1, 100)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.offset)
+        .collect();
+
+    let want: Vec<u64> = (1..writer.next_offset()).collect();
+    assert_eq!(
+        offsets, want,
+        "every offset after the first must be readable, including those written to \
+         segment 0 after the reader last refreshed it"
+    );
 }

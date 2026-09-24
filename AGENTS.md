@@ -39,6 +39,9 @@ feature flag. Typical consumers add a single line to their `Cargo.toml`:
 eventuary = { version = "0.3.0-rc.3", features = ["postgres"] }
 ```
 
+The workspace sets `rust-version = "1.89"`; `eventuary-fs` locks partitions with
+`std::fs::File::lock`, stabilised in that release.
+
 …and import `eventuary::Event`, `eventuary::postgres::reader::PgReader`, etc.
 without ever depending on the sub-crates directly.
 
@@ -155,7 +158,7 @@ crates/
 |-------|-----------|---------------|
 | `eventuary-core` | stdlib, serde, uuid, chrono, futures, tokio, tokio-util (`rt` + `time`), either, base64, bytes | any other eventuary crate |
 | `eventuary-conformance` | `eventuary-core` + tokio + tracing + uuid | any backend crate |
-| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka / fs4) | any other backend crate |
+| `eventuary-<backend>` | `eventuary-core` + its native driver (rusqlite / sqlx / aws-sdk-sqs / aws-sdk-sns / rdkafka; `eventuary-fs` needs none) | any other backend crate |
 | `eventuary` (umbrella) | `eventuary-core` + every backend crate (optional, feature-gated) | nothing else; the umbrella owns no code beyond re-exports |
 
 Key invariants:
@@ -579,7 +582,7 @@ possible: route failed messages with `OutcomeRouterReader`, map the event with
 |---|---|---|---|---|
 | `eventuary-postgres` | `PgCursor` | ✅ `PgCheckpointStore<C>` (JSON cursor column) | ✅ `PgPartitionCoordinator` (`event_stream_consumers` + `event_stream_partitions`) | composes with `PartitionedReader` + `CheckpointReader`; `PgCoordinatedReader` for multi-instance ownership |
 | `eventuary-sqlite` | `SqliteCursor` | ✅ `SqliteCheckpointStore<C>` (JSON cursor column) | ✅ `SqlitePartitionCoordinator` | composes with `PartitionedReader` + `CheckpointReader`; `SqliteCoordinatedReader` for multi-instance ownership |
-| `eventuary-fs` | `FsCursor` | ✅ `FsCheckpointStore<C>` (one JSON file per cursor id) | ✅ `FsPartitionCoordinator` (`coordinator/<group>/<stream>/{consumers,partitions}`) | dense per-partition offsets; `FsCoordinatedReader` for multi-instance ownership; one producer process per log |
+| `eventuary-fs` | `FsCursor` | ✅ `FsCheckpointStore<C>` (one JSON file per cursor id) | ✅ `FsPartitionCoordinator` (`coordinator/<group>/<stream>/{consumers,partitions}`) | dense per-partition offsets; `FsCoordinatedReader` for multi-instance ownership; many producer processes per partition (`WriterAccess::Shared`) |
 | `eventuary-memory` | `NoCursor` | — | ✅ `MemoryPartitionCoordinator<C>` (testing) | mpsc source; no replay/checkpoint semantics |
 | `eventuary-aws` (sqs) | `NoCursor` | — | — | queue visibility/delete is the native progress model |
 | `eventuary-aws` (sns) | — | — | — | publish-only; SNS has no receive API, so no reader |
@@ -1360,6 +1363,80 @@ Worth knowing when changing the codebase:
   metadata key to a typed field later is a cheaper migration than deprecating a
   field nobody populated consistently. CloudEvents keeps correlation and
   causation out of its core attributes for the same reason.
+- **An fs partition's lock belongs to the write, not the writer.** `WriterAccess`
+  picks which: `Shared`, the default, takes a partition's `flock` around each write
+  and releases it, so any number of processes append to one partition; `Exclusive`
+  holds it until the writer drops, which is faster for a single long-lived writer.
+  Holding for the writer's lifetime cannot support an unknown number of short-lived
+  producers — the case eventuary-fs is most often reached for — and only moves the
+  failure later: a writer that claims partitions as its data happens to need them
+  fails midway through a run rather than at startup. `Shared` re-reads the tail on
+  every acquisition, which `Segment::open` already did via the offset index, so the
+  revalidation costs one index read and a scan bounded by `index_interval_bytes`
+  rather than a full segment.
+- **A high-water mark is raised in one place, not stored in three.** `WatermarkAcker`
+  already had to know whether an ack advanced the mark, to update its cache; it now skips
+  the store write when it does not. Pushing the comparison into each `WatermarkStore`
+  would have been the same rule written three times, each paying a read and a lock for
+  something the caller already knew. The cache is raised only after the store accepts the
+  write, so a failed save cannot leave the reader dropping the redelivery of an event it
+  never recorded.
+- **A checkpoint only moves forward, in every backend.** Postgres and SQLite enforce it
+  in the upsert (`WHERE cursor_order < EXCLUDED.cursor_order`); `FsCheckpointStore`
+  compares `Cursor::order_key` under the key's `FileLock` before writing. A store that
+  accepts a lower cursor rewinds durable progress on a late commit, which replays events
+  the consumer already handled — the same invariant needs the same answer whichever
+  backend holds it.
+- **A sealed segment is not a finished segment.** `PartitionLog::refresh` re-reads any
+  segment whose file has changed, including ones that are no longer active. Skipping
+  non-active segments looks safe — a rolled segment never grows again — but the reader
+  may have cached one *while* it was growing, and its stale length then hid every event
+  appended between the last refresh and the roll. The reader also checks that a batch
+  runs contiguously from its cursor: offsets are dense per partition, so a gap is either
+  a stale view (refresh) or a lost event (an error). A log that silently skips an offset
+  is worse than one that stops, which is the same reason a poison record ends a
+  partition's stream rather than being passed over.
+- **File locking is `std::fs`, not a crate.** `File::lock`, `try_lock` and `unlock`
+  have been stable since Rust 1.89 and are `flock(2)` on Unix and `LockFileEx` on
+  Windows — the same syscalls `fs4` wrapped, and `std::fs::TryLockError`'s
+  `WouldBlock`/`Error` split is the contention/failure distinction we need. That
+  left `eventuary-fs` with a dependency it used for nothing else, so the crate now
+  has no dependency beyond `eventuary-core` and the workspace declares
+  `rust-version = "1.89"` to make the requirement explicit rather than accidental.
+- **Every lock acquisition has a deadline, which is what rules out deadlock.**
+  `FileLock::acquire` polls `try_lock` until its deadline and then reports
+  `Error::Contended`; nothing ever blocks on a lock indefinitely. One type serves
+  both places the crate locks — the writer's partition and the coordinator's
+  partition record — so neither can grow an unbounded wait on its own.
+  Two further rules keep it that way: a `Shared` writer holds one partition at a
+  time, and `FsWriter::group` orders a batch by partition id so writers that do
+  accumulate locks take them in the same order. The wait's default follows the mode
+  (`WriterAccess::default_lock_wait`) because waiting out a `Shared` holder succeeds
+  in microseconds while waiting out an `Exclusive` one is futile.
+- **Contention is `Error::Contended` in every backend, not `Error::Store`.** A
+  caller needs to tell "busy, retry" from "the disk failed", and matching on a
+  message string is not an API. The variant is core, and the classification is the
+  one thing each backend must do for itself because only it knows its driver's
+  vocabulary: `eventuary-fs` reports it when `lock_wait` expires on a partition
+  `flock`, `eventuary-sqlite` when rusqlite returns `DatabaseBusy` or
+  `DatabaseLocked`, `eventuary-postgres` on SQLSTATE `40001`, `40P01` or `55P03`.
+  The shape is the same across all three — a bounded wait (`lock_wait`, SQLite's
+  `busy_timeout`, Postgres' `lock_timeout`) and then `Error::Contended` — so retry
+  logic written against it is backend-independent.
+- **Each backend owns one error module, and every driver error goes through it.**
+  `eventuary-fs` had `error.rs` from the start; `eventuary-sqlite` and
+  `eventuary-postgres` repeated `Error::Store(e.to_string())` inline 121 and 51
+  times, which is why a busy database looked exactly like a failed one and why
+  fs's `join` helper existed 27 more times in sqlite under another name. A driver
+  error now converts in exactly one place per backend, which is what makes adding
+  a classification like `Contended` a one-function change rather than a sweep.
+  `kafka`, `aws` and `memory` still map inline; they have 12, 3 and 2 sites and no
+  contention condition worth classifying yet, so they get a module when they do.
+- **`atomic::write` names its temporary uniquely.** Deriving the name from the
+  target alone gave two processes writing one file the same temporary path, where
+  `File::create` truncates what the other is still writing and the rename then
+  publishes a torn file. This is reachable for every fs store the moment more than
+  one process shares a log, which `WriterAccess::Shared` makes the normal case.
 - **`eventuary-sqs` is retired, not yanked.** Published versions keep resolving
   for existing dependents; the crate simply stops receiving new versions.
   Yanking is reserved for broken or insecure releases, not renames.

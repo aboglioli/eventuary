@@ -10,6 +10,7 @@ use eventuary_core::partition::{
 };
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
+use crate::error::store;
 use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
@@ -164,7 +165,7 @@ impl Writer for PgWriter {
             .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
 
         Ok(())
     }
@@ -173,11 +174,7 @@ impl Writer for PgWriter {
         if events.is_empty() {
             return Ok(());
         }
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+        let mut tx = self.pool.begin().await.map_err(store)?;
         for event in events {
             let row = EventRow::from_event(event)?;
             let pd = self.partition_data(event)?;
@@ -199,9 +196,9 @@ impl Writer for PgWriter {
                 .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
         }
-        tx.commit().await.map_err(|e| Error::Store(e.to_string()))?;
+        tx.commit().await.map_err(store)?;
         Ok(())
     }
 }

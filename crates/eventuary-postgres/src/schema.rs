@@ -4,6 +4,7 @@ use sqlx::PgPool;
 
 use eventuary_core::{Error, Result};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +86,7 @@ async fn create_schemas(pool: &PgPool, replacements: &[RelationReplacement<'_>])
         sqlx::raw_sql(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
             .execute(pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
     }
     Ok(())
 }

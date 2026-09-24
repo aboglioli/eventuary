@@ -9,9 +9,10 @@
 use std::sync::Arc;
 
 use eventuary_core::io::reader::DedupeStore;
-use eventuary_core::{Error, Event, Result};
+use eventuary_core::{Event, Result};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -60,7 +61,7 @@ impl SqliteDedupeStore {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteDedupeStoreConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         crate::schema::apply_schema(
             &guard,
             DEDUPE_STORE_MIGRATIONS,
@@ -88,7 +89,7 @@ impl DedupeStore for SqliteDedupeStore {
         let relation = Arc::clone(&self.relation);
         let event_id = event.id().to_string();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!("SELECT 1 FROM {relation} WHERE event_id = ?1");
             let found = guard
                 .query_row(&sql, rusqlite::params![event_id], |_| Ok(()))
@@ -97,11 +98,11 @@ impl DedupeStore for SqliteDedupeStore {
                     rusqlite::Error::QueryReturnedNoRows => Ok(false),
                     other => Err(other),
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(found)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn mark_processed(&self, event: &Event) -> Result<()> {
@@ -109,18 +110,18 @@ impl DedupeStore for SqliteDedupeStore {
         let relation = Arc::clone(&self.relation);
         let event_id = event.id().to_string();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {relation} (event_id) VALUES (?1) \
                  ON CONFLICT (event_id) DO NOTHING"
             );
             guard
                 .execute(&sql, rusqlite::params![event_id])
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn mark_if_new(&self, event: &Event) -> Result<bool> {
@@ -128,7 +129,7 @@ impl DedupeStore for SqliteDedupeStore {
         let relation = Arc::clone(&self.relation);
         let event_id = event.id().to_string();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {relation} (event_id) VALUES (?1) \
                  ON CONFLICT (event_id) DO NOTHING \
@@ -141,11 +142,11 @@ impl DedupeStore for SqliteDedupeStore {
                     rusqlite::Error::QueryReturnedNoRows => Ok(false),
                     other => Err(other),
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(inserted)
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 

@@ -4,6 +4,105 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `eventuary-fs` supports **many producer processes on one log**, including on the
+  same partition. `WriterAccess::Shared`, the new default, takes a partition's
+  exclusive lock around each write and releases it again, re-reading the partition
+  tail while holding it so two writers cannot assign the same offset.
+  `WriterAccess::Exclusive` keeps the previous behaviour — the lock is taken on
+  first write and held until the writer is dropped, which is faster for a single
+  long-lived writer.
+- `Error::Contended` reports a busy resource distinctly from a backend failure, so
+  a caller can retry contention without matching on message text, in the same way
+  whichever backend raised it. `eventuary-fs` returns it when a partition lock
+  cannot be taken within `lock_wait`, `eventuary-sqlite` when SQLite reports
+  `DatabaseBusy` or `DatabaseLocked`, and `eventuary-postgres` on SQLSTATE `40001`
+  (serialization failure), `40P01` (deadlock detected) or `55P03` (lock not
+  available). Previously every one of these was an opaque `Error::Store`.
+
+### Fixed
+
+- A reader tailing an `eventuary-fs` log no longer misses events. `PartitionLog::refresh`
+  skipped any segment that was not the last one without re-checking it, so a segment the
+  reader had cached while it was still being written kept a stale length, and
+  `Segment::read_from` bounds reads by that length. Every event appended to a segment
+  after the reader's last refresh but before that segment rolled was invisible for the
+  life of the reader. A sealed segment is now re-read when its file has changed, like any
+  other. The bug needed only one writer — a reader that polled between an append and a
+  roll lost the events in between — but concurrent writers made it likely, reproducing in
+  about one run in four.
+- The `eventuary-fs` reader reports a missing offset instead of skipping it. Offsets are
+  dense within a partition, so a batch that is not contiguous from the cursor means the
+  reader's view is stale — answered by a refresh — or, if the gap survives one, that the
+  log lost an event it once held, which is now an error naming the partition and offset.
+  This is what turned the `refresh` defect above into silent data loss rather than a
+  visible failure.
+- `WatermarkReader` no longer stores a watermark that would lower it. The acker wrote
+  every acked event's timestamp while keeping only the highest in memory, so the two
+  disagreed as soon as acks arrived out of order — which they do whenever more than one
+  event is in flight — and the next run loaded the lower value and replayed the events
+  between them. The check lives in the acker, which already computed it for its cache, so
+  every `WatermarkStore` gets it without a per-backend read-modify-write, and a redundant
+  write now becomes no write at all.
+- `FsCheckpointStore::commit` only ever moves a checkpoint forward, and does its read
+  and write under the key's lock. It overwrote blindly, so a late commit from a slower
+  process silently rewound durable progress and the events in between were replayed.
+  The SQL stores already refused a regression through their upsert
+  (`WHERE cursor_order < EXCLUDED.cursor_order`); the filesystem store now matches them.
+- `atomic::write` gives each write its own temporary file. The name was derived from
+  the target alone, so two processes writing the same file shared one temporary path
+  where `File::create` truncated what the other was still writing, and the rename
+  could then publish a torn file. This affected every `eventuary-fs` store that
+  publishes a whole file — checkpoints, watermarks, buffers and log metadata — and
+  became reachable as soon as more than one process shared a log. A failed rename
+  now also cleans up its temporary instead of leaving it behind.
+- `PartitionLog::append_all` no longer flushes when `SyncPolicy::Never` is
+  configured. It flushed unconditionally at the end of a batch, which is the one
+  thing that policy asks it not to do.
+- `FsPartitionCoordinator` waits for a held partition record with a deadline instead
+  of blocking indefinitely, and reports `Error::Contended` when it expires. Both
+  places `eventuary-fs` locks now share one `FileLock`, so neither can acquire
+  without a bound. `FsPartitionCoordinatorConfig` gains `lock_wait`. Callers are
+  unaffected: `CoordinatedReader` already treats a failed claim or renew that is not
+  `OwnershipLost` as transient and retries on the next tick.
+- An `FsWriter` waiting for one partition's lock no longer stalls writes to every
+  other partition in the same process. The acquisition ran while holding the map of
+  open partitions, so a wait of up to `lock_wait` blocked unrelated partitions.
+- `FsWriter::next_offset` no longer takes a partition's lock. Observing a partition
+  claimed it for the writer's lifetime, so asking where a log ended could deny it
+  to the process that was about to write.
+- `FsWriter::write_all` checks ownership for the whole batch before taking any lock,
+  so a batch naming an unowned partition fails having written nothing.
+
+### Changed
+
+- `eventuary-fs` drops its `fs4` dependency and uses `std::fs` file locking, stable
+  since Rust 1.89 and the same `flock(2)` / `LockFileEx` underneath. The crate now
+  depends on nothing but `eventuary-core`. The workspace declares
+  `rust-version = "1.89"`.
+
+- `eventuary-sqlite` and `eventuary-postgres` convert driver errors through a single
+  per-crate error module, as `eventuary-fs` already did, instead of mapping them
+  inline at 121 and 51 call sites. This is what lets a classification such as
+  `Error::Contended` be added in one place per backend rather than swept across
+  every query.
+
+### Breaking changes
+
+- `LogConfig` gains `access: WriterAccess` and its `lock_wait` becomes
+  `Option<Duration>`, where `None` takes the mode's default. Construct it with
+  `..LogConfig::default()` rather than exhaustively.
+- `eventuary-fs` writers no longer take any lock when opened. A partition is claimed
+  by the first write that needs it, so two writers over disjoint partitions coexist,
+  and under the default `WriterAccess::Shared` two writers over the *same* partition
+  also coexist. Code that relied on `FsWriter::open` failing to detect a second
+  producer should select `WriterAccess::Exclusive` and handle `Error::Contended` on
+  write.
+- `Error` gains a variant. Exhaustive matches over it need a new arm.
+
 ## [0.3.0-rc.3] - 2026-09-21
 
 ### Fixed

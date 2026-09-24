@@ -14,6 +14,7 @@ use sqlx::{PgPool, Row};
 use eventuary_core::io::reader::{BufferEntry, BufferStore};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
 
+use crate::error::store;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -145,7 +146,7 @@ where
             .bind(encode_cursor(cursor)?)
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(PgBufferStoreId(row.get::<i64, _>("id")))
     }
 
@@ -157,7 +158,7 @@ where
         let rows = sqlx::query(&sql)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let id: i64 = row.get("id");
@@ -181,7 +182,7 @@ where
             .bind(id.0)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 

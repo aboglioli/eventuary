@@ -176,8 +176,8 @@ pub struct WatermarkAcker<A: Acker, S: WatermarkStore> {
 
 impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
     async fn ack(&self) -> Result<()> {
-        self.store.save_watermark(&self.key, self.event_ts).await?;
-        {
+        if self.raises_watermark().await {
+            self.store.save_watermark(&self.key, self.event_ts).await?;
             let mut guard = self.cache.lock().await;
             let entry = guard.entry(self.key.to_string()).or_insert(None);
             if entry.is_none_or(|wm| wm < self.event_ts) {
@@ -193,6 +193,18 @@ impl<A: Acker, S: WatermarkStore> Acker for WatermarkAcker<A, S> {
 
     async fn nack_with(&self, context: NackContext) -> Result<()> {
         self.inner.nack_with(context).await
+    }
+}
+
+impl<A: Acker, S: WatermarkStore> WatermarkAcker<A, S> {
+    async fn raises_watermark(&self) -> bool {
+        self.cache
+            .lock()
+            .await
+            .get(self.key.as_ref())
+            .copied()
+            .flatten()
+            .is_none_or(|current| current < self.event_ts)
     }
 }
 
@@ -302,6 +314,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(msg.event().topic().as_str(), "recent");
+    }
+
+    #[tokio::test]
+    async fn an_out_of_order_ack_does_not_lower_the_stored_watermark() {
+        let now = Utc::now();
+        let older = now - TimeDelta::seconds(60);
+        let newer = now - TimeDelta::seconds(30);
+        let store = InMemoryWatermarkStore::default();
+
+        let reader = WatermarkReader::new(
+            VecReader {
+                events: StdMutex::new(Some(vec![ev("older", older), ev("newer", newer)])),
+            },
+            store.clone(),
+            "test",
+        );
+        let mut stream = reader.read(()).await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        second.ack().await.unwrap();
+        first.ack().await.unwrap();
+
+        assert_eq!(
+            store.inner.lock().unwrap().get("test").copied(),
+            Some(newer),
+            "the later ack of an older event must not rewind the mark the next run loads"
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use eventuary_core::{Error, Result};
+use eventuary_core::Result;
+
+use crate::error::store;
 
 pub type SqliteConn = Arc<Mutex<Connection>>;
 
@@ -17,29 +19,29 @@ pub struct SqliteDatabase {
 
 impl SqliteDatabase {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path).map_err(|e| Error::Store(e.to_string()))?;
+        let conn = Connection::open(path).map_err(store)?;
         Self::init(conn, SqliteDatabaseConfig)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(|e| Error::Store(e.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(store)?;
         Self::init(conn, SqliteDatabaseConfig)
     }
 
     pub fn open_with_config(path: impl AsRef<Path>, config: SqliteDatabaseConfig) -> Result<Self> {
-        let conn = Connection::open(path).map_err(|e| Error::Store(e.to_string()))?;
+        let conn = Connection::open(path).map_err(store)?;
         Self::init(conn, config)
     }
 
     pub fn open_in_memory_with_config(config: SqliteDatabaseConfig) -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(|e| Error::Store(e.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(store)?;
         Self::init(conn, config)
     }
 
     fn init(conn: Connection, config: SqliteDatabaseConfig) -> Result<Self> {
         let _: String = conn
             .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

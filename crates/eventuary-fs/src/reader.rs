@@ -20,7 +20,7 @@ use eventuary_core::{
 use tokio::sync::{Mutex, Notify, mpsc};
 
 use crate::coordinator::FsPartitionCoordinator;
-use crate::error::join;
+use crate::error::{corrupt, join};
 use crate::log::{LogConfig, PartitionLog};
 use crate::meta::LogMeta;
 use crate::record::Record;
@@ -415,6 +415,25 @@ fn advance(cursors: &mut [PartitionCursor], partition_id: u32, offset: u64) {
     }
 }
 
+/// Offsets are dense within a partition, so a gap means either a stale view — worth a
+/// refresh — or, if it survives one, an event the log lost.
+fn first_gap(records: &[Record], next: u64) -> Option<u64> {
+    (next..)
+        .zip(records)
+        .find(|(expected, record)| record.offset != *expected)
+        .map(|(expected, _)| expected)
+}
+
+fn missing_offset(cursor: &PartitionCursor, offset: u64) -> Error {
+    corrupt(
+        cursor.log.dir(),
+        format!(
+            "partition {} has no event at offset {offset}",
+            cursor.partition.id()
+        ),
+    )
+}
+
 fn retention_gap(cursor: &PartitionCursor) -> Result<()> {
     let start = cursor.log.start_offset();
     if cursor.next >= start {
@@ -448,10 +467,13 @@ fn fetch_round(
             None => batch_size,
         };
         let mut records = cursor.log.read(cursor.next, take)?;
-        if records.is_empty() {
+        if records.is_empty() || first_gap(&records, cursor.next).is_some() {
             cursor.log.refresh()?;
             retention_gap(cursor)?;
             records = cursor.log.read(cursor.next, take)?;
+            if let Some(missing) = first_gap(&records, cursor.next) {
+                return Err(missing_offset(cursor, missing));
+            }
         }
         if records.is_empty() {
             if cursor.stop.is_some() && cursor.next >= cursor.log.next_offset() {

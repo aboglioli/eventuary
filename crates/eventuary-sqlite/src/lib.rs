@@ -27,6 +27,7 @@ pub mod checkpoint;
 pub mod coordinator;
 pub mod database;
 pub mod dedupe;
+mod error;
 mod event_log;
 pub mod multiplexer;
 pub mod partitioning;

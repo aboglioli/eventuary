@@ -9,6 +9,7 @@ use sqlx::{PgPool, Row};
 use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver, PartitionStrategy};
 use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
 
+use crate::error::store;
 use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
 use crate::relation::PgRelationName;
 
@@ -121,17 +122,13 @@ impl PgPartitionBackfill {
                 .bind(batch_size as i64)
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
 
             if rows.is_empty() {
                 break;
             }
 
-            let mut tx = self
-                .pool
-                .begin()
-                .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+            let mut tx = self.pool.begin().await.map_err(store)?;
 
             for row in &rows {
                 let sequence: i64 = row.get("sequence");
@@ -155,12 +152,12 @@ impl PgPartitionBackfill {
                     .bind(sequence)
                     .execute(&mut *tx)
                     .await
-                    .map_err(|e| Error::Store(e.to_string()))?;
+                    .map_err(store)?;
 
                 report.rows_updated += result.rows_affected();
             }
 
-            tx.commit().await.map_err(|e| Error::Store(e.to_string()))?;
+            tx.commit().await.map_err(store)?;
             report.batches += 1;
         }
 

@@ -24,6 +24,9 @@ features they need. No backend is enabled by default.
 eventuary = { version = "0.3.0-rc.3", features = ["postgres"] }
 ```
 
+Eventuary requires **Rust 1.89** or newer: `eventuary-fs` locks partitions with
+`std::fs::File::lock`, stabilised in that release.
+
 | Feature | Module | Backend crate |
 |---------|--------|---------------|
 | `memory` | `eventuary::memory` | [`eventuary-memory`](crates/eventuary-memory) |
@@ -1126,14 +1129,32 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
 ### fs
 
 - Stores each partition as a directory of size-rolled segments under a log root.
-  No server, no driver, and no C dependency.
+  No server, no driver, no C dependency, and no dependency beyond `eventuary-core`:
+  locking is `std::fs::File::lock` (`flock(2)` on Unix, `LockFileEx` on Windows),
+  which requires Rust 1.89.
 - Segment files are JSON lines carrying a flat `offset` field, so a log stays
   readable with `cat`, `grep` and `jq`.
 - Sparse offset and time indexes let a read seek near its target instead of
   scanning from the start of the segment.
-- `FsWriter` takes an exclusive advisory lock on every partition it opens, so a
-  log has **one producer process**. `FsWriter::open_partitions_subset` splits
-  production across processes by partition.
+- `FsWriter` takes a partition's exclusive advisory lock around **each write** and
+  releases it again, so **any number of processes can append to the same log**, even
+  to the same partition. Every write re-reads the partition tail while holding the
+  lock, so two writers cannot assign the same offset. This is
+  `WriterAccess::Shared`, the default.
+- `WriterAccess::Exclusive` instead takes a partition's lock on first write and holds
+  it until the writer is dropped. One process then owns each partition it touches and
+  a write costs a single `write` syscall, which is faster for one long-lived writer;
+  a second process reaching the same partition gets `Error::Contended`.
+- `LogConfig::lock_wait` bounds how long a writer waits for a held lock. Every
+  acquisition has a deadline, so contention is reported as `Error::Contended` and
+  never becomes a deadlock. `None`, the default, waits
+  `WriterAccess::default_lock_wait` for the mode: waiting out a shared holder works,
+  waiting out an exclusive one does not, so shared waits and exclusive fails fast.
+- Under `WriterAccess::Shared`, `SyncPolicy::EveryBytes` counts within one write,
+  because the writer keeps nothing between writes. Use `write_all` to amortize the
+  flush over a batch, or `SyncPolicy::Always` when no acknowledged event may be lost.
+- `FsWriter::open_partitions_subset` restricts a writer to a subset of partitions,
+  which is how you split production deliberately rather than by contention.
 - `FsCursor` is `{ partition, offset }` and implements `HasPartition`, so
   `PartitionedReader::source_from_cursor` and `FsCoordinatedReader` route by the
   persisted partition rather than re-hashing the key.
@@ -1153,6 +1174,11 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   lines, so the repair is to correct or delete that line.
 - `FsBufferStore` numbers entries from a counter held in the process that opened
   it, so one buffer directory belongs to one process.
+- `FsCheckpointStore` and `FsWatermarkStore` publish each file by renaming a
+  uniquely-named temporary over it, so concurrent writers cannot tear a file. They
+  do not coordinate *which* writer wins, so several processes committing the same
+  key still need `FsPartitionCoordinator` (which fences with leases) rather than a
+  bare checkpoint store.
 - Coordination uses advisory file locks, so it is single-node. Putting the log
   on a shared network filesystem does not make it multi-host.
 - Integration tests need no containers.

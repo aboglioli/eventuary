@@ -13,6 +13,7 @@ use eventuary_core::io::reader::WatermarkStore;
 use eventuary_core::{Error, Result};
 
 use crate::database::SqliteConn;
+use crate::error::{join, poisoned, store};
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
 
@@ -62,7 +63,7 @@ impl SqliteWatermarkStore {
     }
 
     pub fn prepare_schema(conn: &SqliteConn, config: &SqliteWatermarkStoreConfig) -> Result<()> {
-        let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+        let guard = conn.lock().map_err(poisoned)?;
         crate::schema::apply_schema(
             &guard,
             WATERMARK_STORE_MIGRATIONS,
@@ -90,7 +91,7 @@ impl WatermarkStore for SqliteWatermarkStore {
         let relation = Arc::clone(&self.relation);
         let key = key.to_owned();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!("SELECT ts FROM {relation} WHERE key = ?1");
             let ts_str = guard
                 .query_row(&sql, rusqlite::params![key], |r| r.get::<_, String>(0))
@@ -99,7 +100,7 @@ impl WatermarkStore for SqliteWatermarkStore {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             match ts_str {
                 Some(s) => {
                     let ts = DateTime::parse_from_rfc3339(&s)
@@ -111,7 +112,7 @@ impl WatermarkStore for SqliteWatermarkStore {
             }
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 
     async fn save_watermark(&self, key: &str, ts: DateTime<Utc>) -> Result<()> {
@@ -120,18 +121,18 @@ impl WatermarkStore for SqliteWatermarkStore {
         let key = key.to_owned();
         let ts_str = ts.to_rfc3339();
         tokio::task::spawn_blocking(move || {
-            let guard = conn.lock().map_err(|e| Error::Store(e.to_string()))?;
+            let guard = conn.lock().map_err(poisoned)?;
             let sql = format!(
                 "INSERT INTO {relation} (key, ts) VALUES (?1, ?2) \
                  ON CONFLICT (key) DO UPDATE SET ts = excluded.ts, updated_at = CURRENT_TIMESTAMP"
             );
             guard
                 .execute(&sql, rusqlite::params![key, ts_str])
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             Ok(())
         })
         .await
-        .map_err(|e| Error::Store(format!("blocking task panicked: {e}")))?
+        .map_err(join)?
     }
 }
 

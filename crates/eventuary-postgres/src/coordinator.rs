@@ -9,6 +9,7 @@ use eventuary_core::io::reader::{
 };
 use eventuary_core::{Error, Partition, Result};
 
+use crate::error::store;
 use crate::reader::PgCursor;
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
@@ -175,7 +176,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(lease_until)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 
@@ -192,7 +193,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(scope.stream_id.as_str())
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         let count: i64 = row.get(0);
         Ok(count as usize)
     }
@@ -213,7 +214,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(owner_id.as_str())
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         Ok(())
     }
 
@@ -256,7 +257,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(lease_until)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         match row {
             None => {
                 let check_sql = format!(
@@ -270,7 +271,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                     .bind(partition_id_i64)
                     .fetch_optional(&self.pool)
                     .await
-                    .map_err(|e| Error::Store(e.to_string()))?;
+                    .map_err(store)?;
                 if let Some(r) = check_row {
                     let stored: Option<i64> = r.get("partition_count");
                     if let Some(stored) = stored
@@ -336,7 +337,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(partition_count_i64)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         if result.rows_affected() == 0 {
             self.check_partition_count_mismatch(lease).await?;
             return Err(Error::OwnershipLost(format!(
@@ -374,7 +375,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(partition_count_i64)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         if result.rows_affected() == 0 {
             self.check_partition_count_mismatch(lease).await?;
             return Err(Error::OwnershipLost(format!(
@@ -417,7 +418,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
             .bind(partition_count_i64)
             .execute(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         if result.rows_affected() == 0 {
             let check_sql = format!(
                 "SELECT generation, owner_id, partition_count FROM {partitions} \
@@ -430,7 +431,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                 .bind(partition_id_i64)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(|e| Error::Store(e.to_string()))?;
+                .map_err(store)?;
             match check_row {
                 Some(r) => {
                     let current_generation: i64 = r.get("generation");
@@ -485,7 +486,7 @@ impl PgPartitionCoordinator {
             .bind(partition_id_i64)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| Error::Store(e.to_string()))?;
+            .map_err(store)?;
         if let Some(r) = row {
             let stored: Option<i64> = r.get("partition_count");
             if let Some(stored) = stored
