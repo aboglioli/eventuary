@@ -39,6 +39,9 @@ feature flag. Typical consumers add a single line to their `Cargo.toml`:
 eventuary = { version = "0.3.0-rc.3", features = ["postgres"] }
 ```
 
+The workspace sets `rust-version = "1.89"`; `eventuary-fs` locks partitions with
+`std::fs::File::lock`, stabilised in that release.
+
 …and import `eventuary::Event`, `eventuary::postgres::reader::PgReader`, etc.
 without ever depending on the sub-crates directly.
 

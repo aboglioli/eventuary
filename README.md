@@ -24,6 +24,9 @@ features they need. No backend is enabled by default.
 eventuary = { version = "0.3.0-rc.3", features = ["postgres"] }
 ```
 
+Eventuary requires **Rust 1.89** or newer: `eventuary-fs` locks partitions with
+`std::fs::File::lock`, stabilised in that release.
+
 | Feature | Module | Backend crate |
 |---------|--------|---------------|
 | `memory` | `eventuary::memory` | [`eventuary-memory`](crates/eventuary-memory) |
