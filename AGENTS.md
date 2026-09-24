@@ -1371,6 +1371,12 @@ Worth knowing when changing the codebase:
   every acquisition, which `Segment::open` already did via the offset index, so the
   revalidation costs one index read and a scan bounded by `index_interval_bytes`
   rather than a full segment.
+- **A checkpoint only moves forward, in every backend.** Postgres and SQLite enforce it
+  in the upsert (`WHERE cursor_order < EXCLUDED.cursor_order`); `FsCheckpointStore`
+  compares `Cursor::order_key` under the key's `FileLock` before writing. A store that
+  accepts a lower cursor rewinds durable progress on a late commit, which replays events
+  the consumer already handled — the same invariant needs the same answer whichever
+  backend holds it.
 - **A sealed segment is not a finished segment.** `PartitionLog::refresh` re-reads any
   segment whose file has changed, including ones that are no longer active. Skipping
   non-active segments looks safe — a rolled segment never grows again — but the reader

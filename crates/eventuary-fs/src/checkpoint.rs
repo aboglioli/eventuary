@@ -10,8 +10,10 @@ use serde::de::DeserializeOwned;
 use crate::atomic;
 use crate::error::io_at;
 use crate::layout::{checkpoints_dir, decode_component, encode_component};
+use crate::lock::{DEFAULT_LOCK_WAIT, FileLock};
 
 const EXTENSION: &str = "json";
+const LOCK_EXTENSION: &str = "lock";
 
 #[derive(Debug, Clone, Default)]
 pub struct FsCheckpointStoreConfig {
@@ -55,6 +57,13 @@ impl<C> FsCheckpointStore<C> {
     fn key_path(&self, key: &CheckpointKey) -> PathBuf {
         self.scope_dir(&key.scope).join(format!(
             "{}.{EXTENSION}",
+            encode_component(key.cursor_id.as_str())
+        ))
+    }
+
+    fn key_lock_path(&self, key: &CheckpointKey) -> PathBuf {
+        self.scope_dir(&key.scope).join(format!(
+            "{}.{LOCK_EXTENSION}",
             encode_component(key.cursor_id.as_str())
         ))
     }
@@ -106,9 +115,20 @@ where
         .map_err(crate::error::join)?
     }
 
+    /// Only ever moves a checkpoint forward, matching the SQL stores, whose upsert updates
+    /// `WHERE cursor_order < EXCLUDED.cursor_order`. The read and the write happen under the
+    /// key's lock so two processes committing at once cannot interleave into a rewind.
     async fn commit(&self, key: &CheckpointKey, cursor: C) -> Result<()> {
         let path = self.key_path(key);
+        let lock_path = self.key_lock_path(key);
+        let resource = format!("checkpoint {}", key.cursor_id.as_str());
         tokio::task::spawn_blocking(move || {
+            let _lock = FileLock::acquire(&lock_path, &resource, DEFAULT_LOCK_WAIT)?;
+            if let Some(stored) = read_cursor::<C>(&path)?
+                && stored.order_key() >= cursor.order_key()
+            {
+                return Ok(());
+            }
             let bytes = serde_json::to_vec(&cursor)
                 .map_err(|e| Error::Serialization(format!("checkpoint encode: {e}")))?;
             atomic::write(&path, &bytes)

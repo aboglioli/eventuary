@@ -40,6 +40,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   log lost an event it once held, which is now an error naming the partition and offset.
   This is what turned the `refresh` defect above into silent data loss rather than a
   visible failure.
+- `FsCheckpointStore::commit` only ever moves a checkpoint forward, and does its read
+  and write under the key's lock. It overwrote blindly, so a late commit from a slower
+  process silently rewound durable progress and the events in between were replayed.
+  The SQL stores already refused a regression through their upsert
+  (`WHERE cursor_order < EXCLUDED.cursor_order`); the filesystem store now matches them.
 - `atomic::write` gives each write its own temporary file. The name was derived from
   the target alone, so two processes writing the same file shared one temporary path
   where `File::create` truncated what the other was still writing, and the rename
