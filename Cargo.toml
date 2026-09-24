@@ -15,20 +15,20 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.89"
-version = "0.3.0-rc.3"
+version = "0.3.0-rc.4"
 license = "MIT"
 repository = "https://github.com/aboglioli/eventuary"
 
 [workspace.dependencies]
-eventuary = { path = "crates/eventuary", version = "0.3.0-rc.3" }
-eventuary-core = { path = "crates/eventuary-core", version = "0.3.0-rc.3" }
-eventuary-memory = { path = "crates/eventuary-memory", version = "0.3.0-rc.3" }
-eventuary-fs = { path = "crates/eventuary-fs", version = "0.3.0-rc.3" }
-eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.3.0-rc.3" }
-eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.3.0-rc.3" }
-eventuary-aws = { path = "crates/eventuary-aws", version = "0.3.0-rc.3" }
-eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.3.0-rc.3" }
-eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.3.0-rc.3" }
+eventuary = { path = "crates/eventuary", version = "0.3.0-rc.4" }
+eventuary-core = { path = "crates/eventuary-core", version = "0.3.0-rc.4" }
+eventuary-memory = { path = "crates/eventuary-memory", version = "0.3.0-rc.4" }
+eventuary-fs = { path = "crates/eventuary-fs", version = "0.3.0-rc.4" }
+eventuary-sqlite = { path = "crates/eventuary-sqlite", version = "0.3.0-rc.4" }
+eventuary-postgres = { path = "crates/eventuary-postgres", version = "0.3.0-rc.4" }
+eventuary-aws = { path = "crates/eventuary-aws", version = "0.3.0-rc.4" }
+eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.3.0-rc.4" }
+eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.3.0-rc.4" }
 
 aws-config = { version = "1.8", features = ["behavior-version-latest"] }
 aws-sdk-sns = "1.89"
