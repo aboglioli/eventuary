@@ -1204,6 +1204,22 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   stream id, and cursor id.
 - `PgDatabaseConfig` is `{ max_connections: u32 }`. `PgDatabase::connect` only
   opens a pool and does not create Eventuary tables.
+- `PgWriter::write_in` and `PgWriter::write_all_in` write on a connection the
+  caller owns instead of the writer's pool. Pass a `sqlx::Transaction` to persist
+  events atomically with the state change that produced them:
+
+  ```rust,ignore
+  let mut tx = pool.begin().await?;
+  sqlx::query("UPDATE orders SET status = 'placed' WHERE id = $1")
+      .bind(order_id)
+      .execute(&mut *tx)
+      .await?;
+  writer.write_all_in(&mut tx, &events).await?;
+  tx.commit().await?;
+  ```
+
+  Neither opens a transaction of its own; rolling back the caller's transaction
+  discards the events with everything else.
 - Integration tests use `postgres:18-alpine` through `testcontainers`.
 
 ### aws

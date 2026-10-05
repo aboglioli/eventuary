@@ -2,7 +2,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use sqlx::{AssertSqlSafe, PgPool};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool};
 
 use eventuary_core::io::Writer;
 use eventuary_core::partition::{
@@ -118,6 +118,44 @@ impl PgWriter {
         }
     }
 
+    pub async fn write_in(&self, conn: &mut PgConnection, event: &Event) -> Result<()> {
+        self.insert(conn, event).await
+    }
+
+    pub async fn write_all_in(&self, conn: &mut PgConnection, events: &[Event]) -> Result<()> {
+        for event in events {
+            self.insert(conn, event).await?;
+        }
+        Ok(())
+    }
+
+    async fn insert(&self, conn: &mut PgConnection, event: &Event) -> Result<()> {
+        let row = EventRow::from_event(event)?;
+        let pd = self.partition_data(event)?;
+
+        sqlx::query(AssertSqlSafe(Arc::clone(&self.insert_sql)))
+            .bind(&row.id)
+            .bind(&row.organization)
+            .bind(&row.namespace)
+            .bind(&row.topic)
+            .bind(&row.key)
+            .bind(&row.payload)
+            .bind(&row.content_type)
+            .bind(&row.metadata)
+            .bind(&row.timestamp)
+            .bind(row.version)
+            .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
+            .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
+            .bind(pd.partition_id)
+            .bind(pd.partition_count)
+            .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
+            .execute(conn)
+            .await
+            .map_err(store)?;
+
+        Ok(())
+    }
+
     fn partition_data(&self, event: &Event) -> Result<PartitionData> {
         match &self.partitioning {
             PgPartitioningConfig::Off => Ok(PartitionData::default()),
@@ -144,30 +182,8 @@ impl PgWriter {
 
 impl Writer for PgWriter {
     async fn write(&self, event: &Event) -> Result<()> {
-        let row = EventRow::from_event(event)?;
-        let pd = self.partition_data(event)?;
-
-        sqlx::query(AssertSqlSafe(Arc::clone(&self.insert_sql)))
-            .bind(&row.id)
-            .bind(&row.organization)
-            .bind(&row.namespace)
-            .bind(&row.topic)
-            .bind(&row.key)
-            .bind(&row.payload)
-            .bind(&row.content_type)
-            .bind(&row.metadata)
-            .bind(&row.timestamp)
-            .bind(row.version)
-            .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
-            .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
-            .bind(pd.partition_id)
-            .bind(pd.partition_count)
-            .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
-            .execute(&self.pool)
-            .await
-            .map_err(store)?;
-
-        Ok(())
+        let mut conn = self.pool.acquire().await.map_err(store)?;
+        self.insert(&mut conn, event).await
     }
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
@@ -175,29 +191,7 @@ impl Writer for PgWriter {
             return Ok(());
         }
         let mut tx = self.pool.begin().await.map_err(store)?;
-        for event in events {
-            let row = EventRow::from_event(event)?;
-            let pd = self.partition_data(event)?;
-            sqlx::query(AssertSqlSafe(Arc::clone(&self.insert_sql)))
-                .bind(&row.id)
-                .bind(&row.organization)
-                .bind(&row.namespace)
-                .bind(&row.topic)
-                .bind(&row.key)
-                .bind(&row.payload)
-                .bind(&row.content_type)
-                .bind(&row.metadata)
-                .bind(&row.timestamp)
-                .bind(row.version)
-                .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
-                .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
-                .bind(pd.partition_id)
-                .bind(pd.partition_count)
-                .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
-                .execute(&mut *tx)
-                .await
-                .map_err(store)?;
-        }
+        self.write_all_in(&mut tx, events).await?;
         tx.commit().await.map_err(store)?;
         Ok(())
     }
