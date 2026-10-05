@@ -30,23 +30,23 @@ eventuary-aws = { path = "crates/eventuary-aws", version = "0.3.0-rc.4" }
 eventuary-kafka = { path = "crates/eventuary-kafka", version = "0.3.0-rc.4" }
 eventuary-conformance = { path = "crates/eventuary-conformance", version = "0.3.0-rc.4" }
 
-aws-config = { version = "1.8", features = ["behavior-version-latest"] }
-aws-sdk-sns = "1.89"
-aws-sdk-sqs = "1.89"
-base64 = "0.22"
+aws-config = { version = "1.12", features = ["behavior-version-latest"] }
+aws-sdk-sns = "1.116"
+aws-sdk-sqs = "1.114"
+base64 = "0.23"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 either = "1"
 futures = "0.3"
-rdkafka = { version = "0.38", features = ["cmake-build", "tokio"] }
-rusqlite = { version = "0.37", features = ["bundled-full"] }
+rdkafka = { version = "0.39", features = ["cmake-build", "tokio"] }
+rusqlite = { version = "0.39", features = ["bundled-full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "postgres"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 tempfile = "3"
-testcontainers = "0.25"
+testcontainers = "0.28"
 thiserror = "2"
-rand = "0.9"
+rand = "0.10"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "time"] }
 tracing = "0.1"

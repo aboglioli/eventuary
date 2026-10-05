@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -394,7 +394,7 @@ async fn resolve_initial_position(
                 ),
                 None => format!("SELECT COALESCE(MAX(sequence), 0) AS s FROM {events_relation}"),
             };
-            let mut q = sqlx::query(&sql);
+            let mut q = sqlx::query(AssertSqlSafe(sql));
             if let Some(org) = subscription.filter.organization.as_ref() {
                 q = q.bind(org.as_str());
             }
@@ -412,7 +412,7 @@ async fn resolve_initial_position(
                      WHERE timestamp >= $1::timestamptz",
                 ),
             };
-            let mut q = sqlx::query(&sql);
+            let mut q = sqlx::query(AssertSqlSafe(sql));
             if let Some(org) = subscription.filter.organization.as_ref() {
                 q = q.bind(org.as_str());
             }
@@ -438,7 +438,7 @@ async fn resolve_stop_position(
                 ),
                 None => format!("SELECT COALESCE(MAX(sequence), 0) AS s FROM {events_relation}"),
             };
-            let mut query = sqlx::query(&sql);
+            let mut query = sqlx::query(AssertSqlSafe(sql));
             if let Some(org) = subscription.filter.organization.as_ref() {
                 query = query.bind(org.as_str());
             }
@@ -529,7 +529,7 @@ async fn fetch_batch(
     }
     sql.push_str(&format!(" ORDER BY sequence ASC LIMIT ${bind_index}"));
 
-    let mut q = sqlx::query(&sql).bind(after_seq);
+    let mut q = sqlx::query(AssertSqlSafe(sql)).bind(after_seq);
 
     if let Some(stop_seq) = stop_seq {
         q = q.bind(stop_seq);

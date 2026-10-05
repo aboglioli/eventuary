@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use eventuary_core::io::reader::{CheckpointKey, CheckpointScope, CheckpointStore};
 use eventuary_core::io::{Cursor, CursorId};
@@ -123,7 +123,7 @@ where
              WHERE consumer_group_id = $1 AND stream_id = $2 AND cursor_id = $3",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(key.scope.consumer_group_id.as_str())
             .bind(key.scope.stream_id.as_str())
             .bind(cursor_id)
@@ -144,7 +144,7 @@ where
              WHERE consumer_group_id = $1 AND stream_id = $2",
             relation = self.relation
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(scope.consumer_group_id.as_str())
             .bind(scope.stream_id.as_str())
             .fetch_all(&self.pool)
@@ -173,7 +173,7 @@ where
              WHERE {relation}.cursor_order < EXCLUDED.cursor_order",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(key.scope.consumer_group_id.as_str())
             .bind(key.scope.stream_id.as_str())
             .bind(cursor_id)

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use eventuary_core::io::reader::DedupeStore;
 use eventuary_core::{Event, Result};
@@ -89,7 +89,7 @@ impl DedupeStore for PgDedupeStore {
             "SELECT 1 FROM {relation} WHERE event_id = $1::uuid",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(event_id)
             .fetch_optional(&self.pool)
             .await
@@ -103,7 +103,7 @@ impl DedupeStore for PgDedupeStore {
             "INSERT INTO {relation} (event_id) VALUES ($1::uuid) ON CONFLICT (event_id) DO NOTHING",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(event_id)
             .execute(&self.pool)
             .await
@@ -119,7 +119,7 @@ impl DedupeStore for PgDedupeStore {
              RETURNING event_id",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(event_id)
             .fetch_optional(&self.pool)
             .await

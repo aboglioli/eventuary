@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use eventuary_core::io::OwnerId;
 use eventuary_core::io::reader::{
@@ -169,7 +169,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
              SET lease_until = EXCLUDED.lease_until",
             consumers = self.consumers_relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(scope.consumer_group_id.as_str())
             .bind(scope.stream_id.as_str())
             .bind(owner_id.as_str())
@@ -188,7 +188,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                AND lease_until > NOW()",
             consumers = self.consumers_relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(scope.consumer_group_id.as_str())
             .bind(scope.stream_id.as_str())
             .fetch_one(&self.pool)
@@ -208,7 +208,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
              WHERE consumer_group_id = $1 AND stream_id = $2 AND owner_id = $3",
             consumers = self.consumers_relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(scope.consumer_group_id.as_str())
             .bind(scope.stream_id.as_str())
             .bind(owner_id.as_str())
@@ -248,7 +248,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                        checkpoint_sequence",
             partitions = self.partitions_relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(scope.consumer_group_id.as_str())
             .bind(scope.stream_id.as_str())
             .bind(partition_id_i64)
@@ -265,7 +265,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                      WHERE consumer_group_id = $1 AND stream_id = $2 AND partition_id = $3",
                     partitions = self.partitions_relation
                 );
-                let check_row = sqlx::query(&check_sql)
+                let check_row = sqlx::query(AssertSqlSafe(check_sql))
                     .bind(scope.consumer_group_id.as_str())
                     .bind(scope.stream_id.as_str())
                     .bind(partition_id_i64)
@@ -327,7 +327,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                AND partition_count = $7",
             partitions = self.partitions_relation
         );
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql))
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i64)
@@ -366,7 +366,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                AND partition_count = $6",
             partitions = self.partitions_relation
         );
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql))
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i64)
@@ -408,7 +408,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                AND $6 > {partitions}.checkpoint_sequence",
             partitions = self.partitions_relation
         );
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql))
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i64)
@@ -425,7 +425,7 @@ impl PartitionCoordinator<PgCursor> for PgPartitionCoordinator {
                  WHERE consumer_group_id = $1 AND stream_id = $2 AND partition_id = $3",
                 partitions = self.partitions_relation
             );
-            let check_row = sqlx::query(&check_sql)
+            let check_row = sqlx::query(AssertSqlSafe(check_sql))
                 .bind(lease.scope.consumer_group_id.as_str())
                 .bind(lease.scope.stream_id.as_str())
                 .bind(partition_id_i64)
@@ -480,7 +480,7 @@ impl PgPartitionCoordinator {
              WHERE consumer_group_id = $1 AND stream_id = $2 AND partition_id = $3",
             partitions = self.partitions_relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(lease.scope.consumer_group_id.as_str())
             .bind(lease.scope.stream_id.as_str())
             .bind(partition_id_i64)

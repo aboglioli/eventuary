@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver, PartitionStrategy};
 use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
@@ -97,7 +97,7 @@ impl PgPartitionBackfill {
         let batch_size = self.config.batch_size;
         let mut report = BackfillReport::default();
 
-        let fetch_sql = format!(
+        let fetch_sql: Arc<str> = format!(
             "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
              payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
              timestamp::text AS timestamp_text, version \
@@ -105,9 +105,10 @@ impl PgPartitionBackfill {
              WHERE partition_id IS NULL \
              ORDER BY sequence \
              LIMIT $1",
-        );
+        )
+        .into();
 
-        let update_sql = format!(
+        let update_sql: Arc<str> = format!(
             "UPDATE {events} \
              SET partition_key = $1, \
                  partition_hash = $2, \
@@ -115,10 +116,11 @@ impl PgPartitionBackfill {
                  partition_count = $4, \
                  partition_strategy = $5 \
              WHERE sequence = $6 AND partition_id IS NULL",
-        );
+        )
+        .into();
 
         loop {
-            let rows = sqlx::query(&fetch_sql)
+            let rows = sqlx::query(AssertSqlSafe(Arc::clone(&fetch_sql)))
                 .bind(batch_size as i64)
                 .fetch_all(&self.pool)
                 .await
@@ -143,7 +145,7 @@ impl PgPartitionBackfill {
                     .partition_for(&partition_key, self.config.partition_count);
                 let partition_strategy = PartitionStrategy::new(self.config.hasher.strategy())?;
 
-                let result = sqlx::query(&update_sql)
+                let result = sqlx::query(AssertSqlSafe(Arc::clone(&update_sql)))
                     .bind(partition_key.as_str())
                     .bind(partition_hash.to_sql_i64())
                     .bind(partition.id() as i64)

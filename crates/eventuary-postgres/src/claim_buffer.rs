@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use eventuary_core::io::OwnerId;
 use eventuary_core::io::reader::claim_buffer::{ClaimedBufferEntry, ClaimedBufferStore};
@@ -125,7 +125,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             "INSERT INTO {relation} (event) VALUES ($1) RETURNING id",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(encode_event(event)?)
             .fetch_one(&self.pool)
             .await
@@ -166,7 +166,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             relation = self.relation
         );
 
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(AssertSqlSafe(sql))
             .bind(max_i64)
             .bind(owner_id.as_str())
             .bind(claimed_until)
@@ -198,7 +198,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             "DELETE FROM {relation} WHERE id = $1",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(id)
             .execute(&self.pool)
             .await
@@ -211,7 +211,7 @@ impl ClaimedBufferStore for PgClaimedBufferStore {
             "UPDATE {relation} SET claimed_by = NULL, claimed_until = NULL WHERE id = $1",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(id)
             .execute(&self.pool)
             .await

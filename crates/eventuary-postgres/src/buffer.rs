@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use eventuary_core::io::reader::{BufferEntry, BufferStore};
 use eventuary_core::{Error, Event, Result, SerializedEvent};
@@ -141,7 +141,7 @@ where
             "INSERT INTO {relation} (event, cursor) VALUES ($1, $2) RETURNING id",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(encode_event(event)?)
             .bind(encode_cursor(cursor)?)
             .fetch_one(&self.pool)
@@ -155,7 +155,7 @@ where
             "SELECT id, event, cursor FROM {relation} ORDER BY id",
             relation = self.relation
         );
-        let rows = sqlx::query(&sql)
+        let rows = sqlx::query(AssertSqlSafe(sql))
             .fetch_all(&self.pool)
             .await
             .map_err(store)?;
@@ -178,7 +178,7 @@ where
             "DELETE FROM {relation} WHERE id = $1",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(id.0)
             .execute(&self.pool)
             .await

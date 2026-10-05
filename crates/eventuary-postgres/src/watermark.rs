@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 
 use eventuary_core::io::reader::WatermarkStore;
 use eventuary_core::{Error, Result};
@@ -90,7 +90,7 @@ impl WatermarkStore for PgWatermarkStore {
              FROM {relation} WHERE key = $1",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(key)
             .fetch_optional(&self.pool)
             .await
@@ -113,7 +113,7 @@ impl WatermarkStore for PgWatermarkStore {
              ON CONFLICT (key) DO UPDATE SET ts = EXCLUDED.ts, updated_at = NOW()",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(key)
             .bind(ts.to_rfc3339())
             .execute(&self.pool)
