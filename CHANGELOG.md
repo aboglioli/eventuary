@@ -6,6 +6,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `PgWriter::write_in` and `PgWriter::write_all_in` write events on a connection
+  the caller owns, such as an open `sqlx::Transaction`, instead of the writer's
+  pool. An application can now persist an aggregate's state and the events it
+  produced in one transaction, so a rollback discards both and a commit can never
+  leave state without its events or events without their state.
+
 ### Changed
 
 - Dependencies are on their latest releases, including `sqlx` 0.9, `rand` 0.10,

@@ -694,6 +694,11 @@ Migration SQL lives inline in the Rust module for the component that owns the ta
   `PgWriter::connect(pool, config).await`) that prepares only its
   required table before returning. Use `new` / `new_with_config` when
   schema is managed externally.
+- `PgWriter::write_in` / `write_all_in` take a caller-owned
+  `&mut PgConnection` (a `Transaction` derefs to one) so events commit or
+  roll back with the caller's state change. They never open a transaction:
+  the caller's connection is the atomicity boundary. The `Writer` impl uses
+  the same private `insert` on a pooled connection.
 - Store implementations: `PgMultiplexerStore`, `PgBufferStore`,
   `PgDedupeStore`, `PgWatermarkStore`, and `PgCheckpointStore`.
 - Integration tests use `testcontainers` with `postgres:18-alpine`.
