@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use eventuary_core::{Error, Result};
 
@@ -66,7 +66,7 @@ pub(crate) async fn apply_schema(
     create_schemas(pool, replacements).await?;
     for migration in migrations {
         let sql = render_migration_sql(migration, replacements);
-        sqlx::raw_sql(&sql)
+        sqlx::raw_sql(AssertSqlSafe(sql))
             .execute(pool)
             .await
             .map_err(|e| Error::Store(format!("apply {}: {e}", migration.name)))?;
@@ -83,10 +83,12 @@ async fn create_schemas(pool: &PgPool, replacements: &[RelationReplacement<'_>])
         if !seen.insert(schema) {
             continue;
         }
-        sqlx::raw_sql(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-            .execute(pool)
-            .await
-            .map_err(store)?;
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "CREATE SCHEMA IF NOT EXISTS \"{schema}\""
+        )))
+        .execute(pool)
+        .await
+        .map_err(store)?;
     }
     Ok(())
 }

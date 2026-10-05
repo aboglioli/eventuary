@@ -2,7 +2,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use eventuary_core::io::Writer;
 use eventuary_core::partition::{
@@ -70,7 +70,7 @@ impl Default for PgWriterConfig {
 
 pub struct PgWriter {
     pool: PgPool,
-    insert_sql: String,
+    insert_sql: Arc<str>,
     partitioning: PgPartitioningConfig,
 }
 
@@ -113,7 +113,7 @@ impl PgWriter {
         );
         Self {
             pool,
-            insert_sql,
+            insert_sql: insert_sql.into(),
             partitioning: config.partitioning,
         }
     }
@@ -147,7 +147,7 @@ impl Writer for PgWriter {
         let row = EventRow::from_event(event)?;
         let pd = self.partition_data(event)?;
 
-        sqlx::query(&self.insert_sql)
+        sqlx::query(AssertSqlSafe(Arc::clone(&self.insert_sql)))
             .bind(&row.id)
             .bind(&row.organization)
             .bind(&row.namespace)
@@ -178,7 +178,7 @@ impl Writer for PgWriter {
         for event in events {
             let row = EventRow::from_event(event)?;
             let pd = self.partition_data(event)?;
-            sqlx::query(&self.insert_sql)
+            sqlx::query(AssertSqlSafe(Arc::clone(&self.insert_sql)))
                 .bind(&row.id)
                 .bind(&row.organization)
                 .bind(&row.namespace)

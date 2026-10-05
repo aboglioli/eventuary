@@ -24,7 +24,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use futures::Stream;
 use futures::StreamExt;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::time::Instant;

@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Dependencies are on their latest releases, including `sqlx` 0.9, `rand` 0.10,
+  `rdkafka` 0.39, `testcontainers` 0.28, `base64` 0.23 and the AWS SDKs.
+  Applications sharing a `PgPool` with `eventuary-postgres` must use `sqlx` 0.9.
+- `rusqlite` moves to 0.39, not 0.40: 0.40 links `libsqlite3-sys` 0.38, which
+  `sqlx` 0.9 excludes, and Cargo allows one `sqlite3` link per build even when
+  `sqlx`'s SQLite driver is not enabled.
+
 ## [0.3.0-rc.4] - 2026-09-24
 
 ### Added

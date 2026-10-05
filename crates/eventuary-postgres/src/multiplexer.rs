@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use sqlx::PgPool;
+use sqlx::{AssertSqlSafe, PgPool};
 
 use eventuary_core::Result;
 use eventuary_core::io::handler::{MultiplexerKey, MultiplexerStore};
@@ -94,7 +94,7 @@ impl MultiplexerStore for PgMultiplexerStore {
              WHERE event_id = $1::uuid AND subscriber_id = $2",
             relation = self.relation
         );
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql))
             .bind(event_id)
             .bind(key.subscriber_id.as_str())
             .fetch_optional(&self.pool)
@@ -111,7 +111,7 @@ impl MultiplexerStore for PgMultiplexerStore {
              ON CONFLICT (event_id, subscriber_id) DO NOTHING",
             relation = self.relation
         );
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql))
             .bind(event_id)
             .bind(key.subscriber_id.as_str())
             .execute(&self.pool)
