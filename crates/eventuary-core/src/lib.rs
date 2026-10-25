@@ -30,6 +30,7 @@
 
 mod collector;
 mod context;
+mod domain_event;
 mod error;
 mod event;
 mod event_key;
@@ -46,8 +47,9 @@ mod snapshot;
 mod topic;
 mod version;
 
-pub use collector::EventCollector;
+pub use collector::{Changes, EventCollector};
 pub use context::{Context, ContextError, ContextValue};
+pub use domain_event::DomainEvent;
 pub use error::{Error, Result};
 pub use event::{Event, EventId};
 pub use event_key::EventKey;
@@ -67,7 +69,7 @@ pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};
 pub use snapshot::{Snapshot, SnapshotEventId};
 pub use topic::Topic;
-pub use version::{SchemaVersion, SpecVersion};
+pub use version::{AggregateVersion, SchemaVersion, SpecVersion};
 
 #[cfg(test)]
 mod tests {

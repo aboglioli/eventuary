@@ -185,13 +185,29 @@ doing that work.
 ### Event Aggregate + Collector
 
 Every domain aggregate owns an `EventCollector`. Every state mutation
-collects a semantic event. The store/repository drains the collector and
-hands the events to a `Writer`:
+records a semantic event. The repository takes the collector's changes and
+persists the state and the events together:
 
 ```
-Aggregate.mutate() -> EventCollector.collect(event)
-                    -> save() -> drain_events() -> Writer::write(event)
+Aggregate.mutate() -> EventCollector.record(typed_event, timestamp)
+                    -> save() -> take_changes() -> Changes { expected, version, events }
+                    -> UPDATE ... WHERE version = expected; PgWriter::write_all_with(tx, events)
 ```
+
+- A typed fact implements `DomainEvent` (`NAMESPACE`, `TOPIC`,
+  `SCHEMA_VERSION`, `key()`); `record` turns it into an `Event` with a JSON
+  payload, the collector's organization and the given timestamp. A failed
+  `record` leaves the collector unchanged. `collect(Event)` takes an event built
+  by hand.
+- `EventCollector::new(organization)` is for an aggregate that was never saved;
+  `EventCollector::restored(organization, AggregateVersion)` for one loaded
+  from storage.
+- `take_changes()` is the only way to remove pending events, and it advances the
+  aggregate version in the same step, so the events can never be persisted
+  without the version check they belong to. It returns `None` when nothing is
+  pending (the aggregate did not change). `Changes::expected()` is the version
+  to compare against (`None` for a creation); `Changes::version()` is the one
+  to store.
 
 `Event` is immutable, validated at construction (`Event::create`), and
 reconstructed via `Event::new(...)`.

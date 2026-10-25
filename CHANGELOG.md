@@ -19,6 +19,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   event's id and timestamp, so an application with its own clock and id
   generator creates events deterministically. Both default to a fresh UUID v7
   and the current time.
+- `DomainEvent` describes a typed fact (`NAMESPACE`, `TOPIC`, `SCHEMA_VERSION`,
+  `key()`), and `EventCollector::record` turns one into an `Event` with a JSON
+  payload, so an aggregate records `OrderPlaced { .. }` instead of assembling an
+  envelope by hand.
+- `AggregateVersion` and `Changes`: `EventCollector::take_changes` hands a
+  repository the pending events together with the version it loaded and the
+  version to store, for optimistic concurrency.
 
 - `PgWriter::write_in` and `PgWriter::write_all_in` write events on a connection
   the caller owns, such as an open `sqlx::Transaction`, instead of the writer's
@@ -27,6 +34,13 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leave state without its events or events without their state.
 
 ### Changed
+
+- **Breaking:** `EventCollector` is built for an organization
+  (`EventCollector::new(organization)`, or `EventCollector::restored` with the
+  aggregate's stored version) and its pending events leave only through
+  `take_changes`, which advances the version in the same step. `drain`, `list`,
+  `iter`, `len`, `is_empty`, `with` and `Default` are removed; use `pending()`
+  and `has_pending()` to inspect.
 
 - **Breaking:** `Event::version()` is replaced by `Event::schema_version()` and
   `Event::spec_version()`, `Event::new` takes both, and `SerializedEvent` has

@@ -129,10 +129,55 @@ Important model types:
   `eventuary::partition::EventKeyPartitionKeyResolver` with
   `Fnv1a64PartitionHasher` for deterministic FNV-1a partition routing.
 - `Metadata` — validated string key/value metadata.
+- `EventCollector`, `DomainEvent`, `AggregateVersion`, `Changes` — record typed
+  events inside an aggregate and hand them to a repository with the version to
+  save; see [Recording events in an aggregate](#recording-events-in-an-aggregate).
 - `SerializedEvent` — stable wire format used by every backend.
 - `FieldMap<V>` — reusable validated key/value storage backing `Metadata` and
   `Context`. Keys must be non-empty, must not have leading or trailing
   whitespace, and must not contain newlines.
+
+### Recording events in an aggregate
+
+An aggregate holds an `EventCollector` and records typed facts. The repository
+takes the changes and saves the state and the events in one transaction:
+
+```rust
+use eventuary::{AggregateVersion, DomainEvent, EventCollector, OrganizationId};
+
+#[derive(serde::Serialize)]
+struct OrderPlaced {
+    order_id: String,
+    total: u64,
+}
+
+impl DomainEvent for OrderPlaced {
+    const NAMESPACE: &'static str = "/orders";
+    const TOPIC: &'static str = "order.placed";
+
+    fn key(&self) -> String {
+        self.order_id.clone()
+    }
+}
+
+let mut events = EventCollector::new(OrganizationId::new("acme").unwrap());
+events
+    .record(
+        OrderPlaced { order_id: "order-1".to_owned(), total: 42 },
+        chrono::Utc::now(),
+    )
+    .unwrap();
+
+let changes = events.take_changes().unwrap().unwrap();
+assert!(changes.is_creation());
+assert_eq!(changes.version(), AggregateVersion::FIRST);
+assert_eq!(changes.events().len(), 1);
+```
+
+`EventCollector::restored(organization, version)` rebuilds the collector of an
+aggregate loaded from storage; its next `take_changes` expects that version and
+returns the following one, so the repository can write
+`UPDATE ... WHERE version = expected` and store `version`.
 
 ### Correlation and causation
 
