@@ -26,6 +26,9 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `AggregateVersion` and `Changes`: `EventCollector::take_changes` hands a
   repository the pending events together with the version it loaded and the
   version to store, for optimistic concurrency.
+- `TopicPattern::any_of` matches any topic in a non-empty `TopicSet`. The
+  PostgreSQL and SQLite readers filter it in SQL, so a consumer of several topics
+  no longer reads every event and filters them in memory.
 
 - `PgWriter::write_with` and `PgWriter::write_all_with` write events through
   whatever the caller passes — an open `sqlx::Transaction`, a connection or a

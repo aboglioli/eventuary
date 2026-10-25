@@ -62,7 +62,7 @@ pub use payload_codec::{
     EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
 };
 
-pub use io::filter::{NamespacePattern, TopicPattern};
+pub use io::filter::{NamespacePattern, TopicPattern, TopicSet};
 pub use io::position::PartitionableSubscription;
 pub use io::position::{StartFrom, StartableSubscription, StopAt};
 pub use payload::{ContentType, Payload};

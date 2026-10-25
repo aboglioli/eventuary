@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
-use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
+use eventuary_core::io::filter::{EventFilter, NamespacePattern};
 use eventuary_core::io::reader::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
     CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
@@ -504,8 +504,11 @@ async fn fetch_batch(
     let conn = Arc::clone(conn);
     let relation = events_relation.to_owned();
     let org = filter.organization.as_ref().map(|o| o.as_str().to_owned());
-    let exact_topic: Option<String> = filter.topic.as_ref().map(|p| match p {
-        TopicPattern::Exact(t) => t.as_str().to_owned(),
+    let topics: Option<Vec<String>> = filter.topic.as_ref().map(|p| {
+        p.topics()
+            .iter()
+            .map(|topic| topic.as_str().to_owned())
+            .collect()
     });
     let ns_prefix = filter.namespace.as_ref().and_then(|p| match p {
         NamespacePattern::Prefix(ns) if !ns.is_root() => Some(ns.as_str().to_owned()),
@@ -537,10 +540,13 @@ async fn fetch_batch(
             params.push(Value::Text(o.clone()));
             idx += 1;
         }
-        if let Some(t) = &exact_topic {
-            sql.push_str(&format!(" AND topic = ?{idx}"));
-            params.push(Value::Text(t.clone()));
-            idx += 1;
+        if let Some(topics) = &topics {
+            let placeholders: Vec<String> = (0..topics.len())
+                .map(|offset| format!("?{}", idx + offset))
+                .collect();
+            sql.push_str(&format!(" AND topic IN ({})", placeholders.join(", ")));
+            params.extend(topics.iter().cloned().map(Value::Text));
+            idx += topics.len();
         }
         if let Some(prefix) = &ns_prefix {
             sql.push_str(&format!(

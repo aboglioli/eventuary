@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
+use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::event_key::EventKey;
 use crate::metadata::Metadata;
@@ -110,17 +111,58 @@ impl<P: Send + Sync> Filter<P> for AllFilter {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TopicPattern {
     Exact(Topic),
+    AnyOf(TopicSet),
 }
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TopicSet(Vec<Topic>);
 
 impl TopicPattern {
     pub fn exact(topic: Topic) -> Self {
         Self::Exact(topic)
     }
 
+    pub fn any_of(topics: impl IntoIterator<Item = Topic>) -> Result<Self> {
+        TopicSet::new(topics).map(Self::AnyOf)
+    }
+
     pub fn matches_topic(&self, topic: &Topic) -> bool {
         match self {
             Self::Exact(expected) => expected == topic,
+            Self::AnyOf(expected) => expected.contains(topic),
         }
+    }
+
+    pub fn topics(&self) -> &[Topic] {
+        match self {
+            Self::Exact(topic) => std::slice::from_ref(topic),
+            Self::AnyOf(topics) => topics.as_slice(),
+        }
+    }
+}
+
+impl TopicSet {
+    pub fn new(topics: impl IntoIterator<Item = Topic>) -> Result<Self> {
+        let mut unique: Vec<Topic> = Vec::new();
+        for topic in topics {
+            if !unique.contains(&topic) {
+                unique.push(topic);
+            }
+        }
+        if unique.is_empty() {
+            return Err(Error::InvalidTopic(
+                "a topic set needs at least one topic".to_owned(),
+            ));
+        }
+        Ok(Self(unique))
+    }
+
+    pub fn contains(&self, topic: &Topic) -> bool {
+        self.0.contains(topic)
+    }
+
+    pub fn as_slice(&self) -> &[Topic] {
+        &self.0
     }
 }
 
@@ -389,6 +431,29 @@ mod tests {
         let pattern = TopicPattern::exact(Topic::new("invoice.created").unwrap());
         assert!(pattern.matches_topic(&Topic::new("invoice.created").unwrap()));
         assert!(!pattern.matches_topic(&Topic::new("invoice.paid").unwrap()));
+    }
+
+    #[test]
+    fn topic_pattern_any_of_matches_each_listed_topic() {
+        let pattern = TopicPattern::any_of([
+            Topic::new("user.registered").unwrap(),
+            Topic::new("user.email_verification_requested").unwrap(),
+            Topic::new("user.registered").unwrap(),
+        ])
+        .unwrap();
+
+        assert!(pattern.matches_topic(&Topic::new("user.registered").unwrap()));
+        assert!(pattern.matches_topic(&Topic::new("user.email_verification_requested").unwrap()));
+        assert!(!pattern.matches_topic(&Topic::new("user.deleted").unwrap()));
+        assert_eq!(pattern.topics().len(), 2);
+    }
+
+    #[test]
+    fn topic_pattern_any_of_rejects_an_empty_set() {
+        assert!(matches!(
+            TopicPattern::any_of(Vec::new()),
+            Err(Error::InvalidTopic(_))
+        ));
     }
 
     #[test]

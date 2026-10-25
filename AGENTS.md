@@ -134,7 +134,7 @@ crates/
 │           │   └── spawned.rs # SpawnedStream
 │           ├── duplex.rs   # Duplex<W, R> delegating Reader + Writer pair
 │           ├── position.rs # StartFrom<C> + StopAt<C> + StartableSubscription
-│           ├── filter.rs   # Filter trait + TopicPattern/NamespacePattern + EventFilter + All/And/Or/Not filters
+│           ├── filter.rs   # Filter trait + TopicPattern (Exact / AnyOf(TopicSet))/NamespacePattern + EventFilter + All/And/Or/Not filters
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
@@ -350,7 +350,9 @@ the subscription itself.
 - `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, limit }`
 
 SQL backends push the org / topic / namespace / start-from filters into the
-SQL query to prune at the DB. Memory, Kafka, and SQS readers do not carry
+SQL query to prune at the DB. `TopicPattern::any_of` (a non-empty, deduplicated
+`TopicSet`) becomes `topic = ANY($n::text[])` on Postgres and `topic IN (...)` on
+SQLite, so a consumer of several topics reads only those rows. Memory, Kafka, and SQS readers do not carry
 `EventFilter` in their subscription shape; compose them with `FilteredReader`
 when predicate filtering should happen after delivery.
 

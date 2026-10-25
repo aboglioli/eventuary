@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
-use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
+use eventuary_core::io::filter::{EventFilter, NamespacePattern};
 use eventuary_core::io::reader::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
     CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
@@ -489,11 +489,14 @@ async fn fetch_batch(
         bind_index += 1;
     }
 
-    let exact_topic: Option<String> = filter.topic.as_ref().map(|p| match p {
-        TopicPattern::Exact(t) => t.as_str().to_owned(),
+    let topics: Option<Vec<String>> = filter.topic.as_ref().map(|p| {
+        p.topics()
+            .iter()
+            .map(|topic| topic.as_str().to_owned())
+            .collect()
     });
-    if exact_topic.is_some() {
-        sql.push_str(&format!(" AND topic = ${bind_index}"));
+    if topics.is_some() {
+        sql.push_str(&format!(" AND topic = ANY(${bind_index}::text[])"));
         bind_index += 1;
     }
     let ns_filter = filter.namespace.as_ref().and_then(|p| match p {
@@ -538,8 +541,8 @@ async fn fetch_batch(
     if let Some(org) = &filter.organization {
         q = q.bind(org.as_str());
     }
-    if let Some(topic) = exact_topic {
-        q = q.bind(topic);
+    if let Some(topics) = topics {
+        q = q.bind(topics);
     }
     if let Some(prefix) = ns_filter {
         q = q.bind(prefix);
