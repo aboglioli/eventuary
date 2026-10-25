@@ -195,6 +195,9 @@ Aggregate.mutate() -> EventCollector.collect(event)
 
 `Event` is immutable, validated at construction (`Event::create`), and
 reconstructed via `Event::new(...)`.
+`EventBuilder` stamps a fresh UUID v7 and `Utc::now()` unless the caller sets
+`.id(..)` / `.timestamp(..)`, which applications with their own clock and id
+generator use for deterministic events.
 UUID v7 is used for `EventId` so events are time-ordered.
 
 Every event has two identities:

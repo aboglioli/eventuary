@@ -15,6 +15,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stamps. Both are validated value objects (`SchemaVersion`, `SpecVersion`)
   starting at 1, and an event whose `spec_version` is newer than this build
   understands is rejected with `Error::InvalidVersion`.
+- `EventBuilder::id` and `EventBuilder::timestamp` let the caller choose an
+  event's id and timestamp, so an application with its own clock and id
+  generator creates events deterministically. Both default to a fresh UUID v7
+  and the current time.
 
 - `PgWriter::write_in` and `PgWriter::write_all_in` write events on a connection
   the caller owns, such as an open `sqlx::Transaction`, instead of the writer's

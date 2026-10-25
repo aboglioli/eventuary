@@ -73,6 +73,8 @@ pub struct EventBuilder<P = Payload> {
     payload: P,
     metadata: Metadata,
     schema_version: SchemaVersion,
+    id: Option<EventId>,
+    timestamp: Option<DateTime<Utc>>,
 }
 
 impl<P> EventBuilder<P> {
@@ -91,7 +93,19 @@ impl<P> EventBuilder<P> {
             payload,
             metadata: Metadata::new(),
             schema_version: SchemaVersion::FIRST,
+            id: None,
+            timestamp: None,
         }
+    }
+
+    pub fn id(mut self, id: EventId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    pub fn timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
+        self.timestamp = Some(timestamp);
+        self
     }
 
     pub fn metadata(mut self, metadata: Metadata) -> Self {
@@ -106,14 +120,14 @@ impl<P> EventBuilder<P> {
 
     pub fn build(self) -> Result<Event<P>> {
         Event::new(
-            EventId::new(),
+            self.id.unwrap_or_default(),
             self.organization,
             self.namespace,
             self.topic,
             self.key,
             self.payload,
             self.metadata,
-            Utc::now(),
+            self.timestamp.unwrap_or_else(Utc::now),
             self.schema_version,
             SpecVersion::CURRENT,
         )
@@ -291,6 +305,28 @@ mod tests {
         assert_eq!(event.key().as_str(), "task-123");
         assert_eq!(event.schema_version(), SchemaVersion::FIRST);
         assert_eq!(event.spec_version(), SpecVersion::CURRENT);
+    }
+
+    #[test]
+    fn builder_takes_the_id_and_timestamp_the_caller_chose() {
+        let id = EventId::new();
+        let timestamp = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .id(id)
+        .timestamp(timestamp)
+        .build()
+        .unwrap();
+
+        assert_eq!(event.id(), id);
+        assert_eq!(event.timestamp(), timestamp);
     }
 
     #[test]
