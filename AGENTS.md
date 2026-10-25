@@ -233,11 +233,6 @@ Every event carries two versions:
   stored value, and a value newer than `CURRENT` is rejected as
   `Error::InvalidVersion`. Bump `CURRENT` only when the envelope changes.
 
-`SerializedEvent` reads the pre-0.3 single `version` field as `schema_version`
-and a missing `spec_version` as 1. The SQL event logs migrate in place
-(`0002_split_version`): `version` is renamed to `schema_version` and
-`spec_version` is added with default 1. SQL migrations run on every `connect`,
-so each statement must be idempotent.
 
 Those two are the only identities the envelope carries. Correlation, causation
 and parent pointers are **application context and live in `Metadata`**, not in
@@ -675,7 +670,9 @@ factory. Until that lands, per-backend integration tests
 
 PostgreSQL and SQLite schemas are component-owned. Each implementation exposes a `connect` constructor that prepares only its required tables before returning the component. Existing `new` / `new_with_config` constructors assume schema already exists and are for externally managed schemas. `PgDatabase` and `SqliteDatabase` are connection-only wrappers; they do not create Eventuary tables and do not know component schemas.
 
-Migration SQL lives inline in the Rust module for the component that owns the table. Future schema changes add another idempotent migration constant to that component's migration slice. Applications that use multiple components compose them explicitly by calling each component's `connect` or `prepare_schema`. Eventuary does not provide a production `prepare_all` helper because that would couple the database wrapper to component implementations.
+Migration SQL lives inline in the Rust module for the component that owns the table. Until 1.0 every component has exactly one migration, `0001_init`, which is edited in place to the table's final shape: there are no upgrade migrations and no compatibility with earlier pre-releases. After 1.0, a schema change adds another idempotent migration constant to the component's slice (they run on every `connect`).
+
+Columns follow one order in every table: identity and keys first, then the content, then partitioning or ownership columns, and timestamps and versions last (the event log ends with `timestamp`, `schema_version`, `spec_version`). A column gets a `DEFAULT` only when a write may legitimately omit it, never to backfill older rows. Applications that use multiple components compose them explicitly by calling each component's `connect` or `prepare_schema`. Eventuary does not provide a production `prepare_all` helper because that would couple the database wrapper to component implementations.
 
 ### sqlite
 

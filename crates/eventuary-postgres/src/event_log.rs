@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS {events} (
     payload JSONB NOT NULL,
     content_type TEXT NOT NULL,
     metadata JSONB NOT NULL,
-    timestamp TIMESTAMPTZ NOT NULL,
-    version BIGINT NOT NULL,
     partition_key TEXT,
     partition_hash BIGINT,
     partition_id BIGINT,
     partition_count BIGINT,
-    partition_strategy TEXT
+    partition_strategy TEXT,
+    timestamp TIMESTAMPTZ NOT NULL,
+    schema_version INTEGER NOT NULL,
+    spec_version INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_org_sequence ON {events} (organization, sequence);
@@ -39,30 +40,10 @@ ON {events} (organization, namespace, partition_count, partition_id, sequence)
 WHERE partition_id IS NOT NULL;
 "#;
 
-const EVENT_LOG_0002_SPLIT_VERSION_SQL: &str = r#"
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_attribute
-        WHERE attrelid = '{events}'::regclass AND attname = 'version' AND NOT attisdropped
-    ) THEN
-        ALTER TABLE {events} RENAME COLUMN version TO schema_version;
-    END IF;
-END $$;
-
-ALTER TABLE {events} ADD COLUMN IF NOT EXISTS spec_version INTEGER NOT NULL DEFAULT 1;
-"#;
-
-const EVENT_LOG_MIGRATIONS: &[Migration] = &[
-    Migration {
-        name: "0001_init",
-        sql: EVENT_LOG_0001_INIT_SQL,
-    },
-    Migration {
-        name: "0002_split_version",
-        sql: EVENT_LOG_0002_SPLIT_VERSION_SQL,
-    },
-];
+const EVENT_LOG_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: EVENT_LOG_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub(crate) struct PgEventLogSchemaConfig {
@@ -89,7 +70,7 @@ impl PgEventLogSchema {
     }
 }
 
-pub(crate) fn decode_version(value: i64) -> Result<u32> {
+pub(crate) fn decode_version(value: i32) -> Result<u32> {
     u32::try_from(value).map_err(|e| Error::Serialization(format!("decode version {value}: {e}")))
 }
 

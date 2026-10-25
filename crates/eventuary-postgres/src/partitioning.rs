@@ -189,8 +189,8 @@ fn deserialize_row(row: &sqlx::postgres::PgRow, sequence: i64) -> Result<Seriali
         payload,
         metadata,
         timestamp,
-        schema_version: decode_version(row.get::<i64, _>("schema_version"))?,
-        spec_version: decode_version(i64::from(row.get::<i32, _>("spec_version")))?,
+        schema_version: decode_version(row.get::<i32, _>("schema_version"))?,
+        spec_version: decode_version(row.get::<i32, _>("spec_version"))?,
         key: row.get("event_key"),
     })
 }

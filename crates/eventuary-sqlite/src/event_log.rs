@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS {events} (
     payload TEXT NOT NULL,
     content_type TEXT NOT NULL,
     metadata TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    version INTEGER NOT NULL,
     partition_key TEXT,
     partition_hash INTEGER,
     partition_id INTEGER,
     partition_count INTEGER,
-    partition_strategy TEXT
+    partition_strategy TEXT,
+    timestamp TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    spec_version INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_org_seq ON {events} (organization, sequence);
@@ -39,21 +40,10 @@ ON {events} (organization, namespace, partition_count, partition_id, sequence)
 WHERE partition_id IS NOT NULL;
 "#;
 
-const EVENT_LOG_0002_SPLIT_VERSION_SQL: &str = r#"
-ALTER TABLE {events} RENAME COLUMN version TO schema_version;
-ALTER TABLE {events} ADD COLUMN spec_version INTEGER NOT NULL DEFAULT 1;
-"#;
-
-const EVENT_LOG_MIGRATIONS: &[Migration] = &[
-    Migration {
-        name: "0001_init",
-        sql: EVENT_LOG_0001_INIT_SQL,
-    },
-    Migration {
-        name: "0002_split_version",
-        sql: EVENT_LOG_0002_SPLIT_VERSION_SQL,
-    },
-];
+const EVENT_LOG_MIGRATIONS: &[Migration] = &[Migration {
+    name: "0001_init",
+    sql: EVENT_LOG_0001_INIT_SQL,
+}];
 
 #[derive(Debug, Clone)]
 pub(crate) struct SqliteEventLogSchemaConfig {
@@ -116,54 +106,40 @@ mod tests {
         assert!(key < payload);
     }
 
-    fn columns(conn: &Connection) -> Vec<String> {
+    #[test]
+    fn the_events_table_keeps_partitioning_before_time_and_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        SqliteEventLogSchema::prepare(&conn, &SqliteEventLogSchemaConfig::default()).unwrap();
+
         let mut statement = conn.prepare("PRAGMA table_info(\"events\")").unwrap();
-        statement
+        let columns: Vec<String> = statement
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
             .map(|name| name.unwrap())
-            .collect()
-    }
+            .collect();
 
-    #[test]
-    fn preparing_twice_keeps_the_split_versions() {
-        let conn = Connection::open_in_memory().unwrap();
-        let config = SqliteEventLogSchemaConfig::default();
-
-        SqliteEventLogSchema::prepare(&conn, &config).unwrap();
-        SqliteEventLogSchema::prepare(&conn, &config).unwrap();
-
-        let columns = columns(&conn);
-        assert!(columns.contains(&"schema_version".to_owned()));
-        assert!(columns.contains(&"spec_version".to_owned()));
-        assert!(!columns.contains(&"version".to_owned()));
-    }
-
-    #[test]
-    fn a_log_with_the_single_version_column_is_upgraded_in_place() {
-        let conn = Connection::open_in_memory().unwrap();
-        let config = SqliteEventLogSchemaConfig::default();
-        crate::schema::apply_schema(&conn, &EVENT_LOG_MIGRATIONS[..1], &replacements(&config))
-            .unwrap();
-        conn.execute(
-            "INSERT INTO \"events\" (id, organization, namespace, topic, event_key, payload, \
-             content_type, metadata, timestamp, version) \
-             VALUES ('e-1', 'acme', '/x', 'thing.happened', 'k', '{}', 'application/json', '{}', \
-             '2026-01-01T00:00:00Z', 4)",
-            [],
-        )
-        .unwrap();
-
-        SqliteEventLogSchema::prepare(&conn, &config).unwrap();
-
-        let versions: (i64, i64) = conn
-            .query_row(
-                "SELECT schema_version, spec_version FROM \"events\" WHERE id = 'e-1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(versions, (4, 1));
+        assert_eq!(
+            columns,
+            [
+                "sequence",
+                "id",
+                "organization",
+                "namespace",
+                "topic",
+                "event_key",
+                "payload",
+                "content_type",
+                "metadata",
+                "partition_key",
+                "partition_hash",
+                "partition_id",
+                "partition_count",
+                "partition_strategy",
+                "timestamp",
+                "schema_version",
+                "spec_version",
+            ]
+        );
     }
 
     #[test]

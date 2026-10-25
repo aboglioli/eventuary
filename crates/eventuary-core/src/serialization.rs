@@ -29,9 +29,7 @@ pub struct SerializedEvent {
     pub payload: SerializedPayload,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
-    #[serde(alias = "version")]
     pub schema_version: u32,
-    #[serde(default = "first_spec_version")]
     pub spec_version: u32,
 }
 
@@ -93,10 +91,6 @@ impl SerializedPayload {
             Self::Binary(bytes) => Ok(Payload::from_bytes(bytes)),
         }
     }
-}
-
-fn first_spec_version() -> u32 {
-    SpecVersion::V1.value()
 }
 
 mod base64_bytes {
@@ -427,29 +421,6 @@ mod tests {
     }
 
     #[test]
-    fn serialized_event_reads_the_legacy_version_field_as_the_schema_version() {
-        let value = serde_json::json!({
-            "id": uuid::Uuid::now_v7(),
-            "organization": "acme",
-            "namespace": "/task",
-            "topic": "task.created",
-            "key": "task-1",
-            "payload": {"content_type": "text/plain", "data": "hello"},
-            "metadata": {},
-            "timestamp": chrono::Utc::now(),
-            "version": 2
-        });
-
-        let event = SerializedEvent::from_json_value(value)
-            .unwrap()
-            .to_event()
-            .unwrap();
-
-        assert_eq!(event.schema_version(), SchemaVersion::new(2).unwrap());
-        assert_eq!(event.spec_version(), SpecVersion::V1);
-    }
-
-    #[test]
     fn serialized_event_rejects_an_unknown_spec_version() {
         let value = serde_json::json!({
             "id": uuid::Uuid::now_v7(),
@@ -482,7 +453,8 @@ mod tests {
             "payload": {"content_type": "text/plain", "data": "hello"},
             "metadata": {},
             "timestamp": chrono::Utc::now(),
-            "version": 1
+            "schema_version": 1,
+            "spec_version": 1
         });
 
         let err = SerializedEvent::from_json_value(value).unwrap_err();

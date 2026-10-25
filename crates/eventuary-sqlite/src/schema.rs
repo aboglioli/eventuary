@@ -49,40 +49,9 @@ pub(crate) fn apply_schema(
     for migration in migrations {
         let sql = render_migration_sql(migration, replacements);
         for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-            let result = conn.execute(statement, []);
-            match result {
-                Ok(_) => {}
-                Err(ref e) if is_duplicate_add_column_error(statement, e) => {}
-                Err(ref e) if is_already_renamed_column_error(statement, e) => {}
-                Err(e) => return Err(Error::Store(format!("apply {}: {e}", migration.name))),
-            }
+            conn.execute(statement, [])
+                .map_err(|e| Error::Store(format!("apply {}: {e}", migration.name)))?;
         }
     }
     Ok(())
-}
-
-fn is_duplicate_add_column_error(statement: &str, e: &rusqlite::Error) -> bool {
-    is_add_column_statement(statement) && e.to_string().contains("duplicate column name")
-}
-
-fn is_already_renamed_column_error(statement: &str, e: &rusqlite::Error) -> bool {
-    is_rename_column_statement(statement) && e.to_string().contains("no such column")
-}
-
-fn is_rename_column_statement(statement: &str) -> bool {
-    let normalized = statement
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
-    normalized.starts_with("ALTER TABLE ") && normalized.contains(" RENAME COLUMN ")
-}
-
-fn is_add_column_statement(statement: &str) -> bool {
-    let normalized = statement
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase();
-    normalized.starts_with("ALTER TABLE ") && normalized.contains(" ADD COLUMN ")
 }

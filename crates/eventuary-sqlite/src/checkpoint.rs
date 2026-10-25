@@ -14,10 +14,10 @@ use crate::schema::{Migration, RelationReplacement};
 const CHECKPOINT_STORE_0001_INIT_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS {offsets} (
     consumer_group_id TEXT NOT NULL,
-    stream_id         TEXT NOT NULL DEFAULT 'default',
+    stream_id         TEXT NOT NULL,
     cursor_id         TEXT NOT NULL,
     cursor            TEXT NOT NULL,
-    cursor_order      BLOB NOT NULL DEFAULT x'',
+    cursor_order      BLOB NOT NULL,
     PRIMARY KEY (consumer_group_id, stream_id, cursor_id)
 );
 "#;

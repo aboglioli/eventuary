@@ -57,11 +57,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Breaking:** `Event::version()` is replaced by `Event::schema_version()` and
   `Event::spec_version()`, `Event::new` takes both, and `SerializedEvent` has
-  `schema_version` and `spec_version` fields. Serialized events written before
-  this change still read: `version` is taken as `schema_version` and a missing
-  `spec_version` as 1. The PostgreSQL and SQLite event logs migrate on
-  `connect`/`prepare_schema`, renaming `version` to `schema_version` and adding
-  `spec_version`.
+  `schema_version` and `spec_version` fields instead of `version`.
+- **Breaking:** every SQL table is created by a single initial migration with
+  its final shape; there is no upgrade path from 0.3.0 release candidates, so
+  recreate their tables. The event log orders its columns as the event's
+  identity and content, then the partition columns, then `timestamp`,
+  `schema_version` and `spec_version`. Coordinator partitions and claimed buffer
+  entries also keep their timestamps last, and the checkpoint tables no longer
+  default `stream_id` or `cursor_order`, which every write sets.
 
 - Dependencies are on their latest releases, including `sqlx` 0.9, `rand` 0.10,
   `rdkafka` 0.39, `testcontainers` 0.28, `base64` 0.23 and the AWS SDKs.
