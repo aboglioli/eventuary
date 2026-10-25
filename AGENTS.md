@@ -139,7 +139,7 @@ crates/
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
 │           ├── owner_id.rs        # OwnerId (coordinated-reader instance identity)
-│           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
+│           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars of a-z 0-9 - _ ., letter or digit at both ends, no `..`)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
 ├── eventuary-fs/           # segmented append-only log on plain files; FsCursor + FsCheckpointStore + FsPartitionCoordinator

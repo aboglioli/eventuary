@@ -29,6 +29,8 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `TopicPattern::any_of` matches any topic in a non-empty `TopicSet`. The
   PostgreSQL and SQLite readers filter it in SQL, so a consumer of several topics
   no longer reads every event and filters them in memory.
+- `ConsumerGroupId` accepts `.`, so a group can be named after what it handles
+  (`identity.send_email_verification`).
 
 - `PgWriter::write_with` and `PgWriter::write_all_with` write events through
   whatever the caller passes — an open `sqlx::Transaction`, a connection or a
@@ -40,6 +42,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transaction usable.
 
 ### Changed
+
+- **Breaking:** a `ConsumerGroupId` must start and end with a lowercase letter or
+  digit and must not contain `..`. Ids such as `-group` or `group_` are now
+  rejected, and no id can be `.` or `..`, which the filesystem backend would
+  otherwise resolve as a relative path.
 
 - **Breaking:** `EventCollector` is built for an organization
   (`EventCollector::new(organization)`, or `EventCollector::restored` with the
