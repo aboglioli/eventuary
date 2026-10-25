@@ -71,7 +71,7 @@ async fn an_event_written_in_a_committed_transaction_is_persisted_with_the_state
         .await
         .unwrap();
     writer
-        .write_in(&mut tx, &order_placed("order-1"))
+        .write_with(&mut *tx, &order_placed("order-1"))
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -91,7 +91,7 @@ async fn an_event_written_in_a_rolled_back_transaction_is_discarded_with_the_sta
         .await
         .unwrap();
     writer
-        .write_in(&mut tx, &order_placed("order-1"))
+        .write_with(&mut *tx, &order_placed("order-1"))
         .await
         .unwrap();
     tx.rollback().await.unwrap();
@@ -107,7 +107,7 @@ async fn an_event_written_in_a_transaction_is_invisible_to_other_connections_unt
 
     let mut tx = pool.begin().await.unwrap();
     writer
-        .write_in(&mut tx, &order_placed("order-1"))
+        .write_with(&mut *tx, &order_placed("order-1"))
         .await
         .unwrap();
 
@@ -127,7 +127,7 @@ async fn events_written_together_in_a_committed_transaction_are_all_persisted() 
         .execute(&mut *tx)
         .await
         .unwrap();
-    writer.write_all_in(&mut tx, &events).await.unwrap();
+    writer.write_all_with(&mut *tx, &events).await.unwrap();
     tx.commit().await.unwrap();
 
     assert_eq!(orders_count(&pool).await, 2);
@@ -141,8 +141,56 @@ async fn events_written_together_in_a_rolled_back_transaction_are_all_discarded(
     let events = [order_placed("order-1"), order_placed("order-2")];
 
     let mut tx = pool.begin().await.unwrap();
-    writer.write_all_in(&mut tx, &events).await.unwrap();
+    writer.write_all_with(&mut *tx, &events).await.unwrap();
     tx.rollback().await.unwrap();
 
+    assert_eq!(events_count(&pool).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_event_written_with_the_pool_is_persisted_at_once() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+
+    writer
+        .write_with(&pool, &order_placed("order-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(events_count(&pool).await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_written_together_with_the_pool_land_all_or_none() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+    let event = order_placed("order-1");
+
+    let result = writer
+        .write_all_with(&pool, &[order_placed("order-2"), event.clone(), event])
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(events_count(&pool).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_batch_inside_a_transaction_leaves_the_transaction_usable() {
+    let (_c, pool) = start_postgres().await;
+    let writer = PgWriter::new(pool.clone());
+    let event = order_placed("order-1");
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO orders (id) VALUES ('order-1')")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let result = writer
+        .write_all_with(&mut *tx, &[event.clone(), event])
+        .await;
+    tx.commit().await.unwrap();
+
+    assert!(result.is_err());
+    assert_eq!(orders_count(&pool).await, 1);
     assert_eq!(events_count(&pool).await, 0);
 }

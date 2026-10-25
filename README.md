@@ -1250,9 +1250,10 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   stream id, and cursor id.
 - `PgDatabaseConfig` is `{ max_connections: u32 }`. `PgDatabase::connect` only
   opens a pool and does not create Eventuary tables.
-- `PgWriter::write_in` and `PgWriter::write_all_in` write on a connection the
-  caller owns instead of the writer's pool. Pass a `sqlx::Transaction` to persist
-  events atomically with the state change that produced them:
+- `PgWriter::write_with` and `PgWriter::write_all_with` write through whatever
+  the caller passes: an open transaction, a connection or a pool. Pass the
+  caller's transaction to persist events atomically with the state change that
+  produced them:
 
   ```rust,ignore
   let mut tx = pool.begin().await?;
@@ -1260,12 +1261,14 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
       .bind(order_id)
       .execute(&mut *tx)
       .await?;
-  writer.write_all_in(&mut tx, &events).await?;
+  writer.write_all_with(&mut *tx, &events).await?;
   tx.commit().await?;
   ```
 
-  Neither opens a transaction of its own; rolling back the caller's transaction
-  discards the events with everything else.
+  Rolling back the caller's transaction discards the events with everything
+  else. `write_all_with` is all-or-nothing on its own as well: it opens a
+  transaction on a pool or connection and a savepoint inside a transaction, so a
+  failed batch writes nothing and leaves the caller's transaction usable.
 - Integration tests use `postgres:18-alpine` through `testcontainers`.
 
 ### aws

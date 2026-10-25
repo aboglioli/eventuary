@@ -2,7 +2,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use sqlx::{AssertSqlSafe, PgConnection, PgPool};
+use sqlx::{Acquire, AssertSqlSafe, PgConnection, PgPool, Postgres};
 
 use eventuary_core::io::Writer;
 use eventuary_core::partition::{
@@ -118,15 +118,26 @@ impl PgWriter {
         }
     }
 
-    pub async fn write_in(&self, conn: &mut PgConnection, event: &Event) -> Result<()> {
-        self.insert(conn, event).await
+    pub async fn write_with<'c, A>(&self, connection: A, event: &Event) -> Result<()>
+    where
+        A: Acquire<'c, Database = Postgres>,
+    {
+        let mut conn = connection.acquire().await.map_err(store)?;
+        self.insert(&mut conn, event).await
     }
 
-    pub async fn write_all_in(&self, conn: &mut PgConnection, events: &[Event]) -> Result<()> {
-        for event in events {
-            self.insert(conn, event).await?;
+    pub async fn write_all_with<'c, A>(&self, connection: A, events: &[Event]) -> Result<()>
+    where
+        A: Acquire<'c, Database = Postgres>,
+    {
+        if events.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut tx = connection.begin().await.map_err(store)?;
+        for event in events {
+            self.insert(&mut tx, event).await?;
+        }
+        tx.commit().await.map_err(store)
     }
 
     async fn insert(&self, conn: &mut PgConnection, event: &Event) -> Result<()> {
@@ -183,18 +194,11 @@ impl PgWriter {
 
 impl Writer for PgWriter {
     async fn write(&self, event: &Event) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(store)?;
-        self.insert(&mut conn, event).await
+        self.write_with(&self.pool, event).await
     }
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.pool.begin().await.map_err(store)?;
-        self.write_all_in(&mut tx, events).await?;
-        tx.commit().await.map_err(store)?;
-        Ok(())
+        self.write_all_with(&self.pool, events).await
     }
 }
 

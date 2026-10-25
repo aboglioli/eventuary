@@ -27,11 +27,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repository the pending events together with the version it loaded and the
   version to store, for optimistic concurrency.
 
-- `PgWriter::write_in` and `PgWriter::write_all_in` write events on a connection
-  the caller owns, such as an open `sqlx::Transaction`, instead of the writer's
-  pool. An application can now persist an aggregate's state and the events it
-  produced in one transaction, so a rollback discards both and a commit can never
-  leave state without its events or events without their state.
+- `PgWriter::write_with` and `PgWriter::write_all_with` write events through
+  whatever the caller passes — an open `sqlx::Transaction`, a connection or a
+  pool — instead of the writer's own pool. An application can now persist an
+  aggregate's state and the events it produced in one transaction, so a rollback
+  discards both and a commit can never leave state without its events or events
+  without their state. `write_all_with` is all-or-nothing by itself: inside a
+  transaction it uses a savepoint, so a failed batch leaves the caller's
+  transaction usable.
 
 ### Changed
 
