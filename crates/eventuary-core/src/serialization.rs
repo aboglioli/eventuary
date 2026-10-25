@@ -12,6 +12,7 @@ use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
 use crate::payload::{ContentType, Payload};
 use crate::topic::Topic;
+use crate::version::{SchemaVersion, SpecVersion};
 
 /// Wire-format representation of an [`Event`]. Field order matches
 /// `Event` so the JSON shape is predictable and self-documenting.
@@ -28,7 +29,10 @@ pub struct SerializedEvent {
     pub payload: SerializedPayload,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
-    pub version: u64,
+    #[serde(alias = "version")]
+    pub schema_version: u32,
+    #[serde(default = "first_spec_version")]
+    pub spec_version: u32,
 }
 
 /// Wire-format representation of a [`Payload`].
@@ -91,6 +95,10 @@ impl SerializedPayload {
     }
 }
 
+fn first_spec_version() -> u32 {
+    SpecVersion::V1.value()
+}
+
 mod base64_bytes {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -122,7 +130,8 @@ impl SerializedEvent {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             timestamp: event.timestamp(),
-            version: event.version(),
+            schema_version: event.schema_version().value(),
+            spec_version: event.spec_version().value(),
         })
     }
 
@@ -139,7 +148,8 @@ impl SerializedEvent {
             payload,
             Metadata::try_from(self.metadata.clone())?,
             self.timestamp,
-            self.version,
+            SchemaVersion::new(self.schema_version)?,
+            SpecVersion::new(self.spec_version)?,
         )
     }
 
@@ -219,7 +229,8 @@ mod tests {
         let payload_pos = json.find("\"payload\"").unwrap();
         let metadata_pos = json.find("\"metadata\"").unwrap();
         let timestamp_pos = json.find("\"timestamp\"").unwrap();
-        let version_pos = json.find("\"version\"").unwrap();
+        let schema_version_pos = json.find("\"schema_version\"").unwrap();
+        let spec_version_pos = json.find("\"spec_version\"").unwrap();
         assert!(id_pos < org_pos);
         assert!(org_pos < ns_pos);
         assert!(ns_pos < topic_pos);
@@ -227,7 +238,8 @@ mod tests {
         assert!(key_pos < payload_pos);
         assert!(payload_pos < metadata_pos);
         assert!(metadata_pos < timestamp_pos);
-        assert!(timestamp_pos < version_pos);
+        assert!(timestamp_pos < schema_version_pos);
+        assert!(schema_version_pos < spec_version_pos);
     }
 
     #[test]
@@ -386,6 +398,78 @@ mod tests {
 
         let restored = serialized.to_event().unwrap();
         assert_eq!(restored.metadata().get("correlation_id"), Some("corr"));
+    }
+
+    #[test]
+    fn serialized_event_carries_both_versions() {
+        let event = Event::builder(
+            "acme",
+            "/x",
+            "thing.happened",
+            "k",
+            Payload::from_string("p"),
+        )
+        .unwrap()
+        .schema_version(SchemaVersion::new(3).unwrap())
+        .build()
+        .unwrap();
+
+        let value = SerializedEvent::from_event(&event).unwrap().to_json_value();
+
+        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["spec_version"], SpecVersion::CURRENT.value());
+        let restored = SerializedEvent::from_json_value(value)
+            .unwrap()
+            .to_event()
+            .unwrap();
+        assert_eq!(restored.schema_version(), SchemaVersion::new(3).unwrap());
+        assert_eq!(restored.spec_version(), SpecVersion::CURRENT);
+    }
+
+    #[test]
+    fn serialized_event_reads_the_legacy_version_field_as_the_schema_version() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::now_v7(),
+            "organization": "acme",
+            "namespace": "/task",
+            "topic": "task.created",
+            "key": "task-1",
+            "payload": {"content_type": "text/plain", "data": "hello"},
+            "metadata": {},
+            "timestamp": chrono::Utc::now(),
+            "version": 2
+        });
+
+        let event = SerializedEvent::from_json_value(value)
+            .unwrap()
+            .to_event()
+            .unwrap();
+
+        assert_eq!(event.schema_version(), SchemaVersion::new(2).unwrap());
+        assert_eq!(event.spec_version(), SpecVersion::V1);
+    }
+
+    #[test]
+    fn serialized_event_rejects_an_unknown_spec_version() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::now_v7(),
+            "organization": "acme",
+            "namespace": "/task",
+            "topic": "task.created",
+            "key": "task-1",
+            "payload": {"content_type": "text/plain", "data": "hello"},
+            "metadata": {},
+            "timestamp": chrono::Utc::now(),
+            "schema_version": 1,
+            "spec_version": SpecVersion::CURRENT.value() + 1
+        });
+
+        let err = SerializedEvent::from_json_value(value)
+            .unwrap()
+            .to_event()
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidVersion(_)));
     }
 
     #[test]

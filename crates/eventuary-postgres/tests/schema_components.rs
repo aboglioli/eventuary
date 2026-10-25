@@ -87,3 +87,74 @@ async fn pg_writer_and_checkpoint_connect_create_only_their_tables() {
         vec!["consumer_offsets".to_owned(), "events".to_owned()]
     );
 }
+
+async fn column_names(pool: &PgPool) -> Vec<String> {
+    let rows = sqlx::query(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'events'",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    rows.into_iter().map(|row| row.get("column_name")).collect()
+}
+
+#[tokio::test]
+async fn pg_writer_connect_twice_keeps_the_split_versions() {
+    let (_container, pool, _url) = start_postgres().await;
+
+    PgWriter::connect(pool.clone(), PgWriterConfig::default())
+        .await
+        .unwrap();
+    PgWriter::connect(pool.clone(), PgWriterConfig::default())
+        .await
+        .unwrap();
+
+    let columns = column_names(&pool).await;
+    assert!(columns.contains(&"schema_version".to_owned()));
+    assert!(columns.contains(&"spec_version".to_owned()));
+    assert!(!columns.contains(&"version".to_owned()));
+}
+
+#[tokio::test]
+async fn pg_writer_connect_upgrades_a_log_with_the_single_version_column() {
+    let (_container, pool, _url) = start_postgres().await;
+    sqlx::raw_sql(
+        "CREATE TABLE events (
+            sequence BIGSERIAL PRIMARY KEY,
+            id UUID NOT NULL UNIQUE,
+            organization TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            event_key TEXT NOT NULL,
+            payload JSONB NOT NULL,
+            content_type TEXT NOT NULL,
+            metadata JSONB NOT NULL,
+            timestamp TIMESTAMPTZ NOT NULL,
+            version BIGINT NOT NULL,
+            partition_key TEXT,
+            partition_hash BIGINT,
+            partition_id BIGINT,
+            partition_count BIGINT,
+            partition_strategy TEXT
+        );
+        INSERT INTO events (id, organization, namespace, topic, event_key, payload,
+            content_type, metadata, timestamp, version)
+        VALUES (gen_random_uuid(), 'acme', '/x', 'thing.happened', 'k', '{}',
+            'application/json', '{}', now(), 4);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    PgWriter::connect(pool.clone(), PgWriterConfig::default())
+        .await
+        .unwrap();
+
+    let row = sqlx::query("SELECT schema_version, spec_version FROM events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(row.get::<i64, _>("schema_version"), 4);
+    assert_eq!(row.get::<i32, _>("spec_version"), 1);
+}

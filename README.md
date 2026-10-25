@@ -112,8 +112,9 @@ let event = Event::builder(
 Important model types:
 
 - `Event` — immutable event record with UUID v7 `id`, tenant organization,
-  namespace, topic, key, payload, metadata, timestamp, and version. Tracing and
-  lineage values live in `metadata`; see
+  namespace, topic, key, payload, metadata, timestamp, `schema_version` (the
+  payload's schema, set by the application) and `spec_version` (the envelope's
+  format, set by eventuary). Tracing and lineage values live in `metadata`; see
   [Correlation and causation](#correlation-and-causation).
 - `Payload` — JSON, plain text, or binary content. Internally it uses
   `bytes::Bytes`, so cloning a payload is cheap and does not copy the byte

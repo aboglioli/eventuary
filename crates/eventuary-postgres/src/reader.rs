@@ -26,7 +26,7 @@ use eventuary_core::{
 
 use crate::coordinator::PgPartitionCoordinator;
 use crate::error::store;
-use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
+use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig, decode_version};
 use crate::relation::PgRelationName;
 
 #[derive(
@@ -474,7 +474,7 @@ async fn fetch_batch(
     let mut sql = format!(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
-         timestamp::text AS timestamp_text, version, partition_id, partition_count \
+         timestamp::text AS timestamp_text, schema_version, spec_version, partition_id, partition_count \
          FROM {events_relation} WHERE sequence > $1",
     );
     let mut bind_index = 2usize;
@@ -587,7 +587,8 @@ async fn fetch_batch(
                 payload,
                 metadata,
                 timestamp,
-                version: row.get::<i64, _>("version") as u64,
+                schema_version: decode_version(row.get::<i64, _>("schema_version"))?,
+                spec_version: decode_version(i64::from(row.get::<i32, _>("spec_version")))?,
                 key: row.get("event_key"),
             };
             let partition_id: Option<i64> = row.get("partition_id");

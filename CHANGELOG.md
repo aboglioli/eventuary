@@ -8,6 +8,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Every event carries two versions instead of one: `schema_version`, the
+  version of its payload's schema, which the application sets with
+  `EventBuilder::schema_version` and bumps when a payload changes shape; and
+  `spec_version`, the version of eventuary's envelope format, which eventuary
+  stamps. Both are validated value objects (`SchemaVersion`, `SpecVersion`)
+  starting at 1, and an event whose `spec_version` is newer than this build
+  understands is rejected with `Error::InvalidVersion`.
+
 - `PgWriter::write_in` and `PgWriter::write_all_in` write events on a connection
   the caller owns, such as an open `sqlx::Transaction`, instead of the writer's
   pool. An application can now persist an aggregate's state and the events it
@@ -15,6 +23,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leave state without its events or events without their state.
 
 ### Changed
+
+- **Breaking:** `Event::version()` is replaced by `Event::schema_version()` and
+  `Event::spec_version()`, `Event::new` takes both, and `SerializedEvent` has
+  `schema_version` and `spec_version` fields. Serialized events written before
+  this change still read: `version` is taken as `schema_version` and a missing
+  `spec_version` as 1. The PostgreSQL and SQLite event logs migrate on
+  `connect`/`prepare_schema`, renaming `version` to `schema_version` and adding
+  `spec_version`.
 
 - Dependencies are on their latest releases, including `sqlx` 0.9, `rand` 0.10,
   `rdkafka` 0.39, `testcontainers` 0.28, `base64` 0.23 and the AWS SDKs.

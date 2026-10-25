@@ -20,6 +20,9 @@ pub enum Error {
     #[error("invalid event key: {0}")]
     InvalidEventKey(String),
 
+    #[error("invalid version: {0}")]
+    InvalidVersion(String),
+
     #[error("invalid consumer group id: {0}")]
     InvalidConsumerGroupId(String),
 

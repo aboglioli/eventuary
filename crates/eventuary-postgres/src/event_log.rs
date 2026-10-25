@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use eventuary_core::Result;
+use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
@@ -39,10 +39,30 @@ ON {events} (organization, namespace, partition_count, partition_id, sequence)
 WHERE partition_id IS NOT NULL;
 "#;
 
-const EVENT_LOG_MIGRATIONS: &[Migration] = &[Migration {
-    name: "0001_init",
-    sql: EVENT_LOG_0001_INIT_SQL,
-}];
+const EVENT_LOG_0002_SPLIT_VERSION_SQL: &str = r#"
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = '{events}'::regclass AND attname = 'version' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE {events} RENAME COLUMN version TO schema_version;
+    END IF;
+END $$;
+
+ALTER TABLE {events} ADD COLUMN IF NOT EXISTS spec_version INTEGER NOT NULL DEFAULT 1;
+"#;
+
+const EVENT_LOG_MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "0001_init",
+        sql: EVENT_LOG_0001_INIT_SQL,
+    },
+    Migration {
+        name: "0002_split_version",
+        sql: EVENT_LOG_0002_SPLIT_VERSION_SQL,
+    },
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct PgEventLogSchemaConfig {
@@ -67,6 +87,10 @@ impl PgEventLogSchema {
     pub(crate) async fn prepare(pool: &PgPool, config: &PgEventLogSchemaConfig) -> Result<()> {
         crate::schema::apply_schema(pool, EVENT_LOG_MIGRATIONS, &replacements(config)).await
     }
+}
+
+pub(crate) fn decode_version(value: i64) -> Result<u32> {
+    u32::try_from(value).map_err(|e| Error::Serialization(format!("decode version {value}: {e}")))
 }
 
 fn replacements(config: &PgEventLogSchemaConfig) -> [RelationReplacement<'_>; 1] {

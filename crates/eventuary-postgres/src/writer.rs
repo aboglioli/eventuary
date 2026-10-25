@@ -104,11 +104,11 @@ impl PgWriter {
         let insert_sql = format!(
             "INSERT INTO {events} \
              (id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, \
+             timestamp, schema_version, spec_version, \
              partition_key, partition_hash, partition_id, partition_count, partition_strategy) \
              VALUES \
-             ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, \
-             $11, $12, $13, $14, $15)",
+             ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, $11, \
+             $12, $13, $14, $15, $16)",
             events = config.events_relation.render(),
         );
         Self {
@@ -143,7 +143,8 @@ impl PgWriter {
             .bind(&row.content_type)
             .bind(&row.metadata)
             .bind(&row.timestamp)
-            .bind(row.version)
+            .bind(row.schema_version)
+            .bind(row.spec_version)
             .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
             .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
             .bind(pd.partition_id)
@@ -216,7 +217,8 @@ struct EventRow {
     content_type: String,
     metadata: String,
     timestamp: String,
-    version: i64,
+    schema_version: i64,
+    spec_version: i32,
 }
 
 impl EventRow {
@@ -237,7 +239,9 @@ impl EventRow {
             content_type,
             metadata,
             timestamp: serialized.timestamp.to_rfc3339(),
-            version: serialized.version as i64,
+            schema_version: i64::from(serialized.schema_version),
+            spec_version: i32::try_from(serialized.spec_version)
+                .map_err(|e| Error::Store(format!("encode spec version: {e}")))?,
         })
     }
 }

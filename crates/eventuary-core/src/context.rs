@@ -41,6 +41,7 @@ impl From<&Error> for ContextError {
             Error::InvalidMetadataKey(m) => ("invalid_metadata_key", m.clone()),
             Error::InvalidPayload(m) => ("invalid_payload", m.clone()),
             Error::InvalidEventKey(m) => ("invalid_event_key", m.clone()),
+            Error::InvalidVersion(m) => ("invalid_version", m.clone()),
             Error::InvalidConsumerGroupId(m) => ("invalid_consumer_group_id", m.clone()),
             Error::InvalidOwnerId(m) => ("invalid_owner_id", m.clone()),
             Error::OwnershipLost(m) => ("ownership_lost", m.clone()),

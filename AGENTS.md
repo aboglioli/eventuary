@@ -204,6 +204,22 @@ Every event has two identities:
 
 `key` is not unique. Use it for partitioning, Kafka record keys, aggregate/entity routing, and deterministic lane assignment. Use `id` for dedupe and event occurrence identity.
 
+Every event carries two versions:
+
+- `schema_version` (`SchemaVersion`, from 1): the version of the payload's
+  schema, owned by the application. Bump it when a payload changes shape;
+  consumers upcast older payloads by it. Set with `EventBuilder::schema_version`.
+- `spec_version` (`SpecVersion`, from 1): the version of the envelope format
+  itself. `build()` stamps `SpecVersion::CURRENT`; a restored event keeps the
+  stored value, and a value newer than `CURRENT` is rejected as
+  `Error::InvalidVersion`. Bump `CURRENT` only when the envelope changes.
+
+`SerializedEvent` reads the pre-0.3 single `version` field as `schema_version`
+and a missing `spec_version` as 1. The SQL event logs migrate in place
+(`0002_split_version`): `version` is renamed to `schema_version` and
+`spec_version` is added with default 1. SQL migrations run on every `connect`,
+so each statement must be idempotent.
+
 Those two are the only identities the envelope carries. Correlation, causation
 and parent pointers are **application context and live in `Metadata`**, not in
 `Event` fields — see the decisions log entry on lineage. When a wrapper derives

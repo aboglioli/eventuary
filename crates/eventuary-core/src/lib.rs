@@ -44,6 +44,7 @@ mod payload_codec;
 mod serialization;
 mod snapshot;
 mod topic;
+mod version;
 
 pub use collector::EventCollector;
 pub use context::{Context, ContextError, ContextValue};
@@ -66,6 +67,7 @@ pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};
 pub use snapshot::{Snapshot, SnapshotEventId};
 pub use topic::Topic;
+pub use version::{SchemaVersion, SpecVersion};
 
 #[cfg(test)]
 mod tests {

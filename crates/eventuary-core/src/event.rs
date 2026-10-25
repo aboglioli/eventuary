@@ -12,6 +12,7 @@ use crate::namespace::Namespace;
 use crate::organization::OrganizationId;
 use crate::payload::Payload;
 use crate::topic::Topic;
+use crate::version::{SchemaVersion, SpecVersion};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EventId(Uuid);
@@ -60,7 +61,8 @@ pub struct Event<P = Payload> {
     payload: P,
     metadata: Metadata,
     timestamp: DateTime<Utc>,
-    version: u64,
+    schema_version: SchemaVersion,
+    spec_version: SpecVersion,
 }
 
 pub struct EventBuilder<P = Payload> {
@@ -70,6 +72,7 @@ pub struct EventBuilder<P = Payload> {
     key: EventKey,
     payload: P,
     metadata: Metadata,
+    schema_version: SchemaVersion,
 }
 
 impl<P> EventBuilder<P> {
@@ -87,11 +90,17 @@ impl<P> EventBuilder<P> {
             key,
             payload,
             metadata: Metadata::new(),
+            schema_version: SchemaVersion::FIRST,
         }
     }
 
     pub fn metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    pub fn schema_version(mut self, schema_version: SchemaVersion) -> Self {
+        self.schema_version = schema_version;
         self
     }
 
@@ -105,7 +114,8 @@ impl<P> EventBuilder<P> {
             self.payload,
             self.metadata,
             Utc::now(),
-            1,
+            self.schema_version,
+            SpecVersion::CURRENT,
         )
     }
 }
@@ -121,7 +131,8 @@ impl<P> Event<P> {
         payload: P,
         metadata: Metadata,
         timestamp: DateTime<Utc>,
-        version: u64,
+        schema_version: SchemaVersion,
+        spec_version: SpecVersion,
     ) -> Result<Self> {
         Ok(Self {
             id,
@@ -132,7 +143,8 @@ impl<P> Event<P> {
             payload,
             metadata,
             timestamp,
-            version,
+            schema_version,
+            spec_version,
         })
     }
 
@@ -191,8 +203,11 @@ impl<P> Event<P> {
     pub fn timestamp(&self) -> DateTime<Utc> {
         self.timestamp
     }
-    pub fn version(&self) -> u64 {
-        self.version
+    pub fn schema_version(&self) -> SchemaVersion {
+        self.schema_version
+    }
+    pub fn spec_version(&self) -> SpecVersion {
+        self.spec_version
     }
     pub fn key(&self) -> &EventKey {
         &self.key
@@ -211,7 +226,8 @@ impl<P> Event<P> {
             payload: f(self.payload),
             metadata: self.metadata,
             timestamp: self.timestamp,
-            version: self.version,
+            schema_version: self.schema_version,
+            spec_version: self.spec_version,
         }
     }
 
@@ -228,7 +244,8 @@ impl<P> Event<P> {
             payload: f(self.payload)?,
             metadata: self.metadata,
             timestamp: self.timestamp,
-            version: self.version,
+            schema_version: self.schema_version,
+            spec_version: self.spec_version,
         })
     }
 
@@ -245,7 +262,8 @@ impl<P> Event<P> {
             codec.encode(&self.payload)?,
             self.metadata.clone(),
             self.timestamp,
-            self.version,
+            self.schema_version,
+            self.spec_version,
         )
     }
 }
@@ -271,7 +289,8 @@ mod tests {
         assert_eq!(event.namespace().as_str(), "/task");
         assert_eq!(event.topic().as_str(), "task.created");
         assert_eq!(event.key().as_str(), "task-123");
-        assert_eq!(event.version(), 1);
+        assert_eq!(event.schema_version(), SchemaVersion::FIRST);
+        assert_eq!(event.spec_version(), SpecVersion::CURRENT);
     }
 
     #[test]
