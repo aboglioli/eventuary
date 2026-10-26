@@ -268,7 +268,8 @@ mod tests {
             Payload::from_string("p"),
             Metadata::new(),
             ts,
-            1,
+            crate::SchemaVersion::FIRST,
+            crate::SpecVersion::CURRENT,
         )
         .unwrap()
     }

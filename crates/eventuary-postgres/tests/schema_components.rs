@@ -87,3 +87,45 @@ async fn pg_writer_and_checkpoint_connect_create_only_their_tables() {
         vec!["consumer_offsets".to_owned(), "events".to_owned()]
     );
 }
+
+#[tokio::test]
+async fn pg_writer_connect_keeps_partitioning_before_time_and_versions() {
+    let (_container, pool, _url) = start_postgres().await;
+
+    PgWriter::connect(pool.clone(), PgWriterConfig::default())
+        .await
+        .unwrap();
+
+    let columns: Vec<String> = sqlx::query(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'events' ORDER BY ordinal_position",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| row.get("column_name"))
+    .collect();
+    assert_eq!(
+        columns,
+        [
+            "sequence",
+            "id",
+            "organization",
+            "namespace",
+            "topic",
+            "event_key",
+            "payload",
+            "content_type",
+            "metadata",
+            "partition_key",
+            "partition_hash",
+            "partition_id",
+            "partition_count",
+            "partition_strategy",
+            "timestamp",
+            "schema_version",
+            "spec_version",
+        ]
+    );
+}

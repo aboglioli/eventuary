@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
-use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
+use eventuary_core::io::filter::{EventFilter, NamespacePattern};
 use eventuary_core::io::reader::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
     CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
@@ -28,7 +28,7 @@ use crate::coordinator::SqlitePartitionCoordinator;
 use crate::error::{join, poisoned, store};
 
 use crate::database::SqliteConn;
-use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
+use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig, decode_version};
 use crate::relation::SqliteRelationName;
 
 #[derive(
@@ -504,8 +504,11 @@ async fn fetch_batch(
     let conn = Arc::clone(conn);
     let relation = events_relation.to_owned();
     let org = filter.organization.as_ref().map(|o| o.as_str().to_owned());
-    let exact_topic: Option<String> = filter.topic.as_ref().map(|p| match p {
-        TopicPattern::Exact(t) => t.as_str().to_owned(),
+    let topics: Option<Vec<String>> = filter.topic.as_ref().map(|p| {
+        p.topics()
+            .iter()
+            .map(|topic| topic.as_str().to_owned())
+            .collect()
     });
     let ns_prefix = filter.namespace.as_ref().and_then(|p| match p {
         NamespacePattern::Prefix(ns) if !ns.is_root() => Some(ns.as_str().to_owned()),
@@ -520,7 +523,7 @@ async fn fetch_batch(
 
         let mut sql = format!(
             "SELECT sequence, id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, partition_id, partition_count \
+             timestamp, schema_version, spec_version, partition_id, partition_count \
              FROM {relation} WHERE sequence > ?1"
         );
         let mut params: Vec<Value> = vec![Value::Integer(after_seq)];
@@ -537,10 +540,13 @@ async fn fetch_batch(
             params.push(Value::Text(o.clone()));
             idx += 1;
         }
-        if let Some(t) = &exact_topic {
-            sql.push_str(&format!(" AND topic = ?{idx}"));
-            params.push(Value::Text(t.clone()));
-            idx += 1;
+        if let Some(topics) = &topics {
+            let placeholders: Vec<String> = (0..topics.len())
+                .map(|offset| format!("?{}", idx + offset))
+                .collect();
+            sql.push_str(&format!(" AND topic IN ({})", placeholders.join(", ")));
+            params.extend(topics.iter().cloned().map(Value::Text));
+            idx += topics.len();
         }
         if let Some(prefix) = &ns_prefix {
             sql.push_str(&format!(
@@ -600,9 +606,10 @@ async fn fetch_batch(
                 let content_type: String = row.get(7)?;
                 let metadata_str: String = row.get(8)?;
                 let timestamp_str: String = row.get(9)?;
-                let version: i64 = row.get(10)?;
-                let partition_id: Option<i64> = row.get(11)?;
-                let partition_count: Option<i64> = row.get(12)?;
+                let schema_version: i64 = row.get(10)?;
+                let spec_version: i64 = row.get(11)?;
+                let partition_id: Option<i64> = row.get(12)?;
+                let partition_count: Option<i64> = row.get(13)?;
                 Ok((
                     sequence,
                     id,
@@ -614,7 +621,8 @@ async fn fetch_batch(
                     content_type,
                     metadata_str,
                     timestamp_str,
-                    version,
+                    schema_version,
+                    spec_version,
                     partition_id,
                     partition_count,
                 ))
@@ -634,7 +642,8 @@ async fn fetch_batch(
                 content_type,
                 metadata_str,
                 timestamp_str,
-                version,
+                schema_version,
+                spec_version,
                 partition_id,
                 partition_count,
             ) = row.map_err(store)?;
@@ -659,7 +668,8 @@ async fn fetch_batch(
                     payload,
                     metadata,
                     timestamp,
-                    version: version as u64,
+                    schema_version: decode_version(schema_version)?,
+                    spec_version: decode_version(spec_version)?,
                     key,
                 },
                 sequence,

@@ -30,6 +30,7 @@
 
 mod collector;
 mod context;
+mod domain_event;
 mod error;
 mod event;
 mod event_key;
@@ -44,9 +45,11 @@ mod payload_codec;
 mod serialization;
 mod snapshot;
 mod topic;
+mod version;
 
-pub use collector::EventCollector;
+pub use collector::{AGGREGATE_VERSION_KEY, Changes, EventCollector};
 pub use context::{Context, ContextError, ContextValue};
+pub use domain_event::DomainEvent;
 pub use error::{Error, Result};
 pub use event::{Event, EventId};
 pub use event_key::EventKey;
@@ -59,13 +62,14 @@ pub use payload_codec::{
     EventCodec, JsonPayloadCodec, PayloadCodec, PayloadEventCodec, PayloadPassthroughCodec,
 };
 
-pub use io::filter::{NamespacePattern, TopicPattern};
+pub use io::filter::{NamespacePattern, TopicPattern, TopicSet};
 pub use io::position::PartitionableSubscription;
 pub use io::position::{StartFrom, StartableSubscription, StopAt};
 pub use payload::{ContentType, Payload};
 pub use serialization::{SerializedEvent, SerializedPayload};
 pub use snapshot::{Snapshot, SnapshotEventId};
 pub use topic::Topic;
+pub use version::{AggregateVersion, SchemaVersion, SpecVersion};
 
 #[cfg(test)]
 mod tests {

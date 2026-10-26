@@ -19,9 +19,20 @@ impl ConsumerGroupId {
         }
         if !s
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
         {
             return Err(Error::InvalidConsumerGroupId(format!("invalid: {s}")));
+        }
+        let is_edge = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+        if !s.starts_with(is_edge) || !s.ends_with(is_edge) {
+            return Err(Error::InvalidConsumerGroupId(format!(
+                "must start and end with a lowercase letter or digit: {s}"
+            )));
+        }
+        if s.contains("..") {
+            return Err(Error::InvalidConsumerGroupId(format!(
+                "must not contain consecutive dots: {s}"
+            )));
         }
         Ok(Self(s))
     }
@@ -75,8 +86,29 @@ mod tests {
     #[test]
     fn invalid_charset() {
         assert!(ConsumerGroupId::new("Heartbeat").is_err());
-        assert!(ConsumerGroupId::new("group.1").is_err());
         assert!(ConsumerGroupId::new("group/1").is_err());
+    }
+
+    #[test]
+    fn dots_separate_words() {
+        assert!(ConsumerGroupId::new("group.1").is_ok());
+        assert!(ConsumerGroupId::new("identity.send_email_verification").is_ok());
+    }
+
+    #[test]
+    fn dots_cannot_form_a_relative_path() {
+        assert!(ConsumerGroupId::new(".").is_err());
+        assert!(ConsumerGroupId::new("..").is_err());
+        assert!(ConsumerGroupId::new(".hidden").is_err());
+        assert!(ConsumerGroupId::new("trailing.").is_err());
+        assert!(ConsumerGroupId::new("a..b").is_err());
+    }
+
+    #[test]
+    fn edges_are_letters_or_digits() {
+        assert!(ConsumerGroupId::new("-group").is_err());
+        assert!(ConsumerGroupId::new("group_").is_err());
+        assert!(ConsumerGroupId::new("g").is_ok());
     }
 
     #[test]

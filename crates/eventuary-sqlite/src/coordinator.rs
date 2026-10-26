@@ -32,9 +32,9 @@ CREATE TABLE IF NOT EXISTS {partitions} (
     partition_id        INTEGER NOT NULL,
     partition_count     INTEGER NULL,
     owner_id            TEXT    NULL,
-    lease_until         TEXT    NULL,
     checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
     generation          INTEGER NOT NULL DEFAULT 0,
+    lease_until         TEXT    NULL,
     PRIMARY KEY (consumer_group_id, stream_id, partition_id)
 );
 

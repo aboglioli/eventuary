@@ -10,7 +10,7 @@ use eventuary_core::partition::{PartitionHasher, PartitionKeyResolver, Partition
 use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
 
 use crate::error::store;
-use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
+use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig, decode_version};
 use crate::relation::PgRelationName;
 
 pub struct PgPartitionBackfillConfig {
@@ -100,7 +100,7 @@ impl PgPartitionBackfill {
         let fetch_sql: Arc<str> = format!(
             "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
              payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
-             timestamp::text AS timestamp_text, version \
+             timestamp::text AS timestamp_text, schema_version, spec_version \
              FROM {events} \
              WHERE partition_id IS NULL \
              ORDER BY sequence \
@@ -189,7 +189,8 @@ fn deserialize_row(row: &sqlx::postgres::PgRow, sequence: i64) -> Result<Seriali
         payload,
         metadata,
         timestamp,
-        version: row.get::<i64, _>("version") as u64,
+        schema_version: decode_version(row.get::<i32, _>("schema_version"))?,
+        spec_version: decode_version(row.get::<i32, _>("spec_version"))?,
         key: row.get("event_key"),
     })
 }

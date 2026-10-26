@@ -103,10 +103,10 @@ impl SqliteWriter {
         let insert_sql = format!(
             "INSERT INTO {events} \
              (id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, \
-             partition_key, partition_hash, partition_id, partition_count, partition_strategy) \
+             partition_key, partition_hash, partition_id, partition_count, partition_strategy, \
+             timestamp, schema_version, spec_version) \
              VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             events = config.events_relation.render(),
         );
         Self {
@@ -210,13 +210,14 @@ fn insert_event(
             payload,
             content_type,
             metadata,
-            serialized.timestamp.to_rfc3339(),
-            serialized.version as i64,
             pd.partition_key.as_ref().map(|k| k.as_str()),
             pd.partition_hash.map(|h| h.to_sql_i64()),
             pd.partition_id,
             pd.partition_count,
             pd.partition_strategy.as_ref().map(|s| s.as_str()),
+            serialized.timestamp.to_rfc3339(),
+            i64::from(serialized.schema_version),
+            i64::from(serialized.spec_version),
         ],
     )
     .map_err(store)?;

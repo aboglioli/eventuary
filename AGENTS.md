@@ -134,12 +134,12 @@ crates/
 │           │   └── spawned.rs # SpawnedStream
 │           ├── duplex.rs   # Duplex<W, R> delegating Reader + Writer pair
 │           ├── position.rs # StartFrom<C> + StopAt<C> + StartableSubscription
-│           ├── filter.rs   # Filter trait + TopicPattern/NamespacePattern + EventFilter + All/And/Or/Not filters
+│           ├── filter.rs   # Filter trait + TopicPattern (Exact / AnyOf(TopicSet))/NamespacePattern + EventFilter + All/And/Or/Not filters
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
 │           ├── owner_id.rs        # OwnerId (coordinated-reader instance identity)
-│           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars)
+│           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars of a-z 0-9 - _ ., letter or digit at both ends, no `..`)
 │
 ├── eventuary-memory/       # in-memory tokio::mpsc backend; NoopAcker + NoCursor + memory store implementations
 ├── eventuary-fs/           # segmented append-only log on plain files; FsCursor + FsCheckpointStore + FsPartitionCoordinator
@@ -185,16 +185,43 @@ doing that work.
 ### Event Aggregate + Collector
 
 Every domain aggregate owns an `EventCollector`. Every state mutation
-collects a semantic event. The store/repository drains the collector and
-hands the events to a `Writer`:
+records a semantic event. The repository takes the collector's changes and
+persists the state and the events together:
 
 ```
-Aggregate.mutate() -> EventCollector.collect(event)
-                    -> save() -> drain_events() -> Writer::write(event)
+Aggregate.mutate() -> EventCollector.record(typed_event, timestamp)
+                    -> save() -> take_changes() -> Changes { expected, version, events }
+                    -> UPDATE ... WHERE version = expected; PgWriter::write_all_with(tx, events)
 ```
+
+- A typed fact implements `DomainEvent` (`NAMESPACE`, `TOPIC`,
+  `SCHEMA_VERSION`, `key()`); `record` turns it into an `Event` with a JSON
+  payload, the collector's organization and the given timestamp. A failed
+  `record` leaves the collector unchanged. `collect(Event)` takes an event built
+  by hand.
+- `EventCollector::new(organization)` is for an aggregate that was never saved;
+  `EventCollector::restored(organization, AggregateVersion)` for one loaded
+  from storage, and it fails if that version cannot advance.
+- **One load, one version.** The collector fixes the version a load writes when
+  it is built: `FIRST` for a new aggregate, the loaded version plus one for a
+  restored one. However many mutations or saves happen before the aggregate is
+  loaded again, it is never bumped twice.
+- Every event recorded or collected carries that version in its metadata under
+  `AGGREGATE_VERSION_KEY` (`aggregate_version`); `AggregateVersion::of(&event)`
+  reads it back.
+- `take_changes()` is the only way to remove pending events, so the events can
+  never be persisted without the version check they belong to. It returns
+  `None` when nothing is pending (the aggregate did not change).
+  `Changes::expected()` is the version the store must hold (`None` for a
+  creation); `Changes::version()` is the one to store. The first take of a load
+  expects the loaded version; a later take of the same load expects, and
+  stores, the version the first one wrote.
 
 `Event` is immutable, validated at construction (`Event::create`), and
 reconstructed via `Event::new(...)`.
+`EventBuilder` stamps a fresh UUID v7 and `Utc::now()` unless the caller sets
+`.id(..)` / `.timestamp(..)`, which applications with their own clock and id
+generator use for deterministic events.
 UUID v7 is used for `EventId` so events are time-ordered.
 
 Every event has two identities:
@@ -203,6 +230,17 @@ Every event has two identities:
 - `key`: required routing/stream identity, shared by related events such as all events for `order-123`.
 
 `key` is not unique. Use it for partitioning, Kafka record keys, aggregate/entity routing, and deterministic lane assignment. Use `id` for dedupe and event occurrence identity.
+
+Every event carries two versions:
+
+- `schema_version` (`SchemaVersion`, from 1): the version of the payload's
+  schema, owned by the application. Bump it when a payload changes shape;
+  consumers upcast older payloads by it. Set with `EventBuilder::schema_version`.
+- `spec_version` (`SpecVersion`, from 1): the version of the envelope format
+  itself. `build()` stamps `SpecVersion::CURRENT`; a restored event keeps the
+  stored value, and a value newer than `CURRENT` is rejected as
+  `Error::InvalidVersion`. Bump `CURRENT` only when the envelope changes.
+
 
 Those two are the only identities the envelope carries. Correlation, causation
 and parent pointers are **application context and live in `Metadata`**, not in
@@ -315,7 +353,9 @@ the subscription itself.
 - `SqsSubscription { queue_url, wait_time, visibility_timeout, max_messages, limit }`
 
 SQL backends push the org / topic / namespace / start-from filters into the
-SQL query to prune at the DB. Memory, Kafka, and SQS readers do not carry
+SQL query to prune at the DB. `TopicPattern::any_of` (a non-empty, deduplicated
+`TopicSet`) becomes `topic = ANY($n::text[])` on Postgres and `topic IN (...)` on
+SQLite, so a consumer of several topics reads only those rows. Memory, Kafka, and SQS readers do not carry
 `EventFilter` in their subscription shape; compose them with `FilteredReader`
 when predicate filtering should happen after delivery.
 
@@ -638,7 +678,9 @@ factory. Until that lands, per-backend integration tests
 
 PostgreSQL and SQLite schemas are component-owned. Each implementation exposes a `connect` constructor that prepares only its required tables before returning the component. Existing `new` / `new_with_config` constructors assume schema already exists and are for externally managed schemas. `PgDatabase` and `SqliteDatabase` are connection-only wrappers; they do not create Eventuary tables and do not know component schemas.
 
-Migration SQL lives inline in the Rust module for the component that owns the table. Future schema changes add another idempotent migration constant to that component's migration slice. Applications that use multiple components compose them explicitly by calling each component's `connect` or `prepare_schema`. Eventuary does not provide a production `prepare_all` helper because that would couple the database wrapper to component implementations.
+Migration SQL lives inline in the Rust module for the component that owns the table. Until 1.0 every component has exactly one migration, `0001_init`, which is edited in place to the table's final shape: there are no upgrade migrations and no compatibility with earlier pre-releases. After 1.0, a schema change adds another idempotent migration constant to the component's slice (they run on every `connect`).
+
+Columns follow one order in every table: identity and keys first, then the content, then partitioning or ownership columns, and timestamps and versions last (the event log ends with `timestamp`, `schema_version`, `spec_version`). A column gets a `DEFAULT` only when a write may legitimately omit it, never to backfill older rows. Applications that use multiple components compose them explicitly by calling each component's `connect` or `prepare_schema`. Eventuary does not provide a production `prepare_all` helper because that would couple the database wrapper to component implementations.
 
 ### sqlite
 
@@ -694,11 +736,14 @@ Migration SQL lives inline in the Rust module for the component that owns the ta
   `PgWriter::connect(pool, config).await`) that prepares only its
   required table before returning. Use `new` / `new_with_config` when
   schema is managed externally.
-- `PgWriter::write_in` / `write_all_in` take a caller-owned
-  `&mut PgConnection` (a `Transaction` derefs to one) so events commit or
-  roll back with the caller's state change. They never open a transaction:
-  the caller's connection is the atomicity boundary. The `Writer` impl uses
-  the same private `insert` on a pooled connection.
+- `PgWriter::write_with` / `write_all_with` take anything implementing
+  `sqlx::Acquire<Database = Postgres>`: `&mut *tx` for a caller's transaction,
+  `&mut PgConnection`, or `&PgPool`. Through the caller's transaction, events
+  commit or roll back with its state change. `write_all_with` calls
+  `Acquire::begin`, which is a transaction on a pool or connection and a
+  savepoint inside a transaction, so a batch is all-or-nothing and a failed one
+  leaves the caller's transaction usable. The `Writer` impl is the same two
+  methods called with the writer's pool.
 - Store implementations: `PgMultiplexerStore`, `PgBufferStore`,
   `PgDedupeStore`, `PgWatermarkStore`, and `PgCheckpointStore`.
 - Integration tests use `testcontainers` with `postgres:18-alpine`.

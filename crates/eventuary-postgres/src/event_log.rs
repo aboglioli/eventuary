@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use eventuary_core::Result;
+use eventuary_core::{Error, Result};
 
 use crate::relation::PgRelationName;
 use crate::schema::{Migration, RelationReplacement};
@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS {events} (
     payload JSONB NOT NULL,
     content_type TEXT NOT NULL,
     metadata JSONB NOT NULL,
-    timestamp TIMESTAMPTZ NOT NULL,
-    version BIGINT NOT NULL,
     partition_key TEXT,
     partition_hash BIGINT,
     partition_id BIGINT,
     partition_count BIGINT,
-    partition_strategy TEXT
+    partition_strategy TEXT,
+    timestamp TIMESTAMPTZ NOT NULL,
+    schema_version INTEGER NOT NULL,
+    spec_version INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_org_sequence ON {events} (organization, sequence);
@@ -67,6 +68,10 @@ impl PgEventLogSchema {
     pub(crate) async fn prepare(pool: &PgPool, config: &PgEventLogSchemaConfig) -> Result<()> {
         crate::schema::apply_schema(pool, EVENT_LOG_MIGRATIONS, &replacements(config)).await
     }
+}
+
+pub(crate) fn decode_version(value: i32) -> Result<u32> {
+    u32::try_from(value).map_err(|e| Error::Serialization(format!("decode version {value}: {e}")))
 }
 
 fn replacements(config: &PgEventLogSchemaConfig) -> [RelationReplacement<'_>; 1] {

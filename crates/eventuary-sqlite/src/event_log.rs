@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-use eventuary_core::Result;
+use eventuary_core::{Error, Result};
 
 use crate::relation::SqliteRelationName;
 use crate::schema::{Migration, RelationReplacement};
@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS {events} (
     payload TEXT NOT NULL,
     content_type TEXT NOT NULL,
     metadata TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    version INTEGER NOT NULL,
     partition_key TEXT,
     partition_hash INTEGER,
     partition_id INTEGER,
     partition_count INTEGER,
-    partition_strategy TEXT
+    partition_strategy TEXT,
+    timestamp TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    spec_version INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_org_seq ON {events} (organization, sequence);
@@ -69,6 +70,10 @@ impl SqliteEventLogSchema {
     }
 }
 
+pub(crate) fn decode_version(value: i64) -> Result<u32> {
+    u32::try_from(value).map_err(|e| Error::Serialization(format!("decode version {value}: {e}")))
+}
+
 fn replacements(config: &SqliteEventLogSchemaConfig) -> [RelationReplacement<'_>; 1] {
     [RelationReplacement {
         token: "{events}",
@@ -99,6 +104,42 @@ mod tests {
         assert!(namespace < topic);
         assert!(topic < key);
         assert!(key < payload);
+    }
+
+    #[test]
+    fn the_events_table_keeps_partitioning_before_time_and_versions() {
+        let conn = Connection::open_in_memory().unwrap();
+        SqliteEventLogSchema::prepare(&conn, &SqliteEventLogSchemaConfig::default()).unwrap();
+
+        let mut statement = conn.prepare("PRAGMA table_info(\"events\")").unwrap();
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|name| name.unwrap())
+            .collect();
+
+        assert_eq!(
+            columns,
+            [
+                "sequence",
+                "id",
+                "organization",
+                "namespace",
+                "topic",
+                "event_key",
+                "payload",
+                "content_type",
+                "metadata",
+                "partition_key",
+                "partition_hash",
+                "partition_id",
+                "partition_count",
+                "partition_strategy",
+                "timestamp",
+                "schema_version",
+                "spec_version",
+            ]
+        );
     }
 
     #[test]

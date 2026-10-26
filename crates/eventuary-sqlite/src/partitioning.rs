@@ -11,7 +11,7 @@ use eventuary_core::{Error, Result, SerializedEvent, SerializedPayload};
 
 use crate::database::SqliteConn;
 use crate::error::{join, poisoned, store};
-use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig};
+use crate::event_log::{SqliteEventLogSchema, SqliteEventLogSchemaConfig, decode_version};
 use crate::relation::SqliteRelationName;
 
 pub struct SqlitePartitionBackfillConfig {
@@ -103,7 +103,7 @@ impl SqlitePartitionBackfill {
 
         let fetch_sql = format!(
             "SELECT sequence, id, organization, namespace, topic, event_key, payload, \
-             content_type, metadata, timestamp, version \
+             content_type, metadata, timestamp, schema_version, spec_version \
              FROM {events} \
              WHERE partition_id IS NULL \
              ORDER BY sequence \
@@ -188,7 +188,8 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, SerializedEvent
     let _content_type: String = row.get(7)?;
     let metadata_str: String = row.get(8)?;
     let timestamp_str: String = row.get(9)?;
-    let version: i64 = row.get(10)?;
+    let schema_version: i64 = row.get(10)?;
+    let spec_version: i64 = row.get(11)?;
 
     let id = uuid::Uuid::parse_str(&id).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -231,7 +232,20 @@ fn decode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, SerializedEvent
             payload,
             metadata,
             timestamp,
-            version: version as u64,
+            schema_version: decode_version(schema_version).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::other(e.to_string())),
+                )
+            })?,
+            spec_version: decode_version(spec_version).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::other(e.to_string())),
+                )
+            })?,
             key,
         },
     ))

@@ -392,6 +392,52 @@ async fn topic_filter() {
 }
 
 #[tokio::test]
+async fn topic_filter_with_several_topics() {
+    let (_c, pool) = start_postgres().await;
+    let writer = make_writer(pool.clone());
+    for (topic, key) in [
+        ("task.created", "t1"),
+        ("task.deleted", "t2"),
+        ("task.completed", "t3"),
+    ] {
+        writer.write(&ev("acme", "/x", topic, key)).await.unwrap();
+    }
+
+    let mut filter = EventFilter::for_organization(OrganizationId::new("acme").unwrap());
+    filter.topic = Some(
+        TopicPattern::any_of([
+            Topic::new("task.created").unwrap(),
+            Topic::new("task.completed").unwrap(),
+        ])
+        .unwrap(),
+    );
+    let subscription = PgSubscription {
+        start: StartFrom::Earliest,
+        stop_at: StopAt::Never,
+        filter,
+        batch_size: Some(10),
+        limit: None,
+        ..PgSubscription::default()
+    };
+    let reader = PgReader::new(pool, fast_config());
+    let mut stream = reader.read(subscription).await.unwrap();
+
+    let m1 = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(m1.event().key().as_str(), "t1");
+    m1.ack().await.unwrap();
+    let m2 = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(m2.event().key().as_str(), "t3");
+}
+
+#[tokio::test]
 async fn namespace_filter() {
     let (_c, pool) = start_postgres().await;
     let writer = make_writer(pool.clone());

@@ -8,13 +8,67 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `PgWriter::write_in` and `PgWriter::write_all_in` write events on a connection
-  the caller owns, such as an open `sqlx::Transaction`, instead of the writer's
-  pool. An application can now persist an aggregate's state and the events it
-  produced in one transaction, so a rollback discards both and a commit can never
-  leave state without its events or events without their state.
+- Every event carries two versions instead of one: `schema_version`, the
+  version of its payload's schema, which the application sets with
+  `EventBuilder::schema_version` and bumps when a payload changes shape; and
+  `spec_version`, the version of eventuary's envelope format, which eventuary
+  stamps. Both are validated value objects (`SchemaVersion`, `SpecVersion`)
+  starting at 1, and an event whose `spec_version` is newer than this build
+  understands is rejected with `Error::InvalidVersion`.
+- `EventBuilder::id` and `EventBuilder::timestamp` let the caller choose an
+  event's id and timestamp, so an application with its own clock and id
+  generator creates events deterministically. Both default to a fresh UUID v7
+  and the current time.
+- `DomainEvent` describes a typed fact (`NAMESPACE`, `TOPIC`, `SCHEMA_VERSION`,
+  `key()`), and `EventCollector::record` turns one into an `Event` with a JSON
+  payload, so an aggregate records `OrderPlaced { .. }` instead of assembling an
+  envelope by hand.
+- `AggregateVersion` and `Changes`: `EventCollector::take_changes` hands a
+  repository the pending events together with the version it loaded and the
+  version to store, for optimistic concurrency. A load advances the version
+  once, however many times it is mutated or saved, and every event it records
+  carries that version in its `aggregate_version` metadata
+  (`AggregateVersion::of`).
+- `TopicPattern::any_of` matches any topic in a non-empty `TopicSet`. The
+  PostgreSQL and SQLite readers filter it in SQL, so a consumer of several topics
+  no longer reads every event and filters them in memory.
+- `ConsumerGroupId` accepts `.`, so a group can be named after what it handles
+  (`identity.send_email_verification`).
+
+- `PgWriter::write_with` and `PgWriter::write_all_with` write events through
+  whatever the caller passes — an open `sqlx::Transaction`, a connection or a
+  pool — instead of the writer's own pool. An application can now persist an
+  aggregate's state and the events it produced in one transaction, so a rollback
+  discards both and a commit can never leave state without its events or events
+  without their state. `write_all_with` is all-or-nothing by itself: inside a
+  transaction it uses a savepoint, so a failed batch leaves the caller's
+  transaction usable.
 
 ### Changed
+
+- **Breaking:** a `ConsumerGroupId` must start and end with a lowercase letter or
+  digit and must not contain `..`. Ids such as `-group` or `group_` are now
+  rejected, and no id can be `.` or `..`, which the filesystem backend would
+  otherwise resolve as a relative path.
+
+- **Breaking:** `EventCollector` is built for an organization
+  (`EventCollector::new(organization)`, or `EventCollector::restored` with the
+  aggregate's stored version, which fails if it cannot advance) and its pending
+  events leave only through `take_changes`. `collect` returns a `Result`.
+  `drain`, `list`, `iter`, `len`, `is_empty`, `with` and `Default` are removed;
+  use `pending()`, `has_pending()`, `stored_version()` and `next_version()` to
+  inspect.
+
+- **Breaking:** `Event::version()` is replaced by `Event::schema_version()` and
+  `Event::spec_version()`, `Event::new` takes both, and `SerializedEvent` has
+  `schema_version` and `spec_version` fields instead of `version`.
+- **Breaking:** every SQL table is created by a single initial migration with
+  its final shape; there is no upgrade path from 0.3.0 release candidates, so
+  recreate their tables. The event log orders its columns as the event's
+  identity and content, then the partition columns, then `timestamp`,
+  `schema_version` and `spec_version`. Coordinator partitions and claimed buffer
+  entries also keep their timestamps last, and the checkpoint tables no longer
+  default `stream_id` or `cursor_order`, which every write sets.
 
 - Dependencies are on their latest releases, including `sqlx` 0.9, `rand` 0.10,
   `rdkafka` 0.39, `testcontainers` 0.28, `base64` 0.23 and the AWS SDKs.

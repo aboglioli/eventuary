@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use eventuary_core::io::cursor::{CursorOrder, JsonCursorCodec};
-use eventuary_core::io::filter::{EventFilter, NamespacePattern, TopicPattern};
+use eventuary_core::io::filter::{EventFilter, NamespacePattern};
 use eventuary_core::io::reader::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
     CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
@@ -26,7 +26,7 @@ use eventuary_core::{
 
 use crate::coordinator::PgPartitionCoordinator;
 use crate::error::store;
-use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig};
+use crate::event_log::{PgEventLogSchema, PgEventLogSchemaConfig, decode_version};
 use crate::relation::PgRelationName;
 
 #[derive(
@@ -474,7 +474,7 @@ async fn fetch_batch(
     let mut sql = format!(
         "SELECT sequence, id::text AS id_text, organization, namespace, topic, event_key, \
          payload::text AS payload_text, content_type, metadata::text AS metadata_text, \
-         timestamp::text AS timestamp_text, version, partition_id, partition_count \
+         timestamp::text AS timestamp_text, schema_version, spec_version, partition_id, partition_count \
          FROM {events_relation} WHERE sequence > $1",
     );
     let mut bind_index = 2usize;
@@ -489,11 +489,14 @@ async fn fetch_batch(
         bind_index += 1;
     }
 
-    let exact_topic: Option<String> = filter.topic.as_ref().map(|p| match p {
-        TopicPattern::Exact(t) => t.as_str().to_owned(),
+    let topics: Option<Vec<String>> = filter.topic.as_ref().map(|p| {
+        p.topics()
+            .iter()
+            .map(|topic| topic.as_str().to_owned())
+            .collect()
     });
-    if exact_topic.is_some() {
-        sql.push_str(&format!(" AND topic = ${bind_index}"));
+    if topics.is_some() {
+        sql.push_str(&format!(" AND topic = ANY(${bind_index}::text[])"));
         bind_index += 1;
     }
     let ns_filter = filter.namespace.as_ref().and_then(|p| match p {
@@ -538,8 +541,8 @@ async fn fetch_batch(
     if let Some(org) = &filter.organization {
         q = q.bind(org.as_str());
     }
-    if let Some(topic) = exact_topic {
-        q = q.bind(topic);
+    if let Some(topics) = topics {
+        q = q.bind(topics);
     }
     if let Some(prefix) = ns_filter {
         q = q.bind(prefix);
@@ -587,7 +590,8 @@ async fn fetch_batch(
                 payload,
                 metadata,
                 timestamp,
-                version: row.get::<i64, _>("version") as u64,
+                schema_version: decode_version(row.get::<i32, _>("schema_version"))?,
+                spec_version: decode_version(row.get::<i32, _>("spec_version"))?,
                 key: row.get("event_key"),
             };
             let partition_id: Option<i64> = row.get("partition_id");

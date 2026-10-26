@@ -2,7 +2,7 @@ use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use sqlx::{AssertSqlSafe, PgConnection, PgPool};
+use sqlx::{Acquire, AssertSqlSafe, PgConnection, PgPool, Postgres};
 
 use eventuary_core::io::Writer;
 use eventuary_core::partition::{
@@ -104,11 +104,12 @@ impl PgWriter {
         let insert_sql = format!(
             "INSERT INTO {events} \
              (id, organization, namespace, topic, event_key, payload, content_type, metadata, \
-             timestamp, version, \
-             partition_key, partition_hash, partition_id, partition_count, partition_strategy) \
+             partition_key, partition_hash, partition_id, partition_count, partition_strategy, \
+             timestamp, schema_version, spec_version) \
              VALUES \
-             ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::timestamptz, $10, \
-             $11, $12, $13, $14, $15)",
+             ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, \
+             $9, $10, $11, $12, $13, \
+             $14::timestamptz, $15, $16)",
             events = config.events_relation.render(),
         );
         Self {
@@ -118,15 +119,26 @@ impl PgWriter {
         }
     }
 
-    pub async fn write_in(&self, conn: &mut PgConnection, event: &Event) -> Result<()> {
-        self.insert(conn, event).await
+    pub async fn write_with<'c, A>(&self, connection: A, event: &Event) -> Result<()>
+    where
+        A: Acquire<'c, Database = Postgres>,
+    {
+        let mut conn = connection.acquire().await.map_err(store)?;
+        self.insert(&mut conn, event).await
     }
 
-    pub async fn write_all_in(&self, conn: &mut PgConnection, events: &[Event]) -> Result<()> {
-        for event in events {
-            self.insert(conn, event).await?;
+    pub async fn write_all_with<'c, A>(&self, connection: A, events: &[Event]) -> Result<()>
+    where
+        A: Acquire<'c, Database = Postgres>,
+    {
+        if events.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut tx = connection.begin().await.map_err(store)?;
+        for event in events {
+            self.insert(&mut tx, event).await?;
+        }
+        tx.commit().await.map_err(store)
     }
 
     async fn insert(&self, conn: &mut PgConnection, event: &Event) -> Result<()> {
@@ -142,13 +154,14 @@ impl PgWriter {
             .bind(&row.payload)
             .bind(&row.content_type)
             .bind(&row.metadata)
-            .bind(&row.timestamp)
-            .bind(row.version)
             .bind(pd.partition_key.as_ref().map(|k| k.as_str()))
             .bind(pd.partition_hash.map(|h| h.to_sql_i64()))
             .bind(pd.partition_id)
             .bind(pd.partition_count)
             .bind(pd.partition_strategy.as_ref().map(|s| s.as_str()))
+            .bind(&row.timestamp)
+            .bind(row.schema_version)
+            .bind(row.spec_version)
             .execute(conn)
             .await
             .map_err(store)?;
@@ -182,18 +195,11 @@ impl PgWriter {
 
 impl Writer for PgWriter {
     async fn write(&self, event: &Event) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(store)?;
-        self.insert(&mut conn, event).await
+        self.write_with(&self.pool, event).await
     }
 
     async fn write_all(&self, events: &[Event]) -> Result<()> {
-        if events.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self.pool.begin().await.map_err(store)?;
-        self.write_all_in(&mut tx, events).await?;
-        tx.commit().await.map_err(store)?;
-        Ok(())
+        self.write_all_with(&self.pool, events).await
     }
 }
 
@@ -216,7 +222,8 @@ struct EventRow {
     content_type: String,
     metadata: String,
     timestamp: String,
-    version: i64,
+    schema_version: i32,
+    spec_version: i32,
 }
 
 impl EventRow {
@@ -237,7 +244,12 @@ impl EventRow {
             content_type,
             metadata,
             timestamp: serialized.timestamp.to_rfc3339(),
-            version: serialized.version as i64,
+            schema_version: encode_version(serialized.schema_version)?,
+            spec_version: encode_version(serialized.spec_version)?,
         })
     }
+}
+
+fn encode_version(version: u32) -> Result<i32> {
+    i32::try_from(version).map_err(|e| Error::Store(format!("encode version {version}: {e}")))
 }

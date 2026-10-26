@@ -112,8 +112,9 @@ let event = Event::builder(
 Important model types:
 
 - `Event` — immutable event record with UUID v7 `id`, tenant organization,
-  namespace, topic, key, payload, metadata, timestamp, and version. Tracing and
-  lineage values live in `metadata`; see
+  namespace, topic, key, payload, metadata, timestamp, `schema_version` (the
+  payload's schema, set by the application) and `spec_version` (the envelope's
+  format, set by eventuary). Tracing and lineage values live in `metadata`; see
   [Correlation and causation](#correlation-and-causation).
 - `Payload` — JSON, plain text, or binary content. Internally it uses
   `bytes::Bytes`, so cloning a payload is cheap and does not copy the byte
@@ -128,10 +129,59 @@ Important model types:
   `eventuary::partition::EventKeyPartitionKeyResolver` with
   `Fnv1a64PartitionHasher` for deterministic FNV-1a partition routing.
 - `Metadata` — validated string key/value metadata.
+- `EventCollector`, `DomainEvent`, `AggregateVersion`, `Changes` — record typed
+  events inside an aggregate and hand them to a repository with the version to
+  save; see [Recording events in an aggregate](#recording-events-in-an-aggregate).
 - `SerializedEvent` — stable wire format used by every backend.
 - `FieldMap<V>` — reusable validated key/value storage backing `Metadata` and
   `Context`. Keys must be non-empty, must not have leading or trailing
   whitespace, and must not contain newlines.
+
+### Recording events in an aggregate
+
+An aggregate holds an `EventCollector` and records typed facts. The repository
+takes the changes and saves the state and the events in one transaction:
+
+```rust
+use eventuary::{AggregateVersion, DomainEvent, EventCollector, OrganizationId};
+
+#[derive(serde::Serialize)]
+struct OrderPlaced {
+    order_id: String,
+    total: u64,
+}
+
+impl DomainEvent for OrderPlaced {
+    const NAMESPACE: &'static str = "/orders";
+    const TOPIC: &'static str = "order.placed";
+
+    fn key(&self) -> String {
+        self.order_id.clone()
+    }
+}
+
+let mut events = EventCollector::new(OrganizationId::new("acme").unwrap());
+events
+    .record(
+        OrderPlaced { order_id: "order-1".to_owned(), total: 42 },
+        chrono::Utc::now(),
+    )
+    .unwrap();
+
+let changes = events.take_changes().unwrap();
+assert!(changes.is_creation());
+assert_eq!(changes.version(), AggregateVersion::FIRST);
+assert_eq!(changes.events().len(), 1);
+```
+
+`EventCollector::restored(organization, version)` rebuilds the collector of an
+aggregate loaded from storage. A load advances the version exactly once: its
+`take_changes` expects the loaded version and returns the following one, so the
+repository writes `UPDATE ... SET version = version_to_store WHERE version =
+expected` (or a DynamoDB conditional put on `version = :expected`). Saving the
+same load again expects and stores that new version, never a third one. Every
+event of the load carries the version in its `aggregate_version` metadata, read
+with `AggregateVersion::of(&event)`.
 
 ### Correlation and causation
 
@@ -1204,9 +1254,10 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
   stream id, and cursor id.
 - `PgDatabaseConfig` is `{ max_connections: u32 }`. `PgDatabase::connect` only
   opens a pool and does not create Eventuary tables.
-- `PgWriter::write_in` and `PgWriter::write_all_in` write on a connection the
-  caller owns instead of the writer's pool. Pass a `sqlx::Transaction` to persist
-  events atomically with the state change that produced them:
+- `PgWriter::write_with` and `PgWriter::write_all_with` write through whatever
+  the caller passes: an open transaction, a connection or a pool. Pass the
+  caller's transaction to persist events atomically with the state change that
+  produced them:
 
   ```rust,ignore
   let mut tx = pool.begin().await?;
@@ -1214,12 +1265,14 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
       .bind(order_id)
       .execute(&mut *tx)
       .await?;
-  writer.write_all_in(&mut tx, &events).await?;
+  writer.write_all_with(&mut *tx, &events).await?;
   tx.commit().await?;
   ```
 
-  Neither opens a transaction of its own; rolling back the caller's transaction
-  discards the events with everything else.
+  Rolling back the caller's transaction discards the events with everything
+  else. `write_all_with` is all-or-nothing on its own as well: it opens a
+  transaction on a pool or connection and a savepoint inside a transaction, so a
+  failed batch writes nothing and leaves the caller's transaction usable.
 - Integration tests use `postgres:18-alpine` through `testcontainers`.
 
 ### aws
