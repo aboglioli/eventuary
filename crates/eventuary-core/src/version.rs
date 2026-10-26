@@ -3,7 +3,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use serde::{Deserialize, Serialize};
 
+use crate::collector::AGGREGATE_VERSION_KEY;
 use crate::error::{Error, Result};
+use crate::event::Event;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u32", into = "u32")]
@@ -62,6 +64,16 @@ impl AggregateVersion {
         NonZeroU64::new(value)
             .map(Self)
             .ok_or_else(|| Error::InvalidVersion("aggregate version must be at least 1".to_owned()))
+    }
+
+    pub fn of<P>(event: &Event<P>) -> Result<Option<Self>> {
+        let Some(value) = event.metadata().get(AGGREGATE_VERSION_KEY) else {
+            return Ok(None);
+        };
+        let value = value.parse::<u64>().map_err(|_| {
+            Error::InvalidVersion(format!("aggregate version is not a number: {value}"))
+        })?;
+        Self::new(value).map(Some)
     }
 
     pub fn next(self) -> Result<Self> {

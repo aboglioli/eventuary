@@ -168,16 +168,20 @@ events
     )
     .unwrap();
 
-let changes = events.take_changes().unwrap().unwrap();
+let changes = events.take_changes().unwrap();
 assert!(changes.is_creation());
 assert_eq!(changes.version(), AggregateVersion::FIRST);
 assert_eq!(changes.events().len(), 1);
 ```
 
 `EventCollector::restored(organization, version)` rebuilds the collector of an
-aggregate loaded from storage; its next `take_changes` expects that version and
-returns the following one, so the repository can write
-`UPDATE ... WHERE version = expected` and store `version`.
+aggregate loaded from storage. A load advances the version exactly once: its
+`take_changes` expects the loaded version and returns the following one, so the
+repository writes `UPDATE ... SET version = version_to_store WHERE version =
+expected` (or a DynamoDB conditional put on `version = :expected`). Saving the
+same load again expects and stores that new version, never a third one. Every
+event of the load carries the version in its `aggregate_version` metadata, read
+with `AggregateVersion::of(&event)`.
 
 ### Correlation and causation
 

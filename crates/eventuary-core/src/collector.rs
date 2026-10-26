@@ -3,14 +3,18 @@ use chrono::{DateTime, Utc};
 use crate::domain_event::DomainEvent;
 use crate::error::Result;
 use crate::event::Event;
+use crate::metadata::Metadata;
 use crate::organization::OrganizationId;
 use crate::payload::Payload;
 use crate::version::{AggregateVersion, SchemaVersion};
 
+pub const AGGREGATE_VERSION_KEY: &str = "aggregate_version";
+
 #[derive(Debug, Clone)]
 pub struct EventCollector<P = Payload> {
     organization: OrganizationId,
-    version: Option<AggregateVersion>,
+    stored: Option<AggregateVersion>,
+    next: AggregateVersion,
     pending: Vec<Event<P>>,
 }
 
@@ -26,47 +30,53 @@ impl<P> EventCollector<P> {
     pub fn new(organization: OrganizationId) -> Self {
         Self {
             organization,
-            version: None,
+            stored: None,
+            next: AggregateVersion::FIRST,
             pending: Vec::new(),
         }
     }
 
-    pub fn restored(organization: OrganizationId, version: AggregateVersion) -> Self {
-        Self {
+    pub fn restored(organization: OrganizationId, version: AggregateVersion) -> Result<Self> {
+        Ok(Self {
             organization,
-            version: Some(version),
+            stored: Some(version),
+            next: version.next()?,
             pending: Vec::new(),
-        }
+        })
     }
 
-    pub fn collect(&mut self, event: Event<P>) {
-        self.pending.push(event);
+    pub fn collect(&mut self, event: Event<P>) -> Result<()> {
+        let metadata = event
+            .metadata()
+            .clone()
+            .with(AGGREGATE_VERSION_KEY, self.next.to_string())?;
+        self.pending.push(event.with_metadata(metadata));
+        Ok(())
     }
 
     #[must_use = "dropping the changes loses the events and the version they must be saved with"]
-    pub fn take_changes(&mut self) -> Result<Option<Changes<P>>> {
+    pub fn take_changes(&mut self) -> Option<Changes<P>> {
         if self.pending.is_empty() {
-            return Ok(None);
+            return None;
         }
-        let expected = self.version;
-        let version = match expected {
-            Some(version) => version.next()?,
-            None => AggregateVersion::FIRST,
-        };
-        self.version = Some(version);
-        Ok(Some(Changes {
+        let expected = self.stored.replace(self.next);
+        Some(Changes {
             expected,
-            version,
+            version: self.next,
             events: std::mem::take(&mut self.pending),
-        }))
+        })
     }
 
     pub fn organization(&self) -> &OrganizationId {
         &self.organization
     }
 
-    pub fn version(&self) -> Option<AggregateVersion> {
-        self.version
+    pub fn stored_version(&self) -> Option<AggregateVersion> {
+        self.stored
+    }
+
+    pub fn next_version(&self) -> AggregateVersion {
+        self.next
     }
 
     pub fn pending(&self) -> &[Event<P>] {
@@ -88,6 +98,7 @@ impl EventCollector<Payload> {
             Payload::from_json(&event)?,
         )?
         .schema_version(SchemaVersion::new(E::SCHEMA_VERSION)?)
+        .metadata(Metadata::new().with(AGGREGATE_VERSION_KEY, self.next.to_string())?)
         .timestamp(timestamp)
         .build()?;
         self.pending.push(recorded);
@@ -202,15 +213,20 @@ mod tests {
         assert!(!events.has_pending());
     }
 
+    fn loaded_at(version: u64) -> EventCollector {
+        EventCollector::restored(
+            OrganizationId::new("acme").unwrap(),
+            AggregateVersion::new(version).unwrap(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn a_collector_without_pending_events_has_no_changes() {
-        let mut events = EventCollector::<Payload>::restored(
-            OrganizationId::platform(),
-            AggregateVersion::FIRST,
-        );
+        let mut events = loaded_at(1);
 
-        assert!(events.take_changes().unwrap().is_none());
-        assert_eq!(events.version(), Some(AggregateVersion::FIRST));
+        assert!(events.take_changes().is_none());
+        assert_eq!(events.stored_version(), Some(AggregateVersion::FIRST));
     }
 
     #[test]
@@ -218,46 +234,110 @@ mod tests {
         let mut events = collector();
         events.record(placed(), at()).unwrap();
 
-        let changes = events.take_changes().unwrap().unwrap();
+        let changes = events.take_changes().unwrap();
 
         assert!(changes.is_creation());
         assert_eq!(changes.expected(), None);
         assert_eq!(changes.version(), AggregateVersion::FIRST);
         assert_eq!(changes.events().len(), 1);
         assert!(!events.has_pending());
-        assert_eq!(events.version(), Some(AggregateVersion::FIRST));
+        assert_eq!(events.stored_version(), Some(AggregateVersion::FIRST));
     }
 
     #[test]
-    fn later_changes_expect_the_loaded_version_and_advance_it_once() {
-        let loaded = AggregateVersion::new(4).unwrap();
-        let mut events = EventCollector::restored(OrganizationId::new("acme").unwrap(), loaded);
+    fn changes_expect_the_loaded_version_and_store_the_next_one() {
+        let mut events = loaded_at(4);
         events.record(placed(), at()).unwrap();
         events.record(placed(), at()).unwrap();
 
-        let changes = events.take_changes().unwrap().unwrap();
+        let changes = events.take_changes().unwrap();
 
         assert!(!changes.is_creation());
-        assert_eq!(changes.expected(), Some(loaded));
+        assert_eq!(changes.expected().unwrap().value(), 4);
         assert_eq!(changes.version().value(), 5);
         assert_eq!(changes.into_events().len(), 2);
-        assert_eq!(events.version().unwrap().value(), 5);
+        assert_eq!(events.stored_version().unwrap().value(), 5);
+    }
+
+    #[test]
+    fn a_load_advances_the_version_once_however_often_it_is_saved() {
+        let mut events = loaded_at(4);
+        events.record(placed(), at()).unwrap();
+        let first = events.take_changes().unwrap();
+        events.record(placed(), at()).unwrap();
+
+        let second = events.take_changes().unwrap();
+
+        assert_eq!(first.expected().unwrap().value(), 4);
+        assert_eq!(first.version().value(), 5);
+        assert_eq!(second.expected().unwrap().value(), 5);
+        assert_eq!(second.version().value(), 5);
+        assert_eq!(events.next_version().value(), 5);
+    }
+
+    #[test]
+    fn a_new_aggregate_saved_twice_creates_then_updates_version_one() {
+        let mut events = collector();
+        events.record(placed(), at()).unwrap();
+        let first = events.take_changes().unwrap();
+        events.record(placed(), at()).unwrap();
+
+        let second = events.take_changes().unwrap();
+
+        assert!(first.is_creation());
+        assert!(!second.is_creation());
+        assert_eq!(second.expected(), Some(AggregateVersion::FIRST));
+        assert_eq!(second.version(), AggregateVersion::FIRST);
+    }
+
+    #[test]
+    fn every_event_of_a_load_carries_the_version_it_is_saved_with() {
+        let mut events = loaded_at(4);
+        events.record(placed(), at()).unwrap();
+        events.record(placed(), at()).unwrap();
+
+        let changes = events.take_changes().unwrap();
+
+        for event in changes.events() {
+            assert_eq!(
+                AggregateVersion::of(event).unwrap(),
+                Some(changes.version())
+            );
+        }
+    }
+
+    #[test]
+    fn restoring_the_last_possible_version_fails() {
+        let result = EventCollector::<Payload>::restored(
+            OrganizationId::platform(),
+            AggregateVersion::new(u64::MAX).unwrap(),
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
     fn collect_accepts_an_event_built_by_hand() {
         let mut events = collector();
-        let event = Event::create(
+        let event = Event::builder(
             "acme",
             "/x",
             "thing.happened",
             "k",
             Payload::from_string("p"),
         )
+        .unwrap()
+        .metadata(Metadata::new().with("actor_id", "user-1").unwrap())
+        .build()
         .unwrap();
 
-        events.collect(event);
+        events.collect(event).unwrap();
 
-        assert_eq!(events.pending().len(), 1);
+        let collected = &events.pending()[0];
+        assert_eq!(collected.metadata().get("actor_id"), Some("user-1"));
+        assert_eq!(
+            AggregateVersion::of(collected).unwrap(),
+            Some(AggregateVersion::FIRST)
+        );
     }
 }

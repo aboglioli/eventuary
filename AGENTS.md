@@ -201,13 +201,21 @@ Aggregate.mutate() -> EventCollector.record(typed_event, timestamp)
   by hand.
 - `EventCollector::new(organization)` is for an aggregate that was never saved;
   `EventCollector::restored(organization, AggregateVersion)` for one loaded
-  from storage.
-- `take_changes()` is the only way to remove pending events, and it advances the
-  aggregate version in the same step, so the events can never be persisted
-  without the version check they belong to. It returns `None` when nothing is
-  pending (the aggregate did not change). `Changes::expected()` is the version
-  to compare against (`None` for a creation); `Changes::version()` is the one
-  to store.
+  from storage, and it fails if that version cannot advance.
+- **One load, one version.** The collector fixes the version a load writes when
+  it is built: `FIRST` for a new aggregate, the loaded version plus one for a
+  restored one. However many mutations or saves happen before the aggregate is
+  loaded again, it is never bumped twice.
+- Every event recorded or collected carries that version in its metadata under
+  `AGGREGATE_VERSION_KEY` (`aggregate_version`); `AggregateVersion::of(&event)`
+  reads it back.
+- `take_changes()` is the only way to remove pending events, so the events can
+  never be persisted without the version check they belong to. It returns
+  `None` when nothing is pending (the aggregate did not change).
+  `Changes::expected()` is the version the store must hold (`None` for a
+  creation); `Changes::version()` is the one to store. The first take of a load
+  expects the loaded version; a later take of the same load expects, and
+  stores, the version the first one wrote.
 
 `Event` is immutable, validated at construction (`Event::create`), and
 reconstructed via `Event::new(...)`.

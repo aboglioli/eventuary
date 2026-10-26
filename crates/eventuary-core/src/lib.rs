@@ -47,7 +47,7 @@ mod snapshot;
 mod topic;
 mod version;
 
-pub use collector::{Changes, EventCollector};
+pub use collector::{AGGREGATE_VERSION_KEY, Changes, EventCollector};
 pub use context::{Context, ContextError, ContextValue};
 pub use domain_event::DomainEvent;
 pub use error::{Error, Result};

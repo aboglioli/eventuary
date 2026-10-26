@@ -25,7 +25,10 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   envelope by hand.
 - `AggregateVersion` and `Changes`: `EventCollector::take_changes` hands a
   repository the pending events together with the version it loaded and the
-  version to store, for optimistic concurrency.
+  version to store, for optimistic concurrency. A load advances the version
+  once, however many times it is mutated or saved, and every event it records
+  carries that version in its `aggregate_version` metadata
+  (`AggregateVersion::of`).
 - `TopicPattern::any_of` matches any topic in a non-empty `TopicSet`. The
   PostgreSQL and SQLite readers filter it in SQL, so a consumer of several topics
   no longer reads every event and filters them in memory.
@@ -50,10 +53,11 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Breaking:** `EventCollector` is built for an organization
   (`EventCollector::new(organization)`, or `EventCollector::restored` with the
-  aggregate's stored version) and its pending events leave only through
-  `take_changes`, which advances the version in the same step. `drain`, `list`,
-  `iter`, `len`, `is_empty`, `with` and `Default` are removed; use `pending()`
-  and `has_pending()` to inspect.
+  aggregate's stored version, which fails if it cannot advance) and its pending
+  events leave only through `take_changes`. `collect` returns a `Result`.
+  `drain`, `list`, `iter`, `len`, `is_empty`, `with` and `Default` are removed;
+  use `pending()`, `has_pending()`, `stored_version()` and `next_version()` to
+  inspect.
 
 - **Breaking:** `Event::version()` is replaced by `Event::schema_version()` and
   `Event::spec_version()`, `Event::new` takes both, and `SerializedEvent` has
