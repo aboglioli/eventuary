@@ -216,8 +216,8 @@ pub use multiplexer::{
 };
 pub use rate_limit::{HandlerRateLimit, RateLimitHandler};
 pub use retry::{
-    DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler, RetryPolicy,
-    backoff_delay,
+    DeadLetter, DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler,
+    RetryPolicy, backoff_delay,
 };
 pub use subscriber_work::{
     SubscriberWorkAcker, SubscriberWorkItem, SubscriberWorkReader, SubscriberWorkRoute,

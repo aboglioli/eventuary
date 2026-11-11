@@ -985,6 +985,16 @@ details and the original event payload preserved. The original event's
 `metadata` is copied onto the dead-letter event, so a metadata-carried
 correlation id survives into the dead-letter topic.
 
+The dead-letter payload is the public `DeadLetter` type (`original_event`,
+`original_event_id`, `handler_id`, `attempts`, `error`, `failed_at`), which the
+writer itself serializes; consumers read it back with
+`event.payload().to_json::<DeadLetter>()` instead of defining their own struct.
+
+A failed dead-letter write is returned to the caller, which nacks the event.
+`DeadLetterWriter::with_write_retry(RetryConfig, CancellationToken)` opts in to
+retrying the write with the config's attempts and backoff; cancelling the token
+stops the retry and returns the last error. Without it there is no retry.
+
 ## Handler Multiplexing
 
 `Multiplexer` is a handler that routes one event to every matching subscriber:
