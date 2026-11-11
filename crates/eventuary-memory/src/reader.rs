@@ -238,4 +238,38 @@ mod tests {
         let msg = stream.next().await.unwrap().unwrap();
         assert_eq!(msg.event().payload().user_id, "u-1");
     }
+
+    #[tokio::test]
+    async fn supervised_reader_reopens_a_limited_memory_stream_without_losing_events() {
+        use eventuary_core::io::reader::{SupervisedConfig, SupervisedReader};
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel(3);
+        let config = SupervisedConfig::new(
+            Duration::from_millis(1),
+            Duration::from_millis(4),
+            2.0,
+            Duration::from_secs(60),
+        )
+        .unwrap()
+        .with_restart_on_end();
+        let reader = SupervisedReader::new(MemoryReader::new(rx), config);
+
+        let mut stream = reader
+            .read(MemorySubscription { limit: Some(1) })
+            .await
+            .unwrap();
+
+        for _ in 0..3 {
+            tx.send(ev()).await.unwrap();
+        }
+        for _ in 0..3 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            msg.ack().await.unwrap();
+        }
+    }
 }

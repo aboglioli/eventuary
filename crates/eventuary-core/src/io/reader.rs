@@ -281,6 +281,7 @@ pub mod partitioned;
 pub mod rate_limit;
 pub mod recover;
 pub mod replay_then_live;
+pub mod supervised;
 pub mod timeout;
 pub mod watermark;
 pub mod window;
@@ -319,6 +320,7 @@ pub use replay_then_live::{
     ReplayLiveAcker, ReplayLiveCursor, ReplayThenLiveConfig, ReplayThenLiveReader,
     ReplayThenLiveStream, ReplayThenLiveSubscription,
 };
+pub use supervised::{SupervisedAcker, SupervisedConfig, SupervisedReader};
 pub use timeout::{TimeoutAcker, TimeoutReader, TimeoutStream};
 pub use watermark::{WatermarkAcker, WatermarkReader, WatermarkStore};
 pub use window::WindowReader;

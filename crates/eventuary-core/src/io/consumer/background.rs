@@ -65,7 +65,10 @@ where
         let cancel_for_run = cancel.clone();
         let tracker_for_run = tracker.clone();
         let join = tokio::spawn(async move { self.run(cancel_for_run, tracker_for_run).await });
-        ConsumerHandle { cancel, join }
+        ConsumerHandle {
+            cancel,
+            join: Some(join),
+        }
     }
 
     async fn run(self, cancel: CancellationToken, tracker: TaskTracker) -> Result<()> {
@@ -184,7 +187,7 @@ fn panic_message(panic: &(dyn Any + Send)) -> &str {
 
 pub struct ConsumerHandle {
     cancel: CancellationToken,
-    join: tokio::task::JoinHandle<Result<()>>,
+    join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
 impl ConsumerHandle {
@@ -192,16 +195,29 @@ impl ConsumerHandle {
         self.cancel.cancel();
     }
 
-    pub async fn shutdown(self) -> Result<()> {
-        match self.join.await {
+    pub fn is_finished(&self) -> bool {
+        self.join.as_ref().is_none_or(|join| join.is_finished())
+    }
+
+    pub async fn wait(&mut self) -> Result<()> {
+        let Some(join) = self.join.take() else {
+            return Err(Error::Store("consumer result already taken".into()));
+        };
+        match join.await {
             Ok(result) => result,
             Err(e) => Err(Error::Store(format!("consumer task join error: {e}"))),
         }
     }
 
+    pub async fn shutdown(mut self) -> Result<()> {
+        self.wait().await
+    }
+
     pub fn abort(self) {
         self.cancel.cancel();
-        self.join.abort();
+        if let Some(join) = self.join {
+            join.abort();
+        }
     }
 }
 
@@ -635,5 +651,80 @@ mod tests {
             Some(&ContextValue::String("fragile".to_owned()))
         );
         assert!(second_acker.contexts().is_empty());
+    }
+
+    struct FailingReader;
+
+    impl Reader for FailingReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = NoCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor>>> + Send>>;
+
+        async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
+            Err(Error::Store("unavailable".into()))
+        }
+    }
+
+    struct PendingReader;
+
+    impl Reader for PendingReader {
+        type Subscription = TestSub;
+        type Acker = NoopAcker;
+        type Cursor = NoCursor;
+        type Stream = Pin<Box<dyn Stream<Item = Result<Message<NoopAcker, NoCursor>>> + Send>>;
+
+        async fn read(&self, _: Self::Subscription) -> Result<Self::Stream> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
+
+    fn idle_handler() -> CountingHandler {
+        CountingHandler {
+            id: "h".into(),
+            count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_is_not_finished_while_the_consumer_runs() {
+        let handle =
+            BackgroundConsumer::new(PendingReader, subscription(), idle_handler(), 1).spawn();
+        tokio::task::yield_now().await;
+        assert!(!handle.is_finished());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_returns_the_reader_failure_without_consuming_the_handle() {
+        let mut handle =
+            BackgroundConsumer::new(FailingReader, subscription(), idle_handler(), 1).spawn();
+        let result = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+            .await
+            .unwrap();
+        assert!(result.is_err());
+        assert!(handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn wait_returns_ok_after_stop() {
+        let mut handle =
+            BackgroundConsumer::new(PendingReader, subscription(), idle_handler(), 1).spawn();
+        handle.stop();
+        let result = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+            .await
+            .unwrap();
+        assert!(result.is_ok());
+        assert!(handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn waiting_twice_reports_the_result_was_already_taken() {
+        let mut handle =
+            BackgroundConsumer::new(VecReader::new(vec![]), subscription(), idle_handler(), 1)
+                .spawn();
+        handle.wait().await.unwrap();
+        assert!(handle.wait().await.is_err());
+        assert!(handle.shutdown().await.is_err());
     }
 }

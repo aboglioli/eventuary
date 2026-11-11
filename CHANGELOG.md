@@ -13,6 +13,16 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `DeadLetterWriter::with_write_retry` opts in to a bounded, cancellable retry
   of a failed dead-letter write instead of nacking at once. The default is
   unchanged.
+- `ConsumerHandle::is_finished` and `ConsumerHandle::wait(&mut self)` let a
+  supervisor observe a consumer ending, by reader failure or by `stop`,
+  without consuming the handle. `shutdown` is built on `wait`; a second
+  `wait` or `shutdown` returns `Error::Store`.
+- `SupervisedReader` with `SupervisedConfig`: reopens a failed or refused
+  stream with capped exponential backoff, resets the failure count after a
+  stream stayed healthy for `healthy_after`, resumes from the cursor of the
+  last acknowledged message through `StartableSubscription`, optionally
+  gives up after `max_consecutive_failures`, optionally reopens a stream
+  that ended (`with_restart_on_end`), and stops on a `CancellationToken`.
 
 ### Fixed
 
