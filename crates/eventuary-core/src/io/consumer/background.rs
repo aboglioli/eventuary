@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::marker::PhantomData;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,19 +110,31 @@ where
                                 }
                                 Ok(m) => m,
                             };
-                            let result = match timeout {
-                                Some(d) => {
-                                    match tokio::time::timeout(d, handler.handle(msg.event())).await
-                                    {
-                                        Ok(r) => r,
-                                        Err(_) => Err(Error::Timeout(format!(
-                                            "handler {} timed out",
-                                            handler.id()
-                                        ))),
+                            let handled = AssertUnwindSafe(async {
+                                match timeout {
+                                    Some(d) => {
+                                        match tokio::time::timeout(d, handler.handle(msg.event()))
+                                            .await
+                                        {
+                                            Ok(r) => r,
+                                            Err(_) => Err(Error::Timeout(format!(
+                                                "handler {} timed out",
+                                                handler.id()
+                                            ))),
+                                        }
                                     }
+                                    None => handler.handle(msg.event()).await,
                                 }
-                                None => handler.handle(msg.event()).await,
-                            };
+                            })
+                            .catch_unwind()
+                            .await;
+                            let result = handled.unwrap_or_else(|panic| {
+                                Err(Error::Handler(format!(
+                                    "handler {} panicked: {}",
+                                    handler.id(),
+                                    panic_message(panic.as_ref())
+                                )))
+                            });
                             match result {
                                 Ok(()) => {
                                     let _ = msg.ack().await;
@@ -156,6 +170,16 @@ where
         tracker.wait().await;
         Ok(())
     }
+}
+
+fn panic_message(panic: &(dyn Any + Send)) -> &str {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        return message;
+    }
+    if let Some(message) = panic.downcast_ref::<String>() {
+        return message;
+    }
+    "non-string panic payload"
 }
 
 pub struct ConsumerHandle {
@@ -563,5 +587,53 @@ mod tests {
         let handle = consumer.spawn();
         handle.shutdown().await.unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn handler_panic_is_nacked_and_later_messages_are_still_handled() {
+        struct PanickingFirstHandler {
+            seen: Arc<AtomicUsize>,
+        }
+        impl Handler for PanickingFirstHandler {
+            fn id(&self) -> &str {
+                "fragile"
+            }
+            async fn handle(&self, _: &Event) -> Result<()> {
+                if self.seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("kaboom");
+                }
+                Ok(())
+            }
+        }
+
+        let first_acker = ContextAcker::default();
+        let second_acker = ContextAcker::default();
+        let reader = ContextReader {
+            items: Mutex::new(Some(vec![
+                Ok(Message::new(make_event(0), first_acker.clone(), NoCursor)),
+                Ok(Message::new(make_event(1), second_acker.clone(), NoCursor)),
+            ])),
+        };
+        let seen = Arc::new(AtomicUsize::new(0));
+        let consumer = BackgroundConsumer::new(
+            reader,
+            subscription(),
+            PanickingFirstHandler {
+                seen: Arc::clone(&seen),
+            },
+            1,
+        );
+        let handle = consumer.spawn();
+        handle.shutdown().await.unwrap();
+
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        let contexts = first_acker.contexts();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].reason(), NackReason::HandlerError);
+        assert_eq!(
+            contexts[0].context().get("handler_id"),
+            Some(&ContextValue::String("fragile".to_owned()))
+        );
+        assert!(second_acker.contexts().is_empty());
     }
 }

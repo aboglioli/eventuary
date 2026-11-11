@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `BackgroundConsumer` no longer leaves a message unacknowledged when its
+  handler panics: the panic is reported as a handler error and the message is
+  nacked, so readers that wait for the acknowledgement keep delivering.
+
 ## [0.3.0-rc.5] - 2026-10-26
 
 ### Added
