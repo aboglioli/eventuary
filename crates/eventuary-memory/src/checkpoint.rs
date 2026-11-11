@@ -168,4 +168,177 @@ mod tests {
         store.commit(&k, cursor.clone()).await.unwrap();
         assert_eq!(store.load(&k).await.unwrap(), Some(cursor));
     }
+
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    struct LogCursor(usize);
+
+    impl eventuary_core::io::Cursor for LogCursor {}
+
+    #[derive(Debug, Clone)]
+    struct LogSubscription {
+        start: eventuary_core::StartFrom<LogCursor>,
+    }
+
+    impl eventuary_core::StartableSubscription<LogCursor> for LogSubscription {
+        fn with_start(mut self, start: eventuary_core::StartFrom<LogCursor>) -> Self {
+            self.start = start;
+            self
+        }
+    }
+
+    struct LogReader {
+        log: Arc<Mutex<Vec<eventuary_core::Event>>>,
+    }
+
+    impl LogReader {
+        fn append(&self, key: &str) {
+            let event = eventuary_core::Event::create(
+                "org",
+                "/x",
+                "thing.happened",
+                key,
+                eventuary_core::Payload::from_string("p"),
+            )
+            .unwrap();
+            self.log.lock().unwrap().push(event);
+        }
+
+        fn position(&self, start: &eventuary_core::StartFrom<LogCursor>) -> usize {
+            match start {
+                eventuary_core::StartFrom::After(cursor) => cursor.0,
+                eventuary_core::StartFrom::Earliest => 0,
+                _ => self.log.lock().unwrap().len(),
+            }
+        }
+    }
+
+    impl eventuary_core::io::Reader for LogReader {
+        type Subscription = LogSubscription;
+        type Acker = eventuary_core::io::acker::NoopAcker;
+        type Cursor = LogCursor;
+        type Stream = futures::stream::BoxStream<
+            'static,
+            Result<eventuary_core::io::Message<eventuary_core::io::acker::NoopAcker, LogCursor>>,
+        >;
+
+        async fn read(&self, subscription: LogSubscription) -> Result<Self::Stream> {
+            use futures::StreamExt;
+            let from = self.position(&subscription.start);
+            let messages: Vec<_> = self
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .skip(from)
+                .map(|(index, event)| {
+                    Ok(eventuary_core::io::Message::new(
+                        event.clone(),
+                        eventuary_core::io::acker::NoopAcker,
+                        LogCursor(index + 1),
+                    ))
+                })
+                .collect();
+            Ok(futures::stream::iter(messages).boxed())
+        }
+    }
+
+    #[derive(Clone)]
+    struct LogResolver {
+        log: Arc<Mutex<Vec<eventuary_core::Event>>>,
+    }
+
+    impl eventuary_core::io::reader::StartResolver<LogSubscription, LogCursor> for LogResolver {
+        async fn resolve(&self, _: &LogSubscription) -> Result<LogCursor> {
+            Ok(LogCursor(self.log.lock().unwrap().len()))
+        }
+    }
+
+    fn while_down_event() -> eventuary_core::Event {
+        eventuary_core::Event::create(
+            "org",
+            "/x",
+            "thing.happened",
+            "while-down",
+            eventuary_core::Payload::from_string("p"),
+        )
+        .unwrap()
+    }
+
+    async fn restart_after_appending_while_down<R>(
+        reader: R,
+        log: Arc<Mutex<Vec<eventuary_core::Event>>>,
+    ) -> Vec<String>
+    where
+        R: eventuary_core::io::Reader<
+                Subscription = eventuary_core::io::reader::CheckpointSubscription<LogSubscription>,
+            >,
+        R::Stream: Unpin,
+    {
+        use futures::StreamExt;
+
+        let subscription = || {
+            eventuary_core::io::reader::CheckpointSubscription::new(
+                LogSubscription {
+                    start: eventuary_core::StartFrom::Latest,
+                },
+                scope(),
+            )
+        };
+
+        let first_run = reader.read(subscription()).await.unwrap();
+        drop(first_run);
+        log.lock().unwrap().push(while_down_event());
+
+        let mut second_run = reader.read(subscription()).await.unwrap();
+        let mut keys = Vec::new();
+        while let Some(message) = second_run.next().await {
+            keys.push(message.unwrap().event().key().as_str().to_owned());
+        }
+        keys
+    }
+
+    fn log_reader_with_history() -> LogReader {
+        let reader = LogReader {
+            log: Arc::new(Mutex::new(Vec::new())),
+        };
+        reader.append("before");
+        reader
+    }
+
+    #[tokio::test]
+    async fn a_seeding_reader_keeps_events_appended_while_a_never_acked_group_was_down() {
+        let reader = log_reader_with_history();
+        let log = Arc::clone(&reader.log);
+        let store: MemoryCheckpointStore<LogCursor> = MemoryCheckpointStore::new();
+
+        let keys = restart_after_appending_while_down(
+            eventuary_core::io::reader::SeedingCheckpointReader::new(
+                reader,
+                LogResolver {
+                    log: Arc::clone(&log),
+                },
+                store,
+            ),
+            log,
+        )
+        .await;
+
+        assert_eq!(keys, vec!["while-down".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn a_plain_checkpoint_reader_skips_events_appended_while_a_never_acked_group_was_down() {
+        let reader = log_reader_with_history();
+        let log = Arc::clone(&reader.log);
+        let store: MemoryCheckpointStore<LogCursor> = MemoryCheckpointStore::new();
+
+        let keys = restart_after_appending_while_down(
+            eventuary_core::io::reader::CheckpointReader::new(reader, store),
+            log,
+        )
+        .await;
+
+        assert!(keys.is_empty());
+    }
 }

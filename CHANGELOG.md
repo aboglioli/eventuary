@@ -23,6 +23,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   last acknowledged message through `StartableSubscription`, optionally
   gives up after `max_consecutive_failures`, optionally reopens a stream
   that ended (`with_restart_on_end`), and stops on a `CancellationToken`.
+- `SeedingCheckpointReader` wraps a reader with a `StartResolver` (`PgStartResolver`
+  for Postgres) and a checkpoint store. On the first read of a group with no
+  checkpoint it resolves the subscription's initial position and persists it
+  before reading, so a group started with `StartFrom::Latest` that is stopped
+  before its first ack no longer skips the events appended while it was down.
+  `Reader` and `CheckpointReader` are unchanged.
 
 ### Fixed
 

@@ -10,14 +10,20 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::time::timeout;
 
 use eventuary_core::io::filter::EventFilter;
-use eventuary_core::io::{Reader, Writer};
+use eventuary_core::io::reader::{
+    CheckpointReader, CheckpointScope, CheckpointSubscription, SeedingCheckpointReader,
+};
+use eventuary_core::io::{ConsumerGroupId, Reader, StreamId, Writer};
 use eventuary_core::partition::{EventKeyPartitionKeyResolver, Fnv1a64PartitionHasher};
 use eventuary_core::{
     Event, Metadata, Namespace, NamespacePattern, OrganizationId, Payload, StartFrom, StopAt,
     Topic, TopicPattern,
 };
+use eventuary_postgres::checkpoint::{PgCheckpointStore, PgCheckpointStoreConfig};
 use eventuary_postgres::database::PgDatabase;
-use eventuary_postgres::reader::{PgCursor, PgReader, PgReaderConfig, PgSubscription};
+use eventuary_postgres::reader::{
+    PgCursor, PgReader, PgReaderConfig, PgStartResolver, PgSubscription,
+};
 use eventuary_postgres::writer::{PgPartitioningConfig, PgWriter, PgWriterConfig};
 
 fn writer_config() -> PgWriterConfig {
@@ -615,4 +621,88 @@ async fn stop_at_never_waits_for_future_events() {
         .unwrap()
         .unwrap();
     assert_eq!(msg.event().key().as_str(), "future");
+}
+
+async fn restart_after_appending_while_down<R>(reader: R, writer: &PgWriter) -> Vec<String>
+where
+    R: Reader<Subscription = CheckpointSubscription<PgSubscription>>,
+    R::Stream: Unpin,
+{
+    let subscription = || {
+        CheckpointSubscription::new(
+            PgSubscription {
+                start: StartFrom::Latest,
+                ..sub_for("acme")
+            },
+            CheckpointScope::new(
+                ConsumerGroupId::new("never-acked").unwrap(),
+                StreamId::new("events").unwrap(),
+            ),
+        )
+    };
+
+    let first_run = reader.read(subscription()).await.unwrap();
+    drop(first_run);
+
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "while-down"))
+        .await
+        .unwrap();
+
+    let mut second_run = reader.read(subscription()).await.unwrap();
+    let mut keys = Vec::new();
+    while let Ok(Some(message)) = timeout(Duration::from_millis(500), second_run.next()).await {
+        keys.push(message.unwrap().event().key().as_str().to_owned());
+    }
+    keys
+}
+
+async fn checkpointed_log_with_history() -> (
+    ContainerAsync<GenericImage>,
+    PgWriter,
+    PgReader,
+    PgStartResolver,
+    PgCheckpointStore<PgCursor>,
+) {
+    let (container, pool) = start_postgres().await;
+    let writer = make_writer(pool.clone());
+    writer
+        .write(&ev("acme", "/x", "thing.happened", "before"))
+        .await
+        .unwrap();
+    let store =
+        PgCheckpointStore::<PgCursor>::connect(pool.clone(), PgCheckpointStoreConfig::default())
+            .await
+            .unwrap();
+    let resolver = PgStartResolver::new(pool.clone(), &fast_config());
+    (
+        container,
+        writer,
+        PgReader::new(pool, fast_config()),
+        resolver,
+        store,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seeding_reader_keeps_events_appended_while_a_never_acked_group_was_down() {
+    let (_container, writer, reader, resolver, store) = checkpointed_log_with_history().await;
+
+    let keys = restart_after_appending_while_down(
+        SeedingCheckpointReader::new(reader, resolver, store),
+        &writer,
+    )
+    .await;
+
+    assert_eq!(keys, vec!["while-down".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_checkpoint_reader_skips_events_appended_while_a_never_acked_group_was_down() {
+    let (_container, writer, reader, _resolver, store) = checkpointed_log_with_history().await;
+
+    let keys =
+        restart_after_appending_while_down(CheckpointReader::new(reader, store), &writer).await;
+
+    assert!(keys.is_empty());
 }
