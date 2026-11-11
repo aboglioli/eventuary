@@ -534,6 +534,23 @@ async fn fetch_batch(
         ));
         bind_index += 1;
     }
+    let keys: Option<Vec<String>> = filter
+        .keys
+        .as_ref()
+        .map(|keys| keys.iter().map(|key| key.as_str().to_owned()).collect());
+    if keys.is_some() {
+        sql.push_str(&format!(" AND event_key = ANY(${bind_index}::text[])"));
+        bind_index += 1;
+    }
+    let metadata = filter
+        .metadata
+        .as_ref()
+        .filter(|metadata| !metadata.is_empty())
+        .map(|metadata| serde_json::json!(metadata.as_map()));
+    if metadata.is_some() {
+        sql.push_str(&format!(" AND metadata @> ${bind_index}::jsonb"));
+        bind_index += 1;
+    }
     if lower_bound_ts.is_some() {
         sql.push_str(&format!(" AND timestamp >= ${bind_index}::timestamptz"));
         bind_index += 1;
@@ -571,6 +588,12 @@ async fn fetch_batch(
     }
     if let Some(prefix) = ns_filter {
         q = q.bind(prefix);
+    }
+    if let Some(keys) = keys {
+        q = q.bind(keys);
+    }
+    if let Some(metadata) = metadata {
+        q = q.bind(metadata);
     }
     if let Some(ts) = lower_bound_ts {
         q = q.bind(ts.to_rfc3339());
