@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use chrono::Utc;
-use serde_json::json;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::event::Event;
@@ -104,9 +106,25 @@ pub fn backoff_delay(config: &RetryConfig, attempt: u32) -> Duration {
     Duration::from_secs_f64(capped)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadLetter {
+    pub original_event: SerializedEvent,
+    pub original_event_id: Uuid,
+    pub handler_id: String,
+    pub attempts: u32,
+    pub error: String,
+    pub failed_at: DateTime<Utc>,
+}
+
+struct WriteRetry {
+    config: RetryConfig,
+    cancel: CancellationToken,
+}
+
 pub struct DeadLetterWriter<W, C = PayloadEventCodec<PayloadPassthroughCodec>, P = Payload> {
     writer: W,
     codec: C,
+    write_retry: Option<WriteRetry>,
     _payload: PhantomData<P>,
 }
 
@@ -118,6 +136,7 @@ where
         Self {
             writer,
             codec: PayloadEventCodec::new(PayloadPassthroughCodec),
+            write_retry: None,
             _payload: PhantomData,
         }
     }
@@ -133,8 +152,14 @@ where
         Self {
             writer,
             codec,
+            write_retry: None,
             _payload: PhantomData,
         }
+    }
+
+    pub fn with_write_retry(mut self, config: RetryConfig, cancel: CancellationToken) -> Self {
+        self.write_retry = Some(WriteRetry { config, cancel });
+        self
     }
 
     pub async fn send(
@@ -145,15 +170,14 @@ where
         reason: &str,
     ) -> Result<()> {
         let encoded = self.codec.encode(event)?;
-        let original = SerializedEvent::from_event(&encoded)?.to_json_value();
-        let dead_letter_payload = json!({
-            "original_event": original,
-            "original_event_id": encoded.id().to_string(),
-            "handler_id": handler_id,
-            "attempts": attempts,
-            "error": reason,
-            "failed_at": Utc::now(),
-        });
+        let dead_letter_payload = DeadLetter {
+            original_event: SerializedEvent::from_event(&encoded)?,
+            original_event_id: *encoded.id().as_uuid(),
+            handler_id: handler_id.to_owned(),
+            attempts,
+            error: reason.to_owned(),
+            failed_at: Utc::now(),
+        };
 
         let dead_letter_topic = Topic::new(format!("{}.dead_letter", encoded.topic().as_str()))?;
         let dead_letter_event = Event::builder(
@@ -165,7 +189,28 @@ where
         )?
         .metadata(encoded.metadata().clone())
         .build()?;
-        self.writer.write(&dead_letter_event).await
+        self.write_with_retry(&dead_letter_event).await
+    }
+
+    async fn write_with_retry(&self, event: &Event) -> Result<()> {
+        let Some(retry) = &self.write_retry else {
+            return self.writer.write(event).await;
+        };
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let error = match self.writer.write(event).await {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            if attempt >= retry.config.max_attempts() {
+                return Err(error);
+            }
+            tokio::select! {
+                () = retry.cancel.cancelled() => return Err(error),
+                () = tokio::time::sleep(backoff_delay(&retry.config, attempt)) => {}
+            }
+        }
     }
 }
 
@@ -179,6 +224,7 @@ where
         Self {
             writer,
             codec: PayloadEventCodec::new(codec),
+            write_retry: None,
             _payload: PhantomData,
         }
     }
@@ -424,6 +470,166 @@ mod tests {
         let captured = written.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].topic().as_str(), "thing.happened.dead_letter");
+    }
+
+    struct FlakyWriter {
+        failures_left: AtomicUsize,
+        calls: Arc<AtomicUsize>,
+        events: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl FlakyWriter {
+        fn new(failures: usize) -> Self {
+            Self {
+                failures_left: AtomicUsize::new(failures),
+                calls: Arc::new(AtomicUsize::new(0)),
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl Writer for FlakyWriter {
+        async fn write(&self, event: &Event) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let failing = self
+                .failures_left
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if failing {
+                return Err(Error::Store("write failed".to_owned()));
+            }
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    fn fast_retry(max_attempts: u32) -> RetryConfig {
+        RetryConfig::new(
+            max_attempts,
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+            2.0,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dead_letter_write_without_retry_fails_on_the_first_error() {
+        let writer = FlakyWriter::new(1);
+        let calls = Arc::clone(&writer.calls);
+        let dead_letter = DeadLetterWriter::new(writer);
+
+        let result = dead_letter.send(&make_event(), "h", 3, "boom").await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_write_retries_a_transient_failure() {
+        let writer = FlakyWriter::new(2);
+        let calls = Arc::clone(&writer.calls);
+        let events = Arc::clone(&writer.events);
+        let dead_letter =
+            DeadLetterWriter::new(writer).with_write_retry(fast_retry(5), CancellationToken::new());
+
+        dead_letter
+            .send(&make_event(), "h", 3, "boom")
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_write_gives_up_after_the_configured_attempts() {
+        let writer = FlakyWriter::new(usize::MAX);
+        let calls = Arc::clone(&writer.calls);
+        let dead_letter =
+            DeadLetterWriter::new(writer).with_write_retry(fast_retry(3), CancellationToken::new());
+
+        let result = dead_letter.send(&make_event(), "h", 3, "boom").await;
+
+        assert!(matches!(result, Err(Error::Store(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_write_retry_stops_when_cancelled() {
+        let writer = FlakyWriter::new(usize::MAX);
+        let calls = Arc::clone(&writer.calls);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let config =
+            RetryConfig::new(5, Duration::from_secs(60), Duration::from_secs(60), 2.0).unwrap();
+        let dead_letter = DeadLetterWriter::new(writer).with_write_retry(config, cancel);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            dead_letter.send(&make_event(), "h", 3, "boom"),
+        )
+        .await
+        .expect("cancellation must interrupt the backoff");
+
+        assert!(matches!(result, Err(Error::Store(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn writer_output_deserializes_into_dead_letter() {
+        let writer = CapturingWriter::new();
+        let written = writer.shared();
+        let original = make_event();
+        let dead_letter_writer = DeadLetterWriter::new(writer);
+
+        dead_letter_writer
+            .send(&original, "billing", 4, "boom")
+            .await
+            .unwrap();
+
+        let captured = written.lock().unwrap();
+        let dead_letter: DeadLetter =
+            serde_json::from_value(captured[0].payload().to_json().unwrap()).unwrap();
+        assert_eq!(dead_letter.original_event_id, *original.id().as_uuid());
+        assert_eq!(dead_letter.original_event.id, *original.id().as_uuid());
+        assert_eq!(dead_letter.original_event.topic, "thing.happened");
+        assert_eq!(dead_letter.handler_id, "billing");
+        assert_eq!(dead_letter.attempts, 4);
+        assert_eq!(dead_letter.error, "boom");
+    }
+
+    #[test]
+    fn rc5_dead_letter_json_still_deserializes() {
+        let json = r#"{
+            "original_event": {
+                "id": "0192f0c4-0000-7000-8000-000000000001",
+                "organization": "acme",
+                "namespace": "/x",
+                "topic": "thing.happened",
+                "key": "k",
+                "payload": {"content_type": "text/plain", "data": "p"},
+                "metadata": {"correlation_id": "c-1"},
+                "timestamp": "2026-10-26T10:00:00Z",
+                "schema_version": 1,
+                "spec_version": 1
+            },
+            "original_event_id": "0192f0c4-0000-7000-8000-000000000001",
+            "handler_id": "billing-handler",
+            "attempts": 3,
+            "error": "store error: boom",
+            "failed_at": "2026-10-26T10:00:05.123456Z"
+        }"#;
+
+        let dead_letter: DeadLetter = serde_json::from_str(json).unwrap();
+
+        assert_eq!(dead_letter.handler_id, "billing-handler");
+        assert_eq!(dead_letter.attempts, 3);
+        assert_eq!(dead_letter.original_event.topic, "thing.happened");
+        assert_eq!(
+            dead_letter.original_event_id.to_string(),
+            "0192f0c4-0000-7000-8000-000000000001"
+        );
     }
 
     #[tokio::test]

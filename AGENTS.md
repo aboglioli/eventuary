@@ -1058,7 +1058,13 @@ Worth knowing when changing the codebase:
   `SnapshotEventId` to get JSON snapshotting for free.
 - **`RetryHandler` + `DeadLetterWriter`** ship in core, not in a backend
   crate. Failed events become a new event on topic `<original>.dead_letter`,
-  carrying the original payload + failure metadata.
+  carrying the original payload + failure metadata. The payload is the public
+  `DeadLetter` struct, serialized by the writer and deserialized by consumers,
+  so reader and writer share one definition; rc.5's JSON output must keep
+  deserializing (a literal fixture test guards it). `DeadLetterWriter` does not
+  retry a failed write by default (the error becomes a nack);
+  `with_write_retry(RetryConfig, CancellationToken)` opts in to a bounded,
+  cancellable retry of the write.
 - **UUID v7 everywhere** for time-ordered identifiers.
 - **Core has zero backend feature flags.** `eventuary-core` deliberately
   knows nothing about backends. Feature flags live on the `eventuary`

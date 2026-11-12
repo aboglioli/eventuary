@@ -6,6 +6,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `DeadLetter`, the typed payload of a dead-letter event, serialized by
+  `DeadLetterWriter` and readable by consumers; the JSON shape is unchanged.
+- `DeadLetterWriter::with_write_retry` opts in to a bounded, cancellable retry
+  of a failed dead-letter write instead of nacking at once. The default is
+  unchanged.
+
 ### Fixed
 
 - `BackgroundConsumer` no longer leaves a message unacknowledged when its
