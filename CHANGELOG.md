@@ -36,6 +36,14 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   handler panics: the panic is reported as a handler error and the message is
   nacked, so readers that wait for the acknowledgement keep delivering.
 
+### Changed
+
+- `PgReader` pushes `EventFilter::keys` and `EventFilter::metadata` into the
+  SQL `WHERE` clause, so a keyed read no longer transfers and decodes every
+  row of the namespace above the position. The event log schema gains the
+  `idx_events_org_namespace_key_sequence` index, created idempotently by
+  `prepare_schema` on existing databases.
+
 ## [0.3.0-rc.5] - 2026-10-26
 
 ### Added

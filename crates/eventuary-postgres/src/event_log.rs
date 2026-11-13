@@ -40,10 +40,20 @@ ON {events} (organization, namespace, partition_count, partition_id, sequence)
 WHERE partition_id IS NOT NULL;
 "#;
 
-const EVENT_LOG_MIGRATIONS: &[Migration] = &[Migration {
-    name: "0001_init",
-    sql: EVENT_LOG_0001_INIT_SQL,
-}];
+const EVENT_LOG_0002_KEY_INDEX_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_events_org_namespace_key_sequence ON {events} (organization, namespace, event_key, sequence);
+"#;
+
+const EVENT_LOG_MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "0001_init",
+        sql: EVENT_LOG_0001_INIT_SQL,
+    },
+    Migration {
+        name: "0002_key_index",
+        sql: EVENT_LOG_0002_KEY_INDEX_SQL,
+    },
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct PgEventLogSchemaConfig {
