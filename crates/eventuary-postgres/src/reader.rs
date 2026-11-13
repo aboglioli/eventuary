@@ -14,7 +14,7 @@ use eventuary_core::io::filter::{EventFilter, NamespacePattern};
 use eventuary_core::io::reader::{
     CoordinatedAcker, CoordinatedCursor, CoordinatedReader, CoordinatedReaderConfig,
     CoordinatedStream, CoordinatedSubscription, PartitionAcker, PartitionedCoordAdapter,
-    PartitionedCursor,
+    PartitionedCursor, StartResolver,
 };
 use eventuary_core::io::stream::SpawnedStream;
 use eventuary_core::io::{Acker, Cursor, Filter, Message, Reader};
@@ -354,6 +354,31 @@ impl Reader for PgReader {
         });
 
         Ok(SpawnedStream::new(rx, handle))
+    }
+}
+
+#[derive(Clone)]
+pub struct PgStartResolver {
+    pool: PgPool,
+    events_relation: Arc<String>,
+}
+
+impl PgStartResolver {
+    pub fn new(pool: PgPool, config: &PgReaderConfig) -> Self {
+        Self {
+            pool,
+            events_relation: Arc::new(config.events_relation.render()),
+        }
+    }
+}
+
+impl StartResolver<PgSubscription, PgCursor> for PgStartResolver {
+    async fn resolve(&self, subscription: &PgSubscription) -> Result<PgCursor> {
+        let (sequence, _) =
+            resolve_initial_position(&self.pool, &self.events_relation, subscription).await?;
+        let partition = Partition::new(0, NonZeroU32::new(1).expect("one is non-zero"))
+            .map_err(|e| Error::Store(format!("invalid partition: {e}")))?;
+        Ok(PgCursor::new(sequence, partition))
     }
 }
 
