@@ -9,7 +9,7 @@ local filesystem, SQLite, PostgreSQL, AWS (SQS, SNS), and Apache Kafka. Everythi
 available through the `eventuary` umbrella crate, with backends enabled by Cargo
 features.
 
-> **Status:** `0.2.0` stable; `0.3.0-rc.5` pre-release.
+> **Status:** `0.2.0` stable; `0.3.0-rc.6` pre-release.
 
 Eventuary is a library you embed in your application. It is not a server, broker,
 daemon, or transport runtime.
@@ -21,7 +21,7 @@ features they need. No backend is enabled by default.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.3.0-rc.5", features = ["postgres"] }
+eventuary = { version = "0.3.0-rc.6", features = ["postgres"] }
 ```
 
 Eventuary requires **Rust 1.89** or newer: `eventuary-fs` locks partitions with
@@ -440,7 +440,7 @@ serialization happens.
 
 ```toml
 [dependencies]
-eventuary = { version = "0.3.0-rc.5", features = ["memory"] }
+eventuary = { version = "0.3.0-rc.6", features = ["memory"] }
 ```
 
 ```rust
@@ -517,6 +517,16 @@ Common subscription/config types:
 `StopAt<C>` so callers can choose live tailing (`StopAt::Never`, the default), a
 finite snapshot ending at the current log end (`StopAt::CurrentEnd`), or a
 finite range ending at a specific cursor (`StopAt::Cursor(cursor)`).
+
+`EventFilter` selects by organization, namespace, topic, `keys` and `metadata`.
+`keys` matches an event whose key equals any listed key; an empty list matches
+nothing. `metadata` matches an event that carries every listed entry with an
+equal value; entries the filter does not list are ignored, and an empty
+metadata filter matches everything. Matching is equality only: there is no
+prefix match, no key-exists test and no negation. `PgReader` evaluates
+organization, namespace, topic, `keys` and `metadata` in SQL and still applies
+`EventFilter::matches` to the rows it returns, so the two cannot disagree. The
+SQL `metadata` predicate scans the namespace; only `keys` has a supporting index.
 
 Shared event filtering lives in `eventuary::io::filter::EventFilter`:
 
@@ -620,6 +630,24 @@ logical partition.
 `CheckpointReader` commits only contiguous delivered progress per cursor id. On
 `ack`, it acks the inner message first and then commits the cursor. On `nack`, it
 leaves the checkpoint untouched.
+
+### Seeding the first checkpoint
+
+A group started with `StartFrom::Latest` that is stopped before its first ack has
+no checkpoint, so the next start resolves "latest" again and skips every event
+appended in between. `SeedingCheckpointReader` closes that gap: on the first read
+of a scope with no checkpoint it resolves the subscription's initial position
+through a `StartResolver`, persists it, and then reads as `CheckpointReader`
+does. `PgStartResolver` is the Postgres resolver.
+
+```rust,ignore
+let resolver = PgStartResolver::new(pool.clone(), &reader_config);
+let reader = SeedingCheckpointReader::new(source, resolver, store);
+```
+
+Use one instance per consumer group; with several instances use
+`CoordinatedReader`. `Reader`, `PgReader` and `CheckpointReader` are unchanged:
+the capability is opt-in. Other backends add a `StartResolver` the same way.
 
 ## Partitioned Readers
 
@@ -861,6 +889,8 @@ composed around backend readers.
 | `WindowReader` | Window event delivery |
 | `PartitionedReader` | Route events into deterministic logical lanes |
 | `CheckpointReader` | Persist cursor progress on ack |
+| `SeedingCheckpointReader` | Persist the initial position of a group with no checkpoint before reading, so `StartFrom::Latest` survives a restart before the first ack |
+| `SupervisedReader` | Reopen a failed or refused stream with capped exponential backoff, resuming from the last acknowledged cursor |
 | `CoordinatedReader` | Multi-instance partition ownership over SQL (heartbeat, lease, fenced checkpoint, rebalance) |
 | `OutcomeRouterReader` | Route delivered, acked, and/or nacked events to writers while preserving message lifecycle semantics |
 
@@ -946,7 +976,30 @@ The consumer driver:
 - calls `Handler::handle(&Event)`,
 - acks on success,
 - nacks on handler error or timeout,
-- supports bounded concurrency and graceful shutdown.
+- supports bounded concurrency and graceful shutdown,
+- reports a handler panic as a handler error and nacks the message, so readers
+  that wait for the acknowledgement keep delivering.
+
+`ConsumerHandle::is_finished` and `ConsumerHandle::wait(&mut self)` let a
+supervisor observe a consumer ending, by reader failure or by `stop`, without
+consuming the handle; `shutdown` is built on `wait`.
+
+`SupervisedReader` with `SupervisedConfig` keeps a reader alive for a long
+running consumer: it reopens a failed or refused stream with capped exponential
+backoff, resets the failure count once a stream stayed healthy for
+`healthy_after`, resumes after the last acknowledged cursor, and stops on a
+`CancellationToken`. `with_max_consecutive_failures` makes it give up and
+`with_restart_on_end` reopens a stream that ended.
+
+```rust,ignore
+let config = SupervisedConfig::new(
+    Duration::from_millis(200),
+    Duration::from_secs(30),
+    2.0,
+    Duration::from_secs(60),
+)?;
+let reader = SupervisedReader::new(source, config).with_cancellation(cancel.clone());
+```
 
 Before nacking, `BackgroundConsumer` builds a `NackContext` and calls
 `Message::nack_with`. Handler failures use `NackReason::HandlerError` with the
@@ -1258,7 +1311,14 @@ let db = PgDatabase::connect_with_config(database_url, PgDatabaseConfig {
 ### postgres
 
 - Uses `sqlx` with `runtime-tokio` and Postgres support.
-- `PgReader` polls the configured events relation by sequence.
+- `PgReader` polls the configured events relation by sequence and pushes
+  organization, namespace, topic, `EventFilter::keys` and `EventFilter::metadata`
+  into the `WHERE` clause. The event log schema carries
+  `idx_events_org_namespace_key_sequence` for keyed reads; `prepare_schema`
+  creates it with `CREATE INDEX IF NOT EXISTS`, which blocks writes while it
+  builds on an existing large table.
+- `PgStartResolver` resolves a subscription's initial position for
+  `SeedingCheckpointReader`.
 - `PgCursorAcker` tracks active stream cursor progress in memory.
 - `PgCheckpointStore<C>` persists full cursor JSON keyed by consumer group,
   stream id, and cursor id.
@@ -1425,7 +1485,7 @@ Release procedure:
 # 2. Run `cargo check` so Cargo.lock records the new version.
 # 3. Commit and push the version bump.
 # 4. Create and publish a GitHub Release targeting main.
-#    Use tag v0.3.0-rc.5 and title v0.3.0-rc.5.
+#    Use tag v0.3.0-rc.6 and title v0.3.0-rc.6.
 #    For a pre-release, tick "Set as a pre-release"; the workflow listens on
 #    `published`, which fires for pre-releases too.
 # 5. The publish workflow runs automatically from the release event.
@@ -1434,7 +1494,7 @@ Release procedure:
 Pre-release versions (`-alpha.N`, `-beta.N`, `-rc.N`) follow SemVer: dot-separated
 identifiers of `[0-9A-Za-z-]`, no leading zeros on numeric parts. Cargo will not
 resolve a pre-release from a plain requirement, so `eventuary = "0.3.0"` never
-selects `0.3.0-rc.5` — testers must ask for the exact version, and the
+selects `0.3.0-rc.6` — testers must ask for the exact version, and the
 workspace pins above must carry the same suffix.
 
 A `CARGO_REGISTRY_TOKEN` repository secret is required for publishing.
