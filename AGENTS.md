@@ -581,6 +581,64 @@ stream_id }, cursor_id: CursorId }`. Unpartitioned consumers use
 each lane checkpoints independently.
 
 
+### Adding a Capability to the Reader Stack
+
+A capability is something a wrapper needs from the outside: a start position,
+a place to keep progress, a lease. Before writing code, decide which of these
+shapes it is. The repository already has one for each, and a new capability
+copies the closest one instead of inventing another.
+
+| The capability is... | Shape | Existing examples |
+|----------------------|-------|-------------------|
+| Data the subscription carries and a wrapper rewrites (where to start, which partitions) | A trait on the **subscription**, a `Self -> Self` builder generic over the cursor. Wrappers bound it as `R::Subscription: X<R::Cursor>`; each backend's subscription type implements it. | `StartableSubscription<C>`, `PartitionableSubscription<C>` |
+| Something with I/O or durable state that a wrapper calls (a store, a coordinator, a resolver) | A standalone **collaborator** trait: `Clone + Send + Sync + 'static`, generic over the cursor or subscription it works on, not over the payload unless it handles events. The backend implements it as a `Pg*` / `Sqlite*` type built from its pool and config. The wrapper takes it as a constructor argument. | `CheckpointStore<C>`, `PartitionCoordinator<C>`, `WatermarkStore`, `DedupeStore`, `BufferStore` |
+| Cross-cutting behaviour around a reader | A **wrapper** `XReader<R, ...>` in `eventuary-core/src/io/reader/`, with `new` and `with_config`, bounds on the inner reader's associated types, and its own `Subscription`, `Acker` and `Stream` when it changes them. | `CheckpointReader`, `PartitionedReader`, `RecoverReader`, `SupervisedReader` |
+| Builder sugar on an existing type | An **extension trait** with a blanket impl. Only for adapters such as boxing, never for a capability a backend opts into. | `ReaderExt`, `WriterExt`, `ReaderTypedExt` |
+
+Rules that follow from this:
+
+- **Do not widen `Reader`, `Writer`, `Handler` or `Acker` for something one
+  backend can do.** A new method on a core trait needs a forwarding impl on
+  `Arc<T>` and `Box<T>`, a dyn-bridge counterpart and a decision in every
+  wrapper. A default that returns "unsupported" also turns a missing
+  capability into a runtime error. An additive default method is fine only
+  when the default is a real, correct behaviour (`Acker::nack_with` falls back
+  to `nack`).
+- **Do not make a capability a supertrait of `Reader`.** Supertraits of
+  `Reader` are extension traits. A capability that needs I/O is a collaborator
+  passed to the wrapper, so the type system rejects a mismatched resolver,
+  store or coordinator at compile time.
+- **Let the types prove compatibility.** The collaborator is generic over the
+  same `Subscription` and `Cursor` as the reader it serves, so a combination
+  that cannot work does not compile. Do not add a runtime "this reader does not
+  support it" error.
+- **A wrapper that composes another wrapper holds it.** Build the inner wrapper
+  in the constructor and delegate `read` to it (`CheckpointReader` inside a
+  seeding or supervising reader) instead of copying its logic or reaching into
+  its fields.
+- **Backends stay opt-in.** Only the backends that can implement a collaborator
+  ship one. The others are not touched, and nothing breaks for them.
+
+Checklist for a new capability:
+
+1. Pick the shape from the table. If none fits, say why in the PR before
+   adding a fifth.
+2. Put the trait and the wrapper in `eventuary-core/src/io/reader/<name>.rs`,
+   register the module and re-export from `reader.rs`.
+3. Implement the collaborator in the backend crate next to its sibling
+   (`checkpoint.rs`, `coordinator.rs`, `reader.rs`), built from the pool and
+   config the way `PgCheckpointStore` is. Route driver errors through the
+   backend's error module.
+4. Test in core with in-file fakes (no shared helper files), in
+   `eventuary-memory` against a real in-memory log where it applies, and in each
+   backend that implements it against its real database. Remove the fix once and
+   confirm the test fails.
+5. Add a `CHANGELOG.md` entry under `[Unreleased]` and a Decisions Log entry when
+   the choice between shapes was not obvious.
+6. Keep the change in one PR on its own `feat/` or `fix/` branch from `main`.
+   Branches that touch `CHANGELOG.md`, `reader.rs` or `background.rs` conflict
+   when merged out of order; merge them one at a time and rebase the rest.
+
 ### Writer and Handler Composition Wrappers
 
 Writer wrappers live in `eventuary-core/src/io/writer/` and compose around any
@@ -1034,6 +1092,15 @@ Worth knowing when changing the codebase:
 - **FNV-1a partition hash on `EventKey`.** Deterministic and stable
   across machines and language ports; same key always routes to the
   same partition.
+- **A capability is its own trait, not a method on `Reader`.** Seeding a
+  checkpoint, supervising a stream or resolving a start position all need
+  something the core `Reader` cannot give. Putting that on `Reader` would force a
+  forwarding impl on `Arc` and `Box`, a dyn-bridge counterpart and a runtime
+  "unsupported" answer for every backend that cannot do it. Capabilities follow
+  the shapes in "Adding a Capability to the Reader Stack": a trait on the
+  subscription for data a wrapper rewrites, a collaborator trait for I/O and
+  durable state, a wrapper for behaviour. Unsupported combinations then fail to
+  compile.
 - **Reader composition over universal subscription.** Source readers do
   one job (deliver from the log with their native cursor). Lane fanout
   is `PartitionedReader<R>` in core; durable consumer progress is
