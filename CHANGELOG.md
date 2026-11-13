@@ -6,6 +6,12 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0-rc.6] - 2026-11-13
+
+Documentation for the features below is in `README.md` and `AGENTS.md`,
+including the filter semantics of `EventFilter::keys` and
+`EventFilter::metadata`.
+
 ### Added
 
 - `DeadLetter`, the typed payload of a dead-letter event, serialized by

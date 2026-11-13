@@ -7,7 +7,7 @@ Eventuary started life as `orchy-events` inside the [orchy](https://github.com/a
 project and was extracted as a standalone library so other Rust projects can
 reuse the same event-sourcing primitives and reader/writer abstractions.
 
-> **Status:** `0.2.0` stable; `0.3.0-rc.5` pre-release.
+> **Status:** `0.2.0` stable; `0.3.0-rc.6` pre-release.
 
 ## What Eventuary Provides
 
@@ -36,7 +36,7 @@ The top-level `eventuary` crate is an **umbrella facade**: it re-exports
 feature flag. Typical consumers add a single line to their `Cargo.toml`:
 
 ```toml
-eventuary = { version = "0.3.0-rc.5", features = ["postgres"] }
+eventuary = { version = "0.3.0-rc.6", features = ["postgres"] }
 ```
 
 The workspace sets `rust-version = "1.89"`; `eventuary-fs` locks partitions with
@@ -108,6 +108,8 @@ crates/
 │           │   ├── buffer.rs           # BufferedReader + BufferStore trait + BufferAcker + BufferEntry
 │           │   ├── partitioned.rs     # PartitionedReader (source/delivery constructors) + PartitionedCursor + LaneScheduling
 │           │   ├── coordinated.rs     # CoordinatedReader + PartitionCoordinator + PartitionLease + Generation
+│           │   ├── seeding.rs         # SeedingCheckpointReader + StartResolver (opt-in: persist the initial position of a group with no checkpoint)
+│           │   ├── supervised.rs      # SupervisedReader + SupervisedConfig + SupervisedAcker (capped-backoff reopen, resume after the last acked cursor)
 │           │   └── checkpoint.rs      # CheckpointReader + CheckpointAcker + CheckpointStore trait + CheckpointKey/Scope + MissingCheckpointPolicy / InvalidCursorPolicy
 │           ├── acker.rs    # Acker trait + Dyn/Box/Arc + AckerExt + submod owner
 │           ├── acker/
@@ -124,10 +126,10 @@ crates/
 │           │   ├── rate_limit.rs # RateLimitHandler + HandlerRateLimit
 │           │   ├── multiplexer.rs # Multiplexer + SubscriberId + MultiplexerStore
 │           │   ├── subscriber_work.rs # SubscriberWorkRouter
-│           │   └── retry.rs      # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetterWriter
+│           │   └── retry.rs      # RetryHandler + RetryPolicy + DefaultRetryPolicy + RetryConfig + RetryAction + backoff_delay + DeadLetter + DeadLetterWriter (opt-in with_write_retry)
 │           ├── consumer.rs # BackgroundConsumer + ConsumerHandle re-exports (submod owner)
 │           ├── consumer/
-│           │   └── background.rs # BackgroundConsumer + ConsumerHandle
+│           │   └── background.rs # BackgroundConsumer (nacks a panicking handler) + ConsumerHandle (stop / is_finished / wait / shutdown)
 │           ├── stream.rs   # BatchedStream + SpawnedStream re-exports (submod owner)
 │           ├── stream/
 │           │   ├── batched.rs # BatchedStream
@@ -427,8 +429,18 @@ each `BatchedAcker` carries a token (receipt handle for SQS,
 - Acks on `Handler::handle` success.
 - Nacks on `Err(_)` or per-call timeout (`with_handler_timeout`).
 - Bounded concurrency (`for_each_concurrent`).
+- A handler panic is caught and reported as `Error::Handler`, then nacked.
 - Cancellation via `CancellationToken`; in-flight handlers tracked by
   `TaskTracker` for graceful shutdown.
+- `ConsumerHandle::is_finished` and `wait(&mut self)` observe the consumer
+  ending without consuming the handle; `shutdown` is built on `wait`, and a
+  second `wait` or `shutdown` returns `Error::Store`.
+
+Long-running consumers wrap their reader in `SupervisedReader` (capped
+exponential backoff, failure count reset after `healthy_after`, resume through
+`StartableSubscription` from the last acknowledged cursor). A first checkpoint
+for a `StartFrom::Latest` group is seeded by `SeedingCheckpointReader` with a
+`StartResolver` (`PgStartResolver`), assuming one instance per group.
 
 For retries, wrap the handler with `RetryHandler<H, P, W>` and provide a
 `RetryPolicy` (default: exponential backoff, then dead-letter). Failed
@@ -505,6 +517,11 @@ single source. Cross-cutting concerns live in generic core wrappers in
 
   Cursor bound contract: `R::Cursor: Cursor + Clone + Ord + Send + Sync
   + 'static`.
+
+- `SeedingCheckpointReader<R, X, S>` holds a `CheckpointReader<R, S>` and a
+  `StartResolver<S, C>`. When `load_scope` finds nothing it resolves the
+  subscription's initial cursor, commits it, then delegates; otherwise it
+  delegates directly. `CheckpointReader` is not changed.
 
 - `Cursor` is the cursor-introspection trait. Every reader's cursor type
   implements it. `Cursor::id() -> CursorId` returns `CursorId::Global`
@@ -721,7 +738,14 @@ Columns follow one order in every table: identity and keys first, then the conte
 - `sqlx` with `runtime-tokio`. `pgvector` not required (that's an orchy concern).
 - `PgReader` is a source reader over the configured events relation. It
   returns `Message<PgCursorAcker, PgCursor>` and only tracks cursor
-  progress in memory for the active stream.
+  progress in memory for the active stream. `fetch_batch` pushes the
+  organization, namespace, topic, `EventFilter::keys` (`event_key = ANY`) and
+  `EventFilter::metadata` (`metadata @> jsonb`, subset containment) into SQL
+  and the reader still runs `EventFilter::matches` on what it gets, so SQL and
+  Rust semantics cannot drift apart silently. Migration `0002_key_index` adds
+  `idx_events_org_namespace_key_sequence`.
+- `PgStartResolver` reuses the reader's `resolve_initial_position` for
+  `SeedingCheckpointReader`.
 - `PgCheckpointStore<C>` owns the configured offsets relation and
   persists the full inner cursor as JSON (typically `PgCursor` for a raw
   source reader, or `PartitionedCursor<PgCursor>` when composed under a
@@ -1536,7 +1560,7 @@ to [trusted publishing] is a future improvement.
 # 2. Run `cargo check` so Cargo.lock records the new version.
 # 3. Commit + push (maintainer)
 # 4. Create and publish a GitHub Release targeting main.
-#    Use tag v0.3.0-rc.5 and title v0.3.0-rc.5.
+#    Use tag v0.3.0-rc.6 and title v0.3.0-rc.6.
 #    For a pre-release, tick "Set as a pre-release"; the workflow listens on
 #    `published`, which fires for pre-releases too.
 # 5. Publish workflow runs automatically from the release event.
@@ -1545,7 +1569,7 @@ to [trusted publishing] is a future improvement.
 Pre-release versions (`-alpha.N`, `-beta.N`, `-rc.N`) follow SemVer: dot-separated
 identifiers of `[0-9A-Za-z-]`, no leading zeros on numeric parts. Cargo will not
 resolve a pre-release from a plain requirement, so `eventuary = "0.3.0"` never
-selects `0.3.0-rc.5` — testers must ask for the exact version, and the
+selects `0.3.0-rc.6` — testers must ask for the exact version, and the
 workspace pins above must carry the same suffix.
 
 [trusted publishing]: https://crates.io/docs/trusted-publishing
