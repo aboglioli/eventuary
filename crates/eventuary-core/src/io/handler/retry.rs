@@ -14,6 +14,8 @@ use crate::payload_codec::{EventCodec, PayloadCodec, PayloadEventCodec, PayloadP
 use crate::serialization::SerializedEvent;
 use crate::topic::Topic;
 
+pub const DEAD_LETTER_TOPIC_SUFFIX: &str = ".dead_letter";
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     max_attempts: u32,
@@ -179,7 +181,10 @@ where
             failed_at: Utc::now(),
         };
 
-        let dead_letter_topic = Topic::new(format!("{}.dead_letter", encoded.topic().as_str()))?;
+        let dead_letter_topic = Topic::new(format!(
+            "{}{DEAD_LETTER_TOPIC_SUFFIX}",
+            encoded.topic().as_str()
+        ))?;
         let dead_letter_event = Event::builder(
             encoded.organization().as_str(),
             encoded.namespace().as_str(),
