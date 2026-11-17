@@ -6,6 +6,8 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0-rc.7] - 2026-11-17
+
 ### Added
 
 - `domain_event!` implements `DomainEvent` for a payload struct from its
