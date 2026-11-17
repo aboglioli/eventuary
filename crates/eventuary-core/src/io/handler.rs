@@ -200,6 +200,7 @@ mod tests {
     }
 }
 
+pub mod catch_panic;
 pub mod filtered;
 pub mod inspect;
 pub mod multiplexer;
@@ -208,6 +209,7 @@ pub mod retry;
 pub mod subscriber_work;
 pub mod timeout;
 
+pub use catch_panic::CatchPanicHandler;
 pub use filtered::FilteredHandler;
 pub use inspect::{InspectHandler, InspectHandlerHooks};
 pub use multiplexer::{

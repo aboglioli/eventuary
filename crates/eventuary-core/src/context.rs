@@ -51,6 +51,7 @@ impl From<&Error> for ContextError {
             Error::Store(m) => ("store", m.clone()),
             Error::Contended(m) => ("contended", m.clone()),
             Error::Handler(m) => ("handler", m.clone()),
+            Error::HandlerPanicked(m) => ("handler_panicked", m.clone()),
             Error::Timeout(m) => ("timeout", m.clone()),
             Error::Config(m) => ("config", m.clone()),
         };
@@ -238,6 +239,14 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_handler_panic_has_its_own_error_kind() {
+        let error = ContextError::from(Error::HandlerPanicked("boom".to_owned()));
+
+        assert_eq!(error.kind(), "handler_panicked");
+        assert_eq!(error.message(), "boom");
+    }
 
     #[test]
     fn context_with_accepts_common_value_types() {
