@@ -122,6 +122,8 @@ crates/
 │           ├── handler/
 │           │   ├── filtered.rs   # FilteredHandler
 │           │   ├── timeout.rs    # TimeoutHandler
+│           │   ├── catch_panic.rs # CatchPanicHandler (a panic becomes Error::HandlerPanicked)
+│           │   ├── dead_letter_replay.rs # PendingDeadLetter + DeadLetterReplayed + REPLAYED_TOPIC (handle a dead letter again, build its marker)
 │           │   ├── inspect.rs    # InspectHandler + InspectHandlerHooks
 │           │   ├── rate_limit.rs # RateLimitHandler + HandlerRateLimit
 │           │   ├── multiplexer.rs # Multiplexer + SubscriberId + MultiplexerStore
@@ -140,6 +142,7 @@ crates/
 │           ├── cursor.rs   # Cursor trait + CursorId value-object newtype + NoCursor
 │           ├── message.rs  # Message<A, C> (event + acker + cursor; Event by value)
 │           ├── stream_id.rs       # StreamId
+│           ├── subscriber.rs      # Subscriber (a handler bound to its consumer group, organization and topics)
 │           ├── owner_id.rs        # OwnerId (coordinated-reader instance identity)
 │           └── consumer_group_id.rs # ConsumerGroupId (1..=64 chars of a-z 0-9 - _ ., letter or digit at both ends, no `..`)
 │
@@ -197,7 +200,9 @@ Aggregate.mutate() -> EventCollector.record(typed_event, timestamp)
 ```
 
 - A typed fact implements `DomainEvent` (`NAMESPACE`, `TOPIC`,
-  `SCHEMA_VERSION`, `key()`); `record` turns it into an `Event` with a JSON
+  `SCHEMA_VERSION`, `key()`), declared in one line with the `domain_event!` macro
+  (`domain_event!(Placed, "/orders", "order.placed", key = order_id)`, a dotted path
+  such as `key = header.order_id`, and `schema = 2` before `key` when the version is not 1); `record` turns it into an `Event` with a JSON
   payload, the collector's organization and the given timestamp. A failed
   `record` leaves the collector unchanged. `collect(Event)` takes an event built
   by hand.
@@ -682,6 +687,7 @@ Handler wrappers live in `eventuary-core/src/io/handler/` and compose around any
 |---|---|
 | `FilteredHandler<H, F>` | Skip handler execution when the filter does not match. |
 | `TimeoutHandler<H>` | Bound handler execution with `Error::Timeout`. |
+| `CatchPanicHandler<H>` | Turn a panic in the inner handler into `Error::HandlerPanicked`; `DefaultRetryPolicy` dead-letters it at once, because the same event would panic again. |
 | `InspectHandler<H, Hooks>` | Observability hooks for handler start, success, error, and elapsed duration. |
 | `RateLimitHandler<H>` | Serialize handler calls through a calls-per-second rate limit. |
 | `RetryHandler<H, P, W>` | Retry handler failures and optionally write a dead-letter event after policy exhaustion. |
@@ -725,6 +731,8 @@ InvalidConsumerGroupId / InvalidStartFrom — validation
 Serialization                                — encode/decode
 Store                                        — backend-side
 Timeout                                      — handler timeout, etc.
+Handler / HandlerPanicked                    — a handler's failure; a handler's panic
+                                               (CatchPanicHandler)
 Config                                       — invalid backend config or
                                                contradictory subscription
 ```
@@ -1099,6 +1107,19 @@ No `prelude` module is provided by design — importing through these paths is t
 
 Worth knowing when changing the codebase:
 
+- **Dead letters have a replay protocol, not a replay runner.** `PendingDeadLetter` reads a
+  dead-letter event back, handles its original event with the handler that failed, and builds
+  the `dead_letter.replayed` marker (key: the dead letter's id). Finding the dead letters that
+  have no marker yet is the backend's query, and excluding two concurrent replays is the
+  caller's lock; a generic runner would have to invent both.
+- **A panic is its own error.** `Error::HandlerPanicked` lets a retry policy tell a deterministic
+  failure from a transient one. `BackgroundConsumer` still turns an unguarded panic into a plain
+  `Error::Handler` nack, so existing consumers behave as before.
+- **`Subscriber` is a description, not a runtime.** It bundles what a consumer needs to be
+  started (group, handler, filter, start-at-latest) and knows no backend.
+- **No lineage helper.** The context-propagation pattern (a task-local correlation and causation
+  stamped into metadata) stays in applications: eventuary reserves no metadata keys (see Lineage
+  in Metadata).
 - **AFIT over `async-trait`.** Native `impl Future` return types for all
   IO traits; `async-trait` is intentionally absent. The dyn bridge
   (`DynWriter`, `DynReader`, …) provides type-erased variants that still
