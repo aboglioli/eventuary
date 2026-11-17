@@ -6,6 +6,30 @@ this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `domain_event!` implements `DomainEvent` for a payload struct from its
+  namespace, topic and key field (`key = order_id` or `key = header.order_id`),
+  with an optional `schema = N` for a `SCHEMA_VERSION` other than 1.
+- `Subscriber` (`eventuary::io::Subscriber`) binds a handler to its consumer
+  group, the filter of one organization and a set of topics, and whether a new
+  group starts at the latest event. `Subscriber::platform` is the
+  `_platform` organization.
+- `CatchPanicHandler` turns a panic in the inner handler into the new
+  `Error::HandlerPanicked`. `DefaultRetryPolicy` dead-letters that error on the
+  first attempt instead of spending the retry budget on a deterministic failure.
+- `PendingDeadLetter`, `DeadLetterReplayed`, `REPLAYED_TOPIC` and
+  `DEAD_LETTER_TOPIC_SUFFIX`: read a dead-letter event back, handle its original
+  event with the handler that failed (`replay`) and build the
+  `dead_letter.replayed` marker. Finding the pending dead letters stays with the
+  backend.
+
+### Changed
+
+- `Error` has a new variant, `HandlerPanicked`, and `ContextError` maps it to
+  the kind `handler_panicked`. Code that matches `Error` exhaustively adds an
+  arm.
+
 ## [0.3.0-rc.6] - 2026-11-13
 
 Documentation for the features below is in `README.md` and `AGENTS.md`,

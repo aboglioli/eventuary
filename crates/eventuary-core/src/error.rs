@@ -50,6 +50,9 @@ pub enum Error {
     #[error("handler error: {0}")]
     Handler(String),
 
+    #[error("handler panicked: {0}")]
+    HandlerPanicked(String),
+
     #[error("timeout: {0}")]
     Timeout(String),
 

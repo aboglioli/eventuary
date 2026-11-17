@@ -14,6 +14,8 @@ use crate::payload_codec::{EventCodec, PayloadCodec, PayloadEventCodec, PayloadP
 use crate::serialization::SerializedEvent;
 use crate::topic::Topic;
 
+pub const DEAD_LETTER_TOPIC_SUFFIX: &str = ".dead_letter";
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     max_attempts: u32,
@@ -90,7 +92,7 @@ pub struct DefaultRetryPolicy;
 
 impl RetryPolicy for DefaultRetryPolicy {
     fn classify(&self, error: &Error, attempt: u32, max_attempts: u32) -> RetryAction {
-        if attempt >= max_attempts {
+        if matches!(error, Error::HandlerPanicked(_)) || attempt >= max_attempts {
             return RetryAction::DeadLetter(error.to_string());
         }
         RetryAction::Retry
@@ -179,7 +181,10 @@ where
             failed_at: Utc::now(),
         };
 
-        let dead_letter_topic = Topic::new(format!("{}.dead_letter", encoded.topic().as_str()))?;
+        let dead_letter_topic = Topic::new(format!(
+            "{}{DEAD_LETTER_TOPIC_SUFFIX}",
+            encoded.topic().as_str()
+        ))?;
         let dead_letter_event = Event::builder(
             encoded.organization().as_str(),
             encoded.namespace().as_str(),
@@ -403,6 +408,30 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn the_default_policy_dead_letters_a_panic_at_once_and_retries_other_failures_until_the_last_attempt()
+     {
+        let panic = Error::HandlerPanicked("handler h panicked: boom".to_owned());
+        let other = Error::Store("down".to_owned());
+
+        assert_eq!(
+            DefaultRetryPolicy.classify(&panic, 1, 5),
+            RetryAction::DeadLetter("handler panicked: handler h panicked: boom".to_owned())
+        );
+        assert_eq!(
+            DefaultRetryPolicy.classify(&other, 1, 5),
+            RetryAction::Retry
+        );
+        assert_eq!(
+            DefaultRetryPolicy.classify(&other, 4, 5),
+            RetryAction::Retry
+        );
+        assert_eq!(
+            DefaultRetryPolicy.classify(&other, 5, 5),
+            RetryAction::DeadLetter("store error: down".to_owned())
+        );
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -10,6 +9,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::error::{Error, Result};
 use crate::io::acker::NackContext;
+use crate::io::handler::catch_panic::panic_message;
 use crate::io::{Handler, Reader};
 use crate::payload::Payload;
 
@@ -173,16 +173,6 @@ where
         tracker.wait().await;
         Ok(())
     }
-}
-
-fn panic_message(panic: &(dyn Any + Send)) -> &str {
-    if let Some(message) = panic.downcast_ref::<&str>() {
-        return message;
-    }
-    if let Some(message) = panic.downcast_ref::<String>() {
-        return message;
-    }
-    "non-string panic payload"
 }
 
 pub struct ConsumerHandle {

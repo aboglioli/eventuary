@@ -174,6 +174,10 @@ assert_eq!(changes.version(), AggregateVersion::FIRST);
 assert_eq!(changes.events().len(), 1);
 ```
 
+The `impl DomainEvent` above is one line with the `domain_event!` macro:
+`domain_event!(OrderPlaced, "/orders", "order.placed", key = order_id);`
+(`key = header.order_id` reads a nested field, `schema = 2` sets `SCHEMA_VERSION`).
+
 `EventCollector::restored(organization, version)` rebuilds the collector of an
 aggregate loaded from storage. A load advances the version exactly once: its
 `take_changes` expects the loaded version and returns the following one, so the

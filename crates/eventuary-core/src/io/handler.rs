@@ -200,6 +200,8 @@ mod tests {
     }
 }
 
+pub mod catch_panic;
+pub mod dead_letter_replay;
 pub mod filtered;
 pub mod inspect;
 pub mod multiplexer;
@@ -208,6 +210,8 @@ pub mod retry;
 pub mod subscriber_work;
 pub mod timeout;
 
+pub use catch_panic::CatchPanicHandler;
+pub use dead_letter_replay::{DeadLetterReplayed, PendingDeadLetter, REPLAYED_TOPIC};
 pub use filtered::FilteredHandler;
 pub use inspect::{InspectHandler, InspectHandlerHooks};
 pub use multiplexer::{
@@ -216,8 +220,8 @@ pub use multiplexer::{
 };
 pub use rate_limit::{HandlerRateLimit, RateLimitHandler};
 pub use retry::{
-    DeadLetter, DeadLetterWriter, DefaultRetryPolicy, RetryAction, RetryConfig, RetryHandler,
-    RetryPolicy, backoff_delay,
+    DEAD_LETTER_TOPIC_SUFFIX, DeadLetter, DeadLetterWriter, DefaultRetryPolicy, RetryAction,
+    RetryConfig, RetryHandler, RetryPolicy, backoff_delay,
 };
 pub use subscriber_work::{
     SubscriberWorkAcker, SubscriberWorkItem, SubscriberWorkReader, SubscriberWorkRoute,
