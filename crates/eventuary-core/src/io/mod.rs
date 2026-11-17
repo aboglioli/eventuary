@@ -13,6 +13,7 @@ pub mod position;
 pub mod reader;
 pub mod stream;
 pub mod stream_id;
+pub mod subscriber;
 pub mod writer;
 
 pub use acker::{Acker, AckerExt, ArcAcker, BoxAcker, DynAcker};
@@ -29,6 +30,7 @@ pub use message::Message;
 pub use owner_id::OwnerId;
 pub use position::{PartitionableSubscription, StartFrom, StartableSubscription, StopAt};
 pub use stream_id::StreamId;
+pub use subscriber::Subscriber;
 
 #[cfg(test)]
 mod tests {
